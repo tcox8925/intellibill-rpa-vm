@@ -1,0 +1,54 @@
+# FastAPI core
+# python version 3.12
+fastapi==0.115.0
+uvicorn[standard]==0.30.6
+gunicorn
+cryptography==41.0.7
+python-multipart
+numpy
+faiss-cpu
+pytz
+
+# Environment & Settings
+python-dotenv==1.0.1
+pydantic-settings==2.5.2
+pydantic[email]==2.7.0
+python-multipart==0.0.20
+
+ringcentral
+
+# Excel export
+openpyxl
+
+# Database
+SQLAlchemy==2.0.34
+psycopg2-binary==2.9.9
+pyodbc
+
+# Security & Auth
+passlib[bcrypt]==1.7.4
+pyjwt==2.9.0
+
+# Utils
+httpx==0.27.2   # for async requests (optional, testing or API calls)
+sqlparse==0.5.5  # SQL parsing for JAI v2 validation tool
+PyMuPDF
+# pytesseract
+Pillow
+pydub
+pandas
+apscheduler
+
+# Cloud
+azure-identity<1.15.0
+azure-keyvault-secrets 
+azure-cognitiveservices-speech
+azure-ai-projects
+azure-storage-blob
+logger
+openai
+azure-communication-email
+azure-mgmt-communication
+azure-ai-documentintelligence
+msgraph-sdk
+azure-ai-agents

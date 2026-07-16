@@ -1,0 +1,93 @@
+<html><body style="font-family: Segoe UI, Calibri, Arial, sans-serif; font-size: 14px; color: #1a1a1a; line-height: 1.5; max-width: 800px;">
+
+    <div style="border-bottom: 3px solid #2b579a; padding-bottom: 12px; margin-bottom: 16px;">
+        <h2 style="margin: 0; color: #2b579a; font-size: 20px;">ACU Processing Report [TEST]</h2>
+        <span style="color: #666; font-size: 13px;">Run Date: 04162026</span>
+    </div>
+
+    <table style="width: 100%; border-collapse: collapse; margin-bottom: 20px; background: #f5f7fa; border-radius: 4px;">
+        <tr>
+            <td style="padding: 12px 16px; text-align: center; border-right: 1px solid #dde1e6;">
+                <div style="font-size: 22px; font-weight: 600; color: #2b579a;">9</div>
+                <div style="font-size: 11px; color: #666; text-transform: uppercase;">Carriers</div>
+            </td>
+            <td style="padding: 12px 16px; text-align: center; border-right: 1px solid #dde1e6;">
+                <div style="font-size: 22px; font-weight: 600; color: #2b579a;">50,717</div>
+                <div style="font-size: 11px; color: #666; text-transform: uppercase;">Rows</div>
+            </td>
+            <td style="padding: 12px 16px; text-align: center; border-right: 1px solid #dde1e6;">
+                <div style="font-size: 22px; font-weight: 600; color: #2b579a;">41,323</div>
+                <div style="font-size: 11px; color: #666; text-transform: uppercase;">Agents</div>
+            </td>
+            <td style="padding: 12px 16px; text-align: center; border-right: 1px solid #dde1e6;">
+                <div style="font-size: 22px; font-weight: 600; color: #c4314b;">8,634</div>
+                <div style="font-size: 11px; color: #666; text-transform: uppercase;">Exceptions (17.0%)</div>
+            </td>
+            <td style="padding: 12px 16px; text-align: center;">
+                <div style="font-size: 22px; font-weight: 600; color: #666;">69,159</div>
+                <div style="font-size: 11px; color: #666; text-transform: uppercase;">Missing</div>
+            </td>
+        </tr>
+    </table>
+
+    <div style="margin-bottom: 16px;">
+        <div style="font-weight: 600; font-size: 13px; color: #d48806; text-transform: uppercase; letter-spacing: 0.5px; padding-bottom: 4px; border-bottom: 1px solid #eee; margin-bottom: 8px;">Awaiting Mapping Review (1)</div>
+        <ul style='margin: 4px 0; padding-left: 20px;'><li style='margin: 3px 0; color: #1a1a1a;'>raw_acu_ameritas_lif_04152026.csv: 16 columns <span style='color:#888;'>(pending_review, detected 2026-04-15)</span></li></ul>
+    </div>
+
+    <div style="margin-bottom: 16px;">
+        <div style="font-weight: 600; font-size: 13px; color: #c4314b; text-transform: uppercase; letter-spacing: 0.5px; padding-bottom: 4px; border-bottom: 1px solid #eee; margin-bottom: 8px;">Zero Matched Agents</div>
+        <ul style='margin: 4px 0; padding-left: 20px;'><li style='margin: 3px 0; color: #1a1a1a;'><strong>AllState</strong>: 523 rows in file, 0 agents matched <span style='color:#888;'>(success)</span></li></ul>
+    </div>
+
+    <div style="margin-bottom: 16px;">
+        <div style="font-weight: 600; font-size: 13px; color: #c4314b; text-transform: uppercase; letter-spacing: 0.5px; padding-bottom: 4px; border-bottom: 1px solid #eee; margin-bottom: 8px;">High Exception Carriers</div>
+        
+        <table style="width: 100%; border-collapse: collapse; font-size: 13px;">
+            <tr style="background: #f5f7fa;">
+                <th style="padding: 8px 10px; text-align: left; font-weight: 600; border-bottom: 2px solid #dde1e6;">Carrier</th>
+                <th style="padding: 8px 10px; text-align: right; font-weight: 600; border-bottom: 2px solid #dde1e6;">Agents</th>
+                <th style="padding: 8px 10px; text-align: right; font-weight: 600; border-bottom: 2px solid #dde1e6;">Exceptions</th>
+                <th style="padding: 8px 10px; text-align: right; font-weight: 600; border-bottom: 2px solid #dde1e6;">Contracts (Coverage)</th>
+                <th style="padding: 8px 10px; text-align: left; font-weight: 600; border-bottom: 2px solid #dde1e6;">Primary Type</th>
+            </tr>
+            <tr>
+                <td style="padding: 6px 10px; border-bottom: 1px solid #eee;">CHRISTUS - MDC</td>
+                <td style="padding: 6px 10px; border-bottom: 1px solid #eee; text-align: right;">123</td>
+                <td style="padding: 6px 10px; border-bottom: 1px solid #eee; text-align: right; color: #c4314b; font-weight: 600;">1,930 (89.6%)</td>
+                <td style="padding: 6px 10px; border-bottom: 1px solid #eee; text-align: right;">453 (21%)</td>
+                <td style="padding: 6px 10px; border-bottom: 1px solid #eee;">identity_not_found</td>
+            </tr><tr>
+                <td style="padding: 6px 10px; border-bottom: 1px solid #eee;">HCSC - TX MDC</td>
+                <td style="padding: 6px 10px; border-bottom: 1px solid #eee; text-align: right;">3,271</td>
+                <td style="padding: 6px 10px; border-bottom: 1px solid #eee; text-align: right; color: #c4314b; font-weight: 600;">5,931 (64.3%)</td>
+                <td style="padding: 6px 10px; border-bottom: 1px solid #eee; text-align: right;">5,527 (60%)</td>
+                <td style="padding: 6px 10px; border-bottom: 1px solid #eee;">identity_not_found</td>
+            </tr>
+        </table>
+    </div>
+
+    <div style="margin-bottom: 16px;">
+        <div style="font-weight: 600; font-size: 13px; color: #d48806; text-transform: uppercase; letter-spacing: 0.5px; padding-bottom: 4px; border-bottom: 1px solid #eee; margin-bottom: 8px;">Elevated Exception Carriers (5-10%)</div>
+        <ul style='margin: 4px 0; padding-left: 20px;'><li style='margin: 3px 0; color: #1a1a1a;'><strong>AmeriHealth Caritas - MDC</strong>: 67 agents, 27 exc (8.4%)</li></ul>
+    </div>
+
+    <div style="margin-bottom: 16px;">
+        <div style="font-weight: 600; font-size: 13px; color: #107c10; text-transform: uppercase; letter-spacing: 0.5px; padding-bottom: 4px; border-bottom: 1px solid #eee; margin-bottom: 8px;">Completed Normally (5 carriers, under 5% exceptions)</div>
+        <ul style='margin: 4px 0; padding-left: 20px;'><li style='margin: 3px 0; color: #107c10;'>AMBETTER</li><li style='margin: 3px 0; color: #107c10;'>Cigna - ACA</li><li style='margin: 3px 0; color: #107c10;'>Molina-ACA</li><li style='margin: 3px 0; color: #107c10;'>Oscar Health</li><li style='margin: 3px 0; color: #107c10;'>UHC-ACA</li></ul>
+    </div>
+
+    <div style="margin-bottom: 16px;">
+        <div style="font-weight: 600; font-size: 13px; color: #666; text-transform: uppercase; letter-spacing: 0.5px; padding-bottom: 4px; border-bottom: 1px solid #eee; margin-bottom: 8px;">Output Files</div>
+        <ul style='margin: 4px 0; padding-left: 20px;'><li style='margin: 3px 0; color: #1a1a1a;'><strong>results</strong>: <span style='font-size: 12px; color: #666;'>acu_results_04162026.csv</span></li><li style='margin: 3px 0; color: #1a1a1a;'><strong>exceptions</strong>: <span style='font-size: 12px; color: #666;'>acu_exceptions_04162026.csv</span></li></ul>
+    </div>
+
+    <div style="margin-bottom: 16px;">
+        <div style="font-weight: 600; font-size: 13px; color: #2b579a; text-transform: uppercase; letter-spacing: 0.5px; padding-bottom: 4px; border-bottom: 1px solid #eee; margin-bottom: 8px;">Analysis</div>
+        <p style='margin: 8px 0; color: #333;'>Seven of 9 carriers completed with exception rates under 5%, indicating the pipeline is performing well. The overall exception rate is driven by two carriers with contract coverage gaps.</p><p style='margin: 8px 0; color: #333;'>CHRISTUS - MDC has an 89.6% exception rate with only 453 contracts loaded for 2,155 file rows (21% coverage). HCSC - TX MDC follows the same pattern at 64.3% with 5,527 contracts for 9,202 rows (60% coverage). Both are identity_not_found exceptions caused by missing contracts.</p><p style='margin: 8px 0; color: #333;'>AllState produced zero matched agents with zero exceptions, indicating rows were filtered before identity resolution. This is consistent with a primary_identity_field misconfiguration.</p><p style='margin: 8px 0; color: #333;'>Populate contracts for CHRISTUS - MDC (carrier_id 2931751000382772962). Review and backfill contracts for HCSC - TX MDC. Check AllState primary identifier configuration.</p>
+    </div>
+
+    <div style="border-top: 1px solid #dde1e6; padding-top: 8px; margin-top: 20px; font-size: 11px; color: #999;">
+        834 Labs - Data Operations | ACU Pipeline
+    </div>
+    </body></html>

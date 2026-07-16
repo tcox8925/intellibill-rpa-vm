@@ -1,0 +1,71 @@
+trigger:
+  branches:
+    include:
+      - main
+
+pool:
+  vmImage: ubuntu-latest
+
+stages:
+
+# =========================
+# BUILD STAGE
+# =========================
+- stage: Build
+  jobs:
+    - job: Build
+      steps:
+        - checkout: self
+
+        - task: UsePythonVersion@0
+          inputs:
+            versionSpec: '3.12'
+
+        # Only stage application files
+        - script: |
+            mkdir site
+            cp -r app main.py requirements.txt site/
+          displayName: 'Stage application files'
+
+        - task: ArchiveFiles@2
+          inputs:
+            rootFolderOrFile: 'site'
+            includeRootFolder: false
+            archiveType: zip
+            archiveFile: '$(Build.ArtifactStagingDirectory)/backend.zip'
+            replaceExistingArchive: true
+
+        - task: PublishBuildArtifacts@1
+          inputs:
+            pathToPublish: '$(Build.ArtifactStagingDirectory)/backend.zip'
+            artifactName: 'drop'
+
+
+# =========================
+# DEV DEPLOYMENT STAGE
+# =========================
+- stage: Dev
+  dependsOn: Build
+  condition: and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/main'))
+
+  jobs:
+    - deployment: DeployDev
+      environment: 'development'
+
+      strategy:
+        runOnce:
+          deploy:
+            steps:
+
+              - download: current
+                artifact: drop
+
+              - task: AzureWebApp@1
+                displayName: 'Deploy backend to 834-appbe-dev001'
+                inputs:
+                  azureSubscription: 'service-connection-devops-analytics-dev'
+                  appType: 'webAppLinux'
+                  appName: '834-appbe-dev001'
+                  package: '$(Pipeline.Workspace)/drop/backend.zip'
+                  runtimeStack: 'PYTHON|3.12'
+                  startupCommand: 'pip install -r requirements.txt && gunicorn -w 3 -k uvicorn.workers.UvicornWorker --timeout 120 main:app'

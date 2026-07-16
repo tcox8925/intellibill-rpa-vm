@@ -1,0 +1,88 @@
+trigger:
+  branches:
+    include:
+      - main
+      - master
+
+pr:
+  branches:
+    include:
+      - main
+      - master
+
+variables:
+  artifactName: 'drop'
+  buildDir: '$(Build.SourcesDirectory)'
+  packagePath: '$(Build.ArtifactStagingDirectory)/app.zip'
+
+stages:
+# ----------------------
+# 1) BUILD & PACKAGE
+# ----------------------
+- stage: Build
+  displayName: Build & Package
+  jobs:
+  - job: BuildJob
+    pool:
+      vmImage: 'ubuntu-latest'
+    steps:
+    - task: UsePythonVersion@0
+      displayName: 'Use Python 3.12'
+      inputs:
+        versionSpec: '3.12'
+
+    - script: |
+        rm -rf .python_packages
+        python -m pip install --upgrade pip
+        python -m pip install -r requirements.txt -t .python_packages/lib/site-packages
+      displayName: 'Vendor dependencies to .python_packages'
+      workingDirectory: $(buildDir)
+
+    # Optional: basic smoke check to see if app imports
+    - script: |
+        export VENDORED="$(Build.SourcesDirectory)/.python_packages/lib/site-packages"
+        export PYTHONPATH="$VENDORED:$PYTHONPATH"
+        python -c "import sys; print('Python', sys.version)"
+        python -c "import fastapi, uvicorn; print('FastAPI & Uvicorn OK')"
+      displayName: 'Sanity check imports'
+      workingDirectory: $(buildDir)
+    
+    - script: |
+        set -e
+        mkdir -p bin
+        curl -L -o bin/ffmpeg.tar.xz https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz
+        tar -xf bin/ffmpeg.tar.xz -C bin
+        FOLDER="$(find bin -maxdepth 1 -type d -name 'ffmpeg-*-static' | head -n 1)"
+        cp "$FOLDER/ffmpeg" bin/ffmpeg
+        cp "$FOLDER/ffprobe" bin/ffprobe
+        chmod +x bin/ffmpeg bin/ffprobe
+        rm -rf "$FOLDER" bin/ffmpeg.tar.xz
+      displayName: "Bundle static ffmpeg + ffprobe"
+      workingDirectory: $(buildDir)
+
+
+    # Create deployable zip (app code + vendored deps)
+    - task: ArchiveFiles@2
+      displayName: 'Archive app.zip'
+      inputs:
+        rootFolderOrFile: '$(buildDir)'
+        includeRootFolder: false
+        archiveType: 'zip'
+        archiveFile: '$(packagePath)'
+        replaceExistingArchive: true
+        # keep only what the app needs
+        # (Adjust excludes as you like; these do not inject secrets.)
+        # Use minimatch patterns:
+        # - Exclude .git, venvs, tests, and non-app junk
+        # - Keep app/, main.py, requirement.txt, .python_packages
+        # The task doesn't support "include only", so we exclude unwanted paths.
+        # If you prefer a curated layout, use a staging folder and copy exact files into it.
+        # The below is a conservative exclude set:
+        verbose: true
+
+    - task: PublishBuildArtifacts@1
+      displayName: 'Publish artifact'
+      inputs:
+        PathtoPublish: '$(Build.ArtifactStagingDirectory)'
+        ArtifactName: '$(artifactName)'
+        publishLocation: 'Container'

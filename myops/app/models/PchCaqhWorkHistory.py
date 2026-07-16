@@ -1,0 +1,26 @@
+from sqlalchemy import Column, Date, DateTime, NVARCHAR, VARCHAR
+from sqlalchemy.dialects.mssql import UNIQUEIDENTIFIER
+from app.models.BaseClasses import Base
+from uuid import uuid4
+from datetime import datetime, timezone
+
+
+class Pch_Caqh_Work_History(Base):
+    __tablename__ = "pch_caqh_work_history"
+    __table_args__ = {"schema": "wpo"}
+
+    txn_id          = Column(UNIQUEIDENTIFIER, primary_key=True, default=uuid4, nullable=False)
+    txn_id_provider = Column(UNIQUEIDENTIFIER, nullable=False, index=True)
+    npi             = Column(VARCHAR(20), nullable=False, index=True)
+    employer_name   = Column(NVARCHAR(300), nullable=True)
+    position_title  = Column(NVARCHAR(200), nullable=True)
+    start_date      = Column(Date, nullable=True)
+    end_date        = Column(Date, nullable=True)
+    updated_on      = Column(DateTime, nullable=True, default=lambda: datetime.now(timezone.utc))
+
+    def __repr__(self):
+        return (
+            f"<Pch_Caqh_Work_History(txn_id={self.txn_id}, "
+            f"txn_id_provider={self.txn_id_provider}, npi={self.npi}, "
+            f"employer_name={self.employer_name})>"
+        )
