@@ -10,6 +10,7 @@ endpoint now builds a WorkSelector and calls the one pipeline.
 - /run-combined-daily           — patients, then Tebra daily (scheduled task)
 """
 
+import os
 import logging
 import threading
 import uuid
@@ -21,22 +22,36 @@ from pydantic import BaseModel
 
 from ehr.pipeline import run
 from ehr.selector import WorkSelector
-from ehr.db import log_run_to_pch
+from ehr.db import log_run_to_pch, ensure_appointments_schema
 from ehr.config import ENTITY, SUB_ENTITY, EHR_NAME
 from ehr.patients import run_patient_insurance_rpa
+from ehr.session import normalize_practice_compare
 
 log = logging.getLogger(__name__)
-app = FastAPI(title="OPS EMR RPA API")
+
+
+def _env_name() -> str:
+    return os.environ.get("MYOPS_API_ENV", "development").strip().lower()
+
+
+def _docs_enabled() -> bool:
+    return _env_name() in {"dev", "development", "local"}
+
+
+app = FastAPI(
+    title="OPS EMR RPA API",
+    docs_url="/docs" if _docs_enabled() else None,
+    redoc_url="/redoc" if _docs_enabled() else None,
+    openapi_url="/openapi.json" if _docs_enabled() else None,
+)
 
 CST = ZoneInfo("America/Chicago")
 
 
 @app.on_event("startup")
 def _run_migrations():
-    # Charge columns and prior schema are managed via manual ALTERs now. Run a
-    # legacy ensure_appointments_schema if it's still present; else skip.
+    # Keep startup schema checks local to the new ehr package.
     try:
-        from tebra_rpa import ensure_appointments_schema
         ensure_appointments_schema()
         print("[STARTUP] ensure_appointments_schema OK", flush=True)
     except Exception as e:
@@ -96,6 +111,14 @@ def _acquire_key_lock(key: str) -> threading.Lock:
     return lock
 
 
+def _normalize_practice_name(practice_name: str) -> str:
+    practice_name = practice_name.strip()
+    normalized = normalize_practice_compare(practice_name)
+    if not normalized:
+        raise HTTPException(status_code=400, detail="practice_name cannot be empty")
+    return normalized
+
+
 @app.get("/healthz")
 def healthz():
     return {"status": "ok"}
@@ -107,7 +130,7 @@ def run_tebra(request: TebraRequest):
     end_dt = datetime.strptime(request.end_date, "%Y-%m-%d")
     validate_dates(start_dt, end_dt)
 
-    practice_name = request.practice_name.strip()
+    practice_name = _normalize_practice_name(request.practice_name)
     entity = (request.entity or ENTITY).strip()
     sub_entity = (request.sub_entity or SUB_ENTITY).strip()
     ehr_name = (request.ehr_name or EHR_NAME).strip()

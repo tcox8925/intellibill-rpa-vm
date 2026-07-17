@@ -14,7 +14,8 @@ from .config import DOWNLOAD_DIR
 from .selector import WorkSelector
 from .db import get_ehr_connection, log_run_to_pch
 from .session import (
-    login_and_select_practice, discover_practices, now_cst, cleanup_acc_directory,
+    login_and_select_practice, discover_practices, resolve_practice_name,
+    now_cst, cleanup_acc_directory,
 )
 from .passes import (
     pass_appointments, pass_notes, pass_facesheets, pass_charges, pass_patient_match,
@@ -60,21 +61,24 @@ def run(sel: WorkSelector, scrape_patients=None, no_upload=False):
 
     from .config import LOGIN_URL, EMAIL, PASSWORD
 
-    # First, discover practices with a short-lived browser (unless pinned).
+    # First, discover practices with a short-lived browser so a normalized API
+    # payload can be resolved back to the canonical Tebra practice name.
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=False, args=["--start-maximized"])
+        context = browser.new_context(no_viewport=True)
+        page = context.new_page()
+        page.goto(LOGIN_URL)
+        page.fill("#userName", EMAIL)
+        page.fill("#password", PASSWORD)
+        page.click("#sign-in")
+        page.wait_for_selector("h3:has-text('Practice select')", timeout=30_000)
+        discovered = discover_practices(page)
+        browser.close()
+
     if sel.practice:
-        practices = [sel.practice]
+        practices = [resolve_practice_name(sel.practice, discovered)]
     else:
-        with sync_playwright() as p:
-            browser = p.chromium.launch(headless=False, args=["--start-maximized"])
-            context = browser.new_context(no_viewport=True)
-            page = context.new_page()
-            page.goto(LOGIN_URL)
-            page.fill("#userName", EMAIL)
-            page.fill("#password", PASSWORD)
-            page.click("#sign-in")
-            page.wait_for_selector("h3:has-text('Practice select')", timeout=30_000)
-            practices = discover_practices(page)
-            browser.close()
+        practices = discovered
 
     print(f"[RUN] mode={sel.mode} practices={practices}")
 

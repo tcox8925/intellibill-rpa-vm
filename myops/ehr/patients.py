@@ -538,15 +538,15 @@ def term_and_create_new(cur, ehr_name, patient_id, entity, sub_entity,
         )
         """,
         (
-            ehr_name, patient_id, entity, sub_entity, old_row[16],  # practice
-            old_row[4], old_row[5], old_row[6], old_row[7],         # name, dob, sex, marital
-            old_row[8], old_row[9], old_row[10],                    # email, home_phone, mobile
-            old_row[11], old_row[12], old_row[13], old_row[14],     # addr, city, state, zip
-            old_row[15],                                             # status
-            old_row[17], old_row[18],                                # ins names
-            new_primary_id or old_primary_id,                        # keep old if new is None
+            ehr_name, patient_id, entity, sub_entity, old_row[16],
+            old_row[4], old_row[5], old_row[6], old_row[7],
+            old_row[8], old_row[9], old_row[10],
+            old_row[11], old_row[12], old_row[13], old_row[14],
+            old_row[15],
+            old_row[17], old_row[18],
+            new_primary_id or old_primary_id,
             new_secondary_id or old_secondary_id,
-            new_primary_plan_name or old_row[19],                    # plan names (use new if provided)
+            new_primary_plan_name or old_row[19],
             new_secondary_plan_name or old_row[20],
         ),
     )

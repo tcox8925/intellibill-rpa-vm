@@ -640,7 +640,7 @@ def pass_patient_match(sel, practice_name, from_date, to_date):
                     CASE
                         WHEN a.patient_id IS NULL THEN NULL
                         WHEN EXISTS (
-                                                        SELECT 1 FROM {PATIENTS_TABLE} p
+                            SELECT 1 FROM {PATIENTS_TABLE} p
                             WHERE p.ehr_name = a.ehr_name
                               AND p.entity = a.entity
                               AND p.sub_entity = a.sub_entity

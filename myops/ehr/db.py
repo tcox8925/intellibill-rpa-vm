@@ -73,6 +73,26 @@ def log_run_to_pch(script_name, process_type, status, error,
             print(f"[LOG-WRITE] Failed to write run log on {target_name}: {e}")
 
 
+def ensure_appointments_schema():
+    """Apply idempotent column additions required by the EHR pipeline."""
+    conn = get_ehr_connection()
+    try:
+        cur = conn.cursor()
+        try:
+            cur.execute(
+                f"""
+                ALTER TABLE {TABLE_NAME}
+                ADD COLUMN IF NOT EXISTS patient_match BOOLEAN,
+                ADD COLUMN IF NOT EXISTS file_path TEXT
+                """
+            )
+            conn.commit()
+        finally:
+            cur.close()
+    finally:
+        conn.close()
+
+
 # =========================================================
 # Appointment writes
 # =========================================================

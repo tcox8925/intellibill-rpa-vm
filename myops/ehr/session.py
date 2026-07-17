@@ -30,6 +30,11 @@ def now_cst():
     return datetime.now(CST)
 
 
+def normalize_practice_compare(text):
+    """Lowercase and remove spaces only, preserving symbols like '+'."""
+    return "".join(text.lower().split())
+
+
 def login_and_select_practice(page, practice_name):
     """Log in and click into `practice_name`, handling OTP. Raises if the
     practice tile isn't found."""
@@ -94,6 +99,23 @@ def discover_practices(page=None):
             practices.append(name)
     print(f"[DISCOVER] Practices: {practices}")
     return practices
+
+
+def resolve_practice_name(practice_name, practices):
+    """Resolve a caller-supplied practice value to the canonical Tebra tile.
+
+    Accepts normalized inputs like lowercase / no-space variants and returns
+    the actual practice text shown by Tebra so downstream DB writes stay
+    consistent.
+    """
+    target = normalize_practice_compare(practice_name)
+    for practice in practices:
+        norm = normalize_practice_compare(practice)
+        if target and (target in norm or norm in target):
+            return practice
+    raise RuntimeError(
+        f"Practice '{practice_name}' not found in Tebra UI. Tiles present: {practices}"
+    )
 
 
 def goto_worklist(page):
