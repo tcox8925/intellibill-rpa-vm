@@ -53,32 +53,36 @@ def _now_cst():
     return datetime.now(CST)
 
 
+def _resolve_db_password(db_config):
+    """Use explicit DB password when provided, else fall back to AAD token."""
+    if db_config.get("password"):
+        return db_config["password"]
+    sp = get_sp_credential()
+    return sp.get_token("https://ossrdbms-aad.database.windows.net/.default").token
+
+
 # =========================================================
 # DB CONNECTIONS
 # =========================================================
 
 def get_ehr_connection():
     """Connect to the EHR database for ehr schema tables."""
-    sp = get_sp_credential()
-    token = sp.get_token("https://ossrdbms-aad.database.windows.net/.default").token
     return psycopg2.connect(
         host=POSTGRES_CONFIG_EHR["host"],
         dbname=POSTGRES_CONFIG_EHR["database"],
         user=POSTGRES_CONFIG_EHR["user"],
-        password=token,
+        password=_resolve_db_password(POSTGRES_CONFIG_EHR),
         sslmode="require",
     )
 
 
 def get_myopsprod_connection():
     """Connect to myopsprod — logging tables."""
-    sp = get_sp_credential()
-    token = sp.get_token("https://ossrdbms-aad.database.windows.net/.default").token
     return psycopg2.connect(
         host=POSTGRES_CONFIG_MYOPS["host"],
         dbname=POSTGRES_CONFIG_MYOPS["database"],
         user=POSTGRES_CONFIG_MYOPS["user"],
-        password=token,
+        password=_resolve_db_password(POSTGRES_CONFIG_MYOPS),
         sslmode="require",
     )
 

@@ -10,28 +10,32 @@ from .config import POSTGRES_CONFIG_EHR, POSTGRES_CONFIG_PCH
 from .azure_conn import get_sp_credential
 
 
+def _resolve_db_password(db_config):
+    """Use explicit DB password when provided, else fall back to AAD token."""
+    if db_config.get("password"):
+        return db_config["password"]
+    sp = get_sp_credential()
+    return sp.get_token("https://ossrdbms-aad.database.windows.net/.default").token
+
+
 def get_pch_connection():
     """Connect to the PCH database for legacy log writes."""
-    sp = get_sp_credential()
-    token = sp.get_token("https://ossrdbms-aad.database.windows.net/.default").token
     return psycopg2.connect(
         host=POSTGRES_CONFIG_PCH["host"],
         dbname=POSTGRES_CONFIG_PCH["database"],
         user=POSTGRES_CONFIG_PCH["user"],
-        password=token,
+        password=_resolve_db_password(POSTGRES_CONFIG_PCH),
         sslmode="require",
     )
 
 
 def get_ehr_connection():
     """Connect to the EHR database for ehr schema tables."""
-    sp = get_sp_credential()
-    token = sp.get_token("https://ossrdbms-aad.database.windows.net/.default").token
     return psycopg2.connect(
         host=POSTGRES_CONFIG_EHR["host"],
         dbname=POSTGRES_CONFIG_EHR["database"],
         user=POSTGRES_CONFIG_EHR["user"],
-        password=token,
+        password=_resolve_db_password(POSTGRES_CONFIG_EHR),
         sslmode="require",
     )
 
