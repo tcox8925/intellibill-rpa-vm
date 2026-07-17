@@ -52,3 +52,4 @@ azure-mgmt-communication
 azure-ai-documentintelligence
 msgraph-sdk
 azure-ai-agents
+pydantic-settings

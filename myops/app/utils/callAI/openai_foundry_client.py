@@ -4,7 +4,7 @@ import json
 from openai import AzureOpenAI
 from typing import Callable, List, Dict, Any, Optional
 from azure.identity import ClientSecretCredential
-from logger import logger
+from .logger import logger
 
 # TODO Add below creds in config/env
 OPENAI_ENDPOINT = "https://call-responder-bot-resource.openai.azure.com/"

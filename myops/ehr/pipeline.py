@@ -1,0 +1,156 @@
+"""
+The single pipeline entry point. run(sel) replaces run_tebra_rpa,
+run_notes_only, and run_facesheets_and_zip_backfill. Every mode
+(daily / backfill / target) flows through the same passes; only the
+WorkSelector differs.
+"""
+
+import os
+from datetime import date
+
+from playwright.sync_api import sync_playwright
+
+from .config import DOWNLOAD_DIR
+from .selector import WorkSelector
+from .db import get_ehr_connection, log_run_to_pch
+from .session import (
+    login_and_select_practice, discover_practices, now_cst, cleanup_acc_directory,
+)
+from .passes import (
+    pass_appointments, pass_notes, pass_facesheets, pass_charges, pass_patient_match,
+)
+from .zipbuild import pass_zip
+from .config import TABLE_NAME
+
+
+def _window(sel):
+    """Resolve the [from, to] window used by passes that need explicit dates
+    (appointment scrape, patient-match). Daily = today; target = the date given
+    or today; backfill = the window."""
+    if sel.mode == "backfill":
+        return sel.start_date, sel.end_date
+    if sel.mode == "target" and sel.start_date:
+        return sel.start_date, sel.start_date
+    today = now_cst().date()
+    return today, today
+
+
+def run(sel: WorkSelector, scrape_patients=None, no_upload=False):
+    os.makedirs(DOWNLOAD_DIR, exist_ok=True)
+    run_start = now_cst()
+
+    # Patient roster refresh. The scrape itself diffs against ehr_patients and
+    # only inserts new / updates changed (SCD via effective_end_date), so this
+    # is a no-op where nothing changed — we're only deciding whether to pay the
+    # browser-walk cost. Default: on for daily/backfill (new patients appear),
+    # off for target (one appointment shouldn't trigger a full roster walk).
+    # It launches its OWN browser, so it must run before we open ours.
+    if scrape_patients is None:
+        scrape_patients = sel.mode in ("daily", "backfill")
+    if scrape_patients:
+        try:
+            from .patients import run_patient_insurance_rpa
+            print("[RUN] patient roster scrape (diff-upsert) starting")
+            run_patient_insurance_rpa(sel.entity, sel.sub_entity, sel.ehr_name)
+            print("[RUN] patient roster scrape done")
+        except Exception as e:
+            # A patient-scrape failure shouldn't abort the Tebra passes; match
+            # will just reconcile against whatever roster exists.
+            print(f"[RUN] patient roster scrape failed (continuing): {e!r}")
+
+    from .config import LOGIN_URL, EMAIL, PASSWORD
+
+    # First, discover practices with a short-lived browser (unless pinned).
+    if sel.practice:
+        practices = [sel.practice]
+    else:
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=False, args=["--start-maximized"])
+            context = browser.new_context(no_viewport=True)
+            page = context.new_page()
+            page.goto(LOGIN_URL)
+            page.fill("#userName", EMAIL)
+            page.fill("#password", PASSWORD)
+            page.click("#sign-in")
+            page.wait_for_selector("h3:has-text('Practice select')", timeout=30_000)
+            practices = discover_practices(page)
+            browser.close()
+
+    print(f"[RUN] mode={sel.mode} practices={practices}")
+
+    completed, failed = [], []
+    for practice in practices:
+        print("=" * 60)
+        print(f"[PRACTICE] {practice}")
+        print("=" * 60)
+        psel = WorkSelector(
+            mode=sel.mode, practice=practice,
+            start_date=sel.start_date, end_date=sel.end_date,
+            appt_id=sel.appt_id, patient_name=sel.patient_name,
+            entity=sel.entity, sub_entity=sel.sub_entity, ehr_name=sel.ehr_name,
+        )
+        from_date, to_date = _window(psel)
+
+        # Fresh browser + context PER PRACTICE. Tebra keeps a session logged in
+        # to one practice; reusing the browser means the next practice's login
+        # bounces straight to the dashboard and #sign-in never appears. A clean
+        # browser guarantees the sign-in screen every time.
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=False, args=["--start-maximized"])
+            context = browser.new_context(no_viewport=True)
+            page = context.new_page()
+            try:
+                login_and_select_practice(page, practice)
+
+                if psel.mode in ("daily", "backfill"):
+                    pass_appointments(page, psel, practice, from_date, to_date)
+
+                pass_notes(page, psel)          # marks signed + records charge_status
+                pass_facesheets(page, context, psel)   # normal + missed-charges re-download
+                pass_charges(page, psel)        # VIEW CHARGE -> charge_data
+                pass_zip(psel, practice, no_upload=no_upload)  # one ZIP incl. charge_data
+                pass_patient_match(psel, practice, from_date, to_date)
+                completed.append(practice)
+            except Exception as e:
+                print(f"[RUN] practice {practice} failed: {e!r}")
+                failed.append(practice)
+            finally:
+                try:
+                    browser.close()
+                except Exception:
+                    pass
+
+    _log_run(sel, run_start)
+    cleanup_acc_directory()
+    return {"practices": practices, "completed": completed, "failed": failed}
+
+
+def _log_run(sel, run_start):
+    """One run-log row; status=Error if any row in scope is process_status=Error."""
+    has_error = False
+    try:
+        conn = get_ehr_connection()
+        cur = conn.cursor()
+        from .query import scope_clause
+        where, params = scope_clause(sel)
+        where.append("process_status = 'Error'")
+        cur.execute(
+            f"SELECT 1 FROM {TABLE_NAME} WHERE {' AND '.join(where)} LIMIT 1",
+            tuple(params),
+        )
+        has_error = cur.fetchone() is not None
+        cur.close()
+        conn.close()
+    except Exception as e:
+        print(f"[RUN] error-check failed: {e}")
+
+    label = sel.practice or "ALL"
+    log_run_to_pch(
+        script_name="OPS_EMR_RPA",
+        process_type=f"RCM - {label} ({sel.mode})",
+        status="Error" if has_error else "Success",
+        error="One or more records failed" if has_error else None,
+        company_id=sel.entity,
+        started_at=run_start,
+        ended_at=now_cst(),
+    )

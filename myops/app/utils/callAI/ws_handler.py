@@ -5,7 +5,7 @@ from enum import Enum
 import json
 import threading
 from fastapi import WebSocket
-from logger import logger
+from .logger import logger
 import azure.cognitiveservices.speech as speechsdk
 from typing import Optional
 import uuid

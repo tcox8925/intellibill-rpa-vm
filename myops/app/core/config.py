@@ -1,5 +1,7 @@
 import json
 from functools import lru_cache
+from pathlib import Path
+from dotenv import load_dotenv
 from azure.identity import DefaultAzureCredential, ClientSecretCredential
 from azure.keyvault.secrets import SecretClient
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -15,6 +17,10 @@ import io
 from azure.core.exceptions import ResourceNotFoundError
 from fastapi import HTTPException
 import os
+
+
+ROOT_ENV_FILE = Path(__file__).resolve().parents[3] / ".env"
+load_dotenv(ROOT_ENV_FILE, override=False)
 
 
 class Settings(BaseSettings):
@@ -92,8 +98,11 @@ class Settings(BaseSettings):
     COMM_ACCOUNT_NAME: str
     COMM_CONTAINER_NAME: str
     
-    model_config = SettingsConfigDict(extra="allow")
-    # model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")
+    model_config = SettingsConfigDict(
+        extra="allow",
+        env_file=str(ROOT_ENV_FILE),
+        env_file_encoding="utf-8",
+    )
 
     @property
     def SYNAPSE_CONNECTION_STRING(self) -> str:
