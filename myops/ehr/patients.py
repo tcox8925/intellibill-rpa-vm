@@ -28,7 +28,6 @@ import psycopg2
 
 from otp_info import handle_tebra_otp_if_present
 from email_read import fetch_latest_tebra_otp_code
-from .azure_conn import get_sp_credential
 from .config import (
     EHR_NAME,
     LOGIN_URL,
@@ -54,11 +53,13 @@ def _now_cst():
 
 
 def _resolve_db_password(db_config):
-    """Use explicit DB password when provided, else fall back to AAD token."""
+    """Use explicit DB password only."""
     if db_config.get("password"):
         return db_config["password"]
-    sp = get_sp_credential()
-    return sp.get_token("https://ossrdbms-aad.database.windows.net/.default").token
+    raise RuntimeError(
+        "Database password is required for password auth mode. "
+        "Set the corresponding *_DB_PASSWORD in .env."
+    )
 
 
 # =========================================================
