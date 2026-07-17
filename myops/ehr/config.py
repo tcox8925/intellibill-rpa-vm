@@ -71,3 +71,16 @@ PASSWORD = os.environ.get("TEBRA_PASSWORD", "").strip()
 # ---- Blob delivery (834labs-sftp) ----
 STORAGE_ACCOUNT_NAME = os.environ.get("TEBRA_STORAGE_ACCOUNT_NAME", "").strip()
 AZURE_STORAGE_CONNECTION_STRING = os.environ.get("AZURE_STORAGE_CONNECTION_STRING", "").strip()
+
+
+# ---- Playwright runtime mode ----
+_headless_raw = os.environ.get("EHR_PLAYWRIGHT_HEADLESS", "").strip().lower()
+if _headless_raw in {"1", "true", "yes", "on"}:
+    PLAYWRIGHT_HEADLESS = True
+elif _headless_raw in {"0", "false", "no", "off"}:
+    PLAYWRIGHT_HEADLESS = False
+else:
+    # Auto mode: service environments without DISPLAY should run headless.
+    PLAYWRIGHT_HEADLESS = not bool(os.environ.get("DISPLAY", "").strip())
+
+PLAYWRIGHT_LAUNCH_ARGS = [] if PLAYWRIGHT_HEADLESS else ["--start-maximized"]

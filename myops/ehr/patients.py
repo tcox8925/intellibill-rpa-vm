@@ -37,6 +37,8 @@ from .config import (
     PATIENTS_TABLE,
     POSTGRES_CONFIG_EHR,
     POSTGRES_CONFIG_MYOPS,
+    PLAYWRIGHT_HEADLESS,
+    PLAYWRIGHT_LAUNCH_ARGS,
 )
 from .db import log_run_to_pch
 
@@ -1244,7 +1246,10 @@ def run_patient_insurance_rpa(
       4. Close browser
     """
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=False, args=["--start-maximized"])
+        browser = p.chromium.launch(
+            headless=PLAYWRIGHT_HEADLESS,
+            args=PLAYWRIGHT_LAUNCH_ARGS,
+        )
         context = browser.new_context(no_viewport=True)
         page = context.new_page()
 
@@ -1282,7 +1287,10 @@ def run_patient_insurance_rpa(
             print(f"{'='*60}")
 
             # ── Fresh browser for each practice ──
-            browser = p.chromium.launch(headless=False, args=["--start-maximized"])
+            browser = p.chromium.launch(
+                headless=PLAYWRIGHT_HEADLESS,
+                args=PLAYWRIGHT_LAUNCH_ARGS,
+            )
             context = browser.new_context(no_viewport=True)
             page = context.new_page()
 

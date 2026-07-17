@@ -10,7 +10,7 @@ from datetime import date
 
 from playwright.sync_api import sync_playwright
 
-from .config import DOWNLOAD_DIR
+from .config import DOWNLOAD_DIR, PLAYWRIGHT_HEADLESS, PLAYWRIGHT_LAUNCH_ARGS
 from .selector import WorkSelector
 from .db import get_ehr_connection, log_run_to_pch
 from .session import (
@@ -69,7 +69,10 @@ def run(sel: WorkSelector, scrape_patients=None, no_upload=False):
     # First, discover practices with a short-lived browser so a normalized API
     # payload can be resolved back to the canonical Tebra practice name.
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=False, args=["--start-maximized"])
+        browser = p.chromium.launch(
+            headless=PLAYWRIGHT_HEADLESS,
+            args=PLAYWRIGHT_LAUNCH_ARGS,
+        )
         context = browser.new_context(no_viewport=True)
         page = context.new_page()
         page.goto(LOGIN_URL)
@@ -105,7 +108,10 @@ def run(sel: WorkSelector, scrape_patients=None, no_upload=False):
         # bounces straight to the dashboard and #sign-in never appears. A clean
         # browser guarantees the sign-in screen every time.
         with sync_playwright() as p:
-            browser = p.chromium.launch(headless=False, args=["--start-maximized"])
+            browser = p.chromium.launch(
+                headless=PLAYWRIGHT_HEADLESS,
+                args=PLAYWRIGHT_LAUNCH_ARGS,
+            )
             context = browser.new_context(no_viewport=True)
             page = context.new_page()
             try:
