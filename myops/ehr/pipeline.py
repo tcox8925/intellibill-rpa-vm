@@ -105,6 +105,7 @@ def run(sel: WorkSelector, scrape_patients=None, no_upload=False):
     _log(f"Resolved practices count={len(practices)} practices={practices}")
 
     completed, failed = [], []
+    failed_details = {}
     for practice in practices:
         _log(f"Practice start name={practice}")
         practice_clock = time.monotonic()
@@ -162,6 +163,7 @@ def run(sel: WorkSelector, scrape_patients=None, no_upload=False):
             except Exception as e:
                 _log(f"Practice failed name={practice} error={e!r}")
                 failed.append(practice)
+                failed_details[practice] = repr(e)
             finally:
                 try:
                     browser.close()
@@ -174,7 +176,12 @@ def run(sel: WorkSelector, scrape_patients=None, no_upload=False):
         f"Run finished completed={completed} failed={failed} "
         f"elapsed={time.monotonic() - run_clock:.1f}s"
     )
-    return {"practices": practices, "completed": completed, "failed": failed}
+    return {
+        "practices": practices,
+        "completed": completed,
+        "failed": failed,
+        "failed_details": failed_details,
+    }
 
 
 def _log_run(sel, run_start):
