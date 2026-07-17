@@ -38,6 +38,7 @@ Pillow
 pydub
 pandas
 apscheduler
+playwright
 
 # Cloud
 azure-identity<1.15.0
