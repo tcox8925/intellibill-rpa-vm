@@ -11,8 +11,15 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 from dotenv import load_dotenv
 
-ROOT_ENV_FILE = Path(__file__).resolve().parents[2] / ".env"
-load_dotenv(ROOT_ENV_FILE, override=False)
+_CONFIG_FILE = Path(__file__).resolve()
+_ENV_CANDIDATES = [
+    _CONFIG_FILE.parents[2] / ".env",  # repo root (preferred)
+    _CONFIG_FILE.parents[1] / ".env",  # myops/.env fallback
+]
+for _env_file in _ENV_CANDIDATES:
+    if _env_file.exists():
+        load_dotenv(_env_file, override=False)
+        break
 
 CST_TZ = ZoneInfo("America/Chicago")
 
@@ -27,7 +34,11 @@ PATIENTS_TABLE = "ehr.ehr_patients"
 
 # ---- Local download dir ----
 # Set this in .env for each runtime environment.
-DOWNLOAD_DIR = os.environ.get("EHR_DOWNLOAD_DIR", "").strip()
+_env_download_dir = os.environ.get("EHR_DOWNLOAD_DIR", "").strip()
+if _env_download_dir:
+    DOWNLOAD_DIR = _env_download_dir
+else:
+    DOWNLOAD_DIR = str((Path.cwd() / "acc").resolve())
 
 # ---- Batch / misc ----
 BATCH_SIZE = 50

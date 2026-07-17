@@ -37,6 +37,11 @@ def _window(sel):
 
 
 def run(sel: WorkSelector, scrape_patients=None, no_upload=False):
+    if not DOWNLOAD_DIR:
+        raise RuntimeError(
+            "EHR_DOWNLOAD_DIR is empty. Set EHR_DOWNLOAD_DIR in environment or .env "
+            "(repo root .env or myops/.env)."
+        )
     os.makedirs(DOWNLOAD_DIR, exist_ok=True)
     run_start = now_cst()
 
