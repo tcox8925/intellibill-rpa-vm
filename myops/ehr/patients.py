@@ -35,11 +35,10 @@ from .config import (
     PASSWORD,
     PATIENTS_TABLE,
     POSTGRES_CONFIG_EHR,
-    POSTGRES_CONFIG_MYOPS,
     PLAYWRIGHT_HEADLESS,
     PLAYWRIGHT_LAUNCH_ARGS,
 )
-from .db import log_run_to_pch
+from .db import log_run_event
 
 
 # =========================================================
@@ -73,17 +72,6 @@ def get_ehr_connection():
         dbname=POSTGRES_CONFIG_EHR["database"],
         user=POSTGRES_CONFIG_EHR["user"],
         password=_resolve_db_password(POSTGRES_CONFIG_EHR),
-        sslmode="require",
-    )
-
-
-def get_myopsprod_connection():
-    """Connect to myopsprod — logging tables."""
-    return psycopg2.connect(
-        host=POSTGRES_CONFIG_MYOPS["host"],
-        dbname=POSTGRES_CONFIG_MYOPS["database"],
-        user=POSTGRES_CONFIG_MYOPS["user"],
-        password=_resolve_db_password(POSTGRES_CONFIG_MYOPS),
         sslmode="require",
     )
 
@@ -1246,7 +1234,7 @@ def run_patient_insurance_rpa(
          a. Click practice, handle OTP
                  b. Analytics → Patients → scrape grid → upsert ehr.ehr_patients
          c. For un-scraped patients → Account → Insurance → Edit → scrape policy #s
-         d. Log run to wpo.ops_pch_logs
+                 d. Emit a run event (writes disabled in this package)
          e. Navigate back to practice-select for next practice
       4. Close browser
     """
@@ -1346,7 +1334,7 @@ def run_patient_insurance_rpa(
                 browser.close()
 
             # ── Log run ──
-            log_run_to_pch(
+            log_run_event(
                 script_name="OPS_PATIENT_INSURANCE_RPA",
                 process_type=f"RCM - {practice_name}",
                 status="Error" if error_msg else "Success",

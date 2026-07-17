@@ -44,26 +44,11 @@ else:
 BATCH_SIZE = 50
 MANUAL_DATE_FORMAT = "%m/%d/%Y"
 
-# ---- Postgres (pch) ----
-POSTGRES_CONFIG_PCH = {
-    "host": os.environ.get("PCH_DB_HOST", "").strip(),
-    "database": os.environ.get("PCH_DB_NAME", "").strip(),
-    "user": os.environ.get("PCH_DB_USER", "").strip(),
-    "password": os.environ.get("PCH_DB_PASSWORD", "").strip(),
-}
-
 POSTGRES_CONFIG_EHR = {
     "host": os.environ.get("RCM_DB_HOST", "").strip(),
     "database": os.environ.get("RCM_DB_NAME", "").strip(),
     "user": os.environ.get("RCM_DB_USER", "").strip(),
     "password": os.environ.get("RCM_DB_PASSWORD", "").strip(),
-}
-
-POSTGRES_CONFIG_MYOPS = {
-    "host": os.environ.get("MYOPS_DB_HOST", "").strip(),
-    "database": os.environ.get("MYOPS_DB_NAME", "").strip(),
-    "user": os.environ.get("MYOPS_DB_USER", "").strip(),
-    "password": os.environ.get("MYOPS_DB_PASSWORD", "").strip(),
 }
 
 # ---- Tebra login ----

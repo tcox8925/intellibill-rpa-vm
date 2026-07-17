@@ -6,13 +6,14 @@ WorkSelector differs.
 """
 
 import os
+import time
 from datetime import date
 
 from playwright.sync_api import sync_playwright
 
 from .config import DOWNLOAD_DIR, PLAYWRIGHT_HEADLESS, PLAYWRIGHT_LAUNCH_ARGS
 from .selector import WorkSelector
-from .db import get_ehr_connection, log_run_to_pch
+from .db import get_ehr_connection, log_run_event
 from .session import (
     login_and_select_practice, discover_practices, resolve_practice_name,
     now_cst, cleanup_acc_directory,
@@ -22,6 +23,14 @@ from .passes import (
 )
 from .zipbuild import pass_zip
 from .config import TABLE_NAME
+
+
+def _ts() -> str:
+    return now_cst().strftime("%Y-%m-%d %H:%M:%S %Z")
+
+
+def _log(message: str):
+    print(f"[PIPELINE] [{_ts()}] {message}", flush=True)
 
 
 def _window(sel):
@@ -44,25 +53,30 @@ def run(sel: WorkSelector, scrape_patients=None, no_upload=False):
         )
     os.makedirs(DOWNLOAD_DIR, exist_ok=True)
     run_start = now_cst()
+    run_clock = time.monotonic()
+    _log(
+        f"Run started mode={sel.mode} practice={sel.practice or 'ALL'} "
+        f"entity={sel.entity} sub_entity={sel.sub_entity} ehr={sel.ehr_name}"
+    )
 
     # Patient roster refresh. The scrape itself diffs against ehr_patients and
     # only inserts new / updates changed (SCD via effective_end_date), so this
     # is a no-op where nothing changed — we're only deciding whether to pay the
-    # browser-walk cost. Default: on for daily/backfill (new patients appear),
-    # off for target (one appointment shouldn't trigger a full roster walk).
+    # browser-walk cost. Default: on for full-scope daily/backfill runs,
+    # off for target and single-practice runs (to avoid all-practice roster walk).
     # It launches its OWN browser, so it must run before we open ours.
     if scrape_patients is None:
-        scrape_patients = sel.mode in ("daily", "backfill")
+        scrape_patients = (sel.mode in ("daily", "backfill")) and not bool(sel.practice)
     if scrape_patients:
         try:
             from .patients import run_patient_insurance_rpa
-            print("[RUN] patient roster scrape (diff-upsert) starting")
+            _log("Patient roster scrape starting")
             run_patient_insurance_rpa(sel.entity, sel.sub_entity, sel.ehr_name)
-            print("[RUN] patient roster scrape done")
+            _log("Patient roster scrape done")
         except Exception as e:
             # A patient-scrape failure shouldn't abort the Tebra passes; match
             # will just reconcile against whatever roster exists.
-            print(f"[RUN] patient roster scrape failed (continuing): {e!r}")
+            _log(f"Patient roster scrape failed (continuing): {e!r}")
 
     from .config import LOGIN_URL, EMAIL, PASSWORD
 
@@ -88,13 +102,12 @@ def run(sel: WorkSelector, scrape_patients=None, no_upload=False):
     else:
         practices = discovered
 
-    print(f"[RUN] mode={sel.mode} practices={practices}")
+    _log(f"Resolved practices count={len(practices)} practices={practices}")
 
     completed, failed = [], []
     for practice in practices:
-        print("=" * 60)
-        print(f"[PRACTICE] {practice}")
-        print("=" * 60)
+        _log(f"Practice start name={practice}")
+        practice_clock = time.monotonic()
         psel = WorkSelector(
             mode=sel.mode, practice=practice,
             start_date=sel.start_date, end_date=sel.end_date,
@@ -115,19 +128,39 @@ def run(sel: WorkSelector, scrape_patients=None, no_upload=False):
             context = browser.new_context(no_viewport=True)
             page = context.new_page()
             try:
+                phase_clock = time.monotonic()
                 login_and_select_practice(page, practice)
+                _log(f"Practice={practice} login/select done elapsed={time.monotonic() - phase_clock:.1f}s")
 
                 if psel.mode in ("daily", "backfill"):
+                    phase_clock = time.monotonic()
                     pass_appointments(page, psel, practice, from_date, to_date)
+                    _log(f"Practice={practice} appointments pass done elapsed={time.monotonic() - phase_clock:.1f}s")
 
+                phase_clock = time.monotonic()
                 pass_notes(page, psel)          # marks signed + records charge_status
+                _log(f"Practice={practice} notes pass done elapsed={time.monotonic() - phase_clock:.1f}s")
+
+                phase_clock = time.monotonic()
                 pass_facesheets(page, context, psel)   # normal + missed-charges re-download
+                _log(f"Practice={practice} facesheets pass done elapsed={time.monotonic() - phase_clock:.1f}s")
+
+                phase_clock = time.monotonic()
                 pass_charges(page, psel)        # VIEW CHARGE -> charge_data
+                _log(f"Practice={practice} charges pass done elapsed={time.monotonic() - phase_clock:.1f}s")
+
+                phase_clock = time.monotonic()
                 pass_zip(psel, practice, no_upload=no_upload)  # one ZIP incl. charge_data
+                _log(f"Practice={practice} zip/upload pass done elapsed={time.monotonic() - phase_clock:.1f}s")
+
+                phase_clock = time.monotonic()
                 pass_patient_match(psel, practice, from_date, to_date)
+                _log(f"Practice={practice} patient-match pass done elapsed={time.monotonic() - phase_clock:.1f}s")
+
                 completed.append(practice)
+                _log(f"Practice success name={practice} elapsed={time.monotonic() - practice_clock:.1f}s")
             except Exception as e:
-                print(f"[RUN] practice {practice} failed: {e!r}")
+                _log(f"Practice failed name={practice} error={e!r}")
                 failed.append(practice)
             finally:
                 try:
@@ -137,6 +170,10 @@ def run(sel: WorkSelector, scrape_patients=None, no_upload=False):
 
     _log_run(sel, run_start)
     cleanup_acc_directory()
+    _log(
+        f"Run finished completed={completed} failed={failed} "
+        f"elapsed={time.monotonic() - run_clock:.1f}s"
+    )
     return {"practices": practices, "completed": completed, "failed": failed}
 
 
@@ -157,10 +194,10 @@ def _log_run(sel, run_start):
         cur.close()
         conn.close()
     except Exception as e:
-        print(f"[RUN] error-check failed: {e}")
+        _log(f"Run summary error-check failed: {e}")
 
     label = sel.practice or "ALL"
-    log_run_to_pch(
+    log_run_event(
         script_name="OPS_EMR_RPA",
         process_type=f"RCM - {label} ({sel.mode})",
         status="Error" if has_error else "Success",

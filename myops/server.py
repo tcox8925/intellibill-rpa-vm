@@ -13,21 +13,27 @@ endpoint now builds a WorkSelector and calls the one pipeline.
 import os
 import logging
 import threading
+import time
 import uuid
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
 from fastapi import FastAPI, HTTPException
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 from ehr.pipeline import run
 from ehr.selector import WorkSelector
-from ehr.db import log_run_to_pch, ensure_appointments_schema
+from ehr.db import log_run_event, ensure_appointments_schema
 from ehr.config import ENTITY, SUB_ENTITY, EHR_NAME
 from ehr.patients import run_patient_insurance_rpa
 from ehr.session import normalize_practice_compare
 
 log = logging.getLogger(__name__)
+
+
+def _slog(message: str):
+    print(f"[SERVER] [{datetime.now(CST).strftime('%Y-%m-%d %H:%M:%S %Z')}] {message}", flush=True)
 
 
 def _env_name() -> str:
@@ -60,7 +66,7 @@ def _run_migrations():
 
 def _log_rpa_run(product_name, entity, sub_entity, start_dt, end_dt,
                  has_error, error_message=None, success_message=None):
-    log_run_to_pch(
+    log_run_event(
         script_name="OPS_EMR_RPA",
         process_type=product_name,
         status="Error" if has_error else "Success",
@@ -81,6 +87,7 @@ class TebraRequest(BaseModel):
     start_date: str
     end_date: str
     practice_name: str
+    wait_for_completion: bool = True
     entity: str | None = None
     sub_entity: str | None = None
     ehr_name: str | None = None
@@ -126,6 +133,8 @@ def healthz():
 
 @app.post("/run-tebra")
 def run_tebra(request: TebraRequest):
+    request_clock = time.monotonic()
+    req_id = str(uuid.uuid4())
     start_dt = datetime.strptime(request.start_date, "%Y-%m-%d")
     end_dt = datetime.strptime(request.end_date, "%Y-%m-%d")
     validate_dates(start_dt, end_dt)
@@ -135,16 +144,54 @@ def run_tebra(request: TebraRequest):
     sub_entity = (request.sub_entity or SUB_ENTITY).strip()
     ehr_name = (request.ehr_name or EHR_NAME).strip()
 
+    _slog(
+        f"run-tebra received req_id={req_id} practice={practice_name} "
+        f"window={request.start_date}..{request.end_date} wait_for_completion={request.wait_for_completion}"
+    )
+
     lock = _acquire_key_lock(f"tebra::{entity}::{practice_name}")
+
+    def _execute_run():
+        _slog(f"run-tebra executing req_id={req_id}")
+        sel = WorkSelector.backfill(
+            start_date=start_dt.date(), end_date=end_dt.date(),
+            practice=practice_name,
+        )
+        sel.entity, sel.sub_entity, sel.ehr_name = entity, sub_entity, ehr_name
+        summary = run(sel, scrape_patients=False)
+        _slog(f"run-tebra done req_id={req_id} summary={summary}")
+        return summary
 
     def _runner():
         try:
-            sel = WorkSelector.backfill(
-                start_date=start_dt.date(), end_date=end_dt.date(),
-                practice=practice_name,
+            _execute_run()
+        except Exception as e:
+            _slog(f"run-tebra failed req_id={req_id} error={e!r}")
+        finally:
+            try:
+                lock.release()
+            except Exception:
+                pass
+            _slog(
+                f"run-tebra background cleanup req_id={req_id} "
+                f"elapsed={time.monotonic() - request_clock:.1f}s"
             )
-            sel.entity, sel.sub_entity, sel.ehr_name = entity, sub_entity, ehr_name
-            run(sel)
+
+    if request.wait_for_completion:
+        try:
+            summary = _execute_run()
+            _slog(
+                f"run-tebra response completed req_id={req_id} "
+                f"elapsed={time.monotonic() - request_clock:.1f}s"
+            )
+            return {
+                "status": "completed",
+                "request_id": req_id,
+                "practice": practice_name,
+                "start_date": request.start_date,
+                "end_date": request.end_date,
+                "summary": summary,
+            }
         finally:
             try:
                 lock.release()
@@ -152,8 +199,18 @@ def run_tebra(request: TebraRequest):
                 pass
 
     threading.Thread(target=_runner, daemon=True).start()
-    return {"status": "started", "practice": practice_name,
-            "start_date": request.start_date, "end_date": request.end_date}
+    _slog(f"run-tebra accepted background req_id={req_id}")
+    return JSONResponse(
+        status_code=202,
+        content={
+            "status": "started",
+            "request_id": req_id,
+            "practice": practice_name,
+            "start_date": request.start_date,
+            "end_date": request.end_date,
+            "message": "Run accepted and executing in background. Set wait_for_completion=true to wait for completion.",
+        },
+    )
 
 
 @app.post("/run-tebra-daily")

@@ -1,12 +1,8 @@
-"""
-Postgres (pch) connection and run-logging. Azure credential brokering lives
-in azure_conn.py (imported here) so DB logic and cloud-auth stay separate.
-"""
+"""Postgres connection helpers for EHR pipeline writes."""
 
-import uuid
 import psycopg2
 
-from .config import POSTGRES_CONFIG_EHR, POSTGRES_CONFIG_PCH
+from .config import POSTGRES_CONFIG_EHR
 
 
 def _resolve_db_password(db_config):
@@ -16,17 +12,6 @@ def _resolve_db_password(db_config):
     raise RuntimeError(
         "Database password is required for password auth mode. "
         "Set the corresponding *_DB_PASSWORD in .env."
-    )
-
-
-def get_pch_connection():
-    """Connect to the PCH database for legacy log writes."""
-    return psycopg2.connect(
-        host=POSTGRES_CONFIG_PCH["host"],
-        dbname=POSTGRES_CONFIG_PCH["database"],
-        user=POSTGRES_CONFIG_PCH["user"],
-        password=_resolve_db_password(POSTGRES_CONFIG_PCH),
-        sslmode="require",
     )
 
 
@@ -41,41 +26,11 @@ def get_ehr_connection():
     )
 
 
-def log_run_to_pch(script_name, process_type, status, error,
-                   company_id, started_at, ended_at,
-                   carrier_id=None, file_path=None):
-    """
-    Write one run-log row to wpo.ops_pch_logs on both PCH and EHR/RCM.
-    Never raises — a logging failure must not fail a run.
-    """
-    txn_id = str(uuid.uuid4())
-    targets = [
-        ("pch", get_pch_connection),
-        ("ehr", get_ehr_connection),
-    ]
-    for target_name, get_connection in targets:
-        try:
-            conn = get_connection()
-            try:
-                cur = conn.cursor()
-                cur.execute(
-                    """
-                    INSERT INTO wpo.ops_pch_logs (
-                        txn_id, script_name, process_type, status, error,
-                        company_id, carrier_id, file_path, started_at, ended_at
-                    )
-                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
-                    """,
-                    (
-                        txn_id, script_name, process_type, status, error,
-                        company_id, carrier_id, file_path, started_at, ended_at,
-                    ),
-                )
-                conn.commit()
-            finally:
-                conn.close()
-        except Exception as e:
-            print(f"[LOG-WRITE] Failed to write run log on {target_name}: {e}")
+def log_run_event(script_name, process_type, status, error,
+                  company_id, started_at, ended_at,
+                  carrier_id=None, file_path=None):
+    """Run-log writes are intentionally disabled in the new package."""
+    return
 
 
 def ensure_appointments_schema():
