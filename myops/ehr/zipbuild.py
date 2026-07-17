@@ -11,6 +11,7 @@ every appointment included in the uploaded ZIP.
 import os
 import json
 import random
+import re
 import string
 import zipfile
 
@@ -18,10 +19,10 @@ from azure.storage.blob import BlobServiceClient
 
 from .config import (
     TABLE_NAME, DOWNLOAD_DIR, STORAGE_ACCOUNT_NAME, AZURE_STORAGE_CONNECTION_STRING,
+    RCM_ATTACHMENTS_CONTAINER,
 )
 from .db import get_ehr_connection
 from .query import scope_clause
-from .matching import normalize_text
 from .session import now_cst
 
 
@@ -37,48 +38,101 @@ def generate_random_suffix(length=4):
     return "".join(random.choices(string.digits, k=length))
 
 
-def upload_zip_to_rcm_sftp(local_zip_path, zip_name, practice_name):
-    SFTP_CONTAINER = "834labs-sftp"
-    print(f"[SFTP] Uploading zip to {STORAGE_ACCOUNT_NAME}/{SFTP_CONTAINER}")
+def _safe_segment(value):
+    """Sanitize blob path segments to avoid accidental nested paths."""
+    text = str(value or "").strip()
+    text = text.replace("/", "-").replace("\\", "-")
+    return text
+
+
+def _resolve_inbound_folder_from_db(cur, practice_name):
+    """
+    Resolve mapped folder:
+      EDI_Tebra.group.grpName -> client_id -> client.client_taxid + client.entity_id
+
+    Returns:
+      <client_taxid>-<entity_id>/Exchange/Medical Extraction/INBOUND
+    """
+    practice = (practice_name or "").strip()
+    if not practice:
+        raise RuntimeError("Practice name is required for upload path resolution")
+
+    cur.execute(
+        """
+        SELECT c."client_taxid", g."entity_id"
+        FROM "EDI_Tebra"."group" g
+        JOIN "EDI_Tebra"."client" c ON c."client_id" = g."client_id"
+        WHERE replace(lower(trim(g."grp_name")), ' ', '') = replace(lower(trim(%s)), ' ', '')
+        LIMIT 1
+        """,
+        (practice,),
+    )
+    row = cur.fetchone()
+    if not row:
+        raise RuntimeError(
+            f"No client mapping found for practice '{practice_name}' in EDI_Tebra.group"
+        )
+
+    client_taxid, entity_id = row
+    taxid = _safe_segment(client_taxid)
+    ent = _safe_segment(entity_id)
+    if not taxid or not ent:
+        raise RuntimeError(
+            f"Invalid mapping values for practice '{practice_name}': "
+            f"client_taxid={client_taxid!r}, entity_id={entity_id!r}"
+        )
+    return f"{taxid}-{ent}/Exchange/Medical Extraction/INBOUND"
+
+
+def upload_zip_to_rcm_sftp(local_zip_path, zip_name, practice_name, db_cursor=None):
+    sftp_container = RCM_ATTACHMENTS_CONTAINER
+    print(
+        f"[SFTP] Upload start account={STORAGE_ACCOUNT_NAME} "
+        f"container={sftp_container}",
+        flush=True,
+    )
 
     service = BlobServiceClient.from_connection_string(AZURE_STORAGE_CONNECTION_STRING)
-    container = service.get_container_client(SFTP_CONTAINER)
+    container = service.get_container_client(sftp_container)
+    try:
+        container.create_container()
+        print(f"[SFTP] Created container {sftp_container}", flush=True)
+    except Exception:
+        pass
 
-    normalized_practice = normalize_text(practice_name)
-    print(f"[SFTP] Looking for folder matching: {practice_name} ({normalized_practice})")
+    owns_conn = False
+    conn = None
+    cur = db_cursor
+    if cur is None:
+        conn = get_ehr_connection()
+        cur = conn.cursor()
+        owns_conn = True
 
-    folders = set()
-    for blob in container.list_blobs():
-        parts = blob.name.split("/")
-        if len(parts) > 1:
-            folders.add(parts[0])
-    print(f"[SFTP] Found folders: {folders}")
+    try:
+        inbound_folder = _resolve_inbound_folder_from_db(cur, practice_name)
+    finally:
+        if owns_conn and conn is not None:
+            try:
+                cur.close()
+            except Exception:
+                pass
+            conn.close()
 
-    matched_folder = None
-    for folder in folders:
-        if normalized_practice in normalize_text(folder):
-            matched_folder = folder
-            print(f"[SFTP] Matched via normalized match: {matched_folder}")
-            break
-    if not matched_folder and practice_name in folders:
-        matched_folder = practice_name
-        print(f"[SFTP] Matched via exact name: {matched_folder}")
-    if not matched_folder:
-        matched_folder = practice_name.strip()
-        print(f"[SFTP] No match found. Creating new folder: {matched_folder}")
-        container.upload_blob(f"{matched_folder}/.init", b"", overwrite=True)
-
-    blob_path = f"{matched_folder}/{zip_name}"
+    blob_path = f"{inbound_folder}/{zip_name}"
     with open(local_zip_path, "rb") as f:
         container.upload_blob(blob_path, f, overwrite=True)
-    print(f"[SFTP] Uploaded {zip_name} to {matched_folder}/")
+    print(
+        f"[SFTP] Upload success zip={zip_name} "
+        f"path={blob_path}",
+        flush=True,
+    )
     return blob_path
 
 
 def pass_zip(sel, practice_name, no_upload=False):
     """
     Build ONE ZIP for the selection's processed signed-note appointments and
-    deliver it to the practice folder in 834labs-sftp. ZIP name uses the
+    deliver it to the mapped client folder inside the configured container. ZIP name uses the
     window end date (backfill) / today (daily). JSON carries charge_data when
     captured.
     """
@@ -113,8 +167,13 @@ def pass_zip(sel, practice_name, no_upload=False):
         )
         appt_rows = cur.fetchall()
         if not appt_rows:
-            print("[ZIP] No processed signed-note appointments. Skipping zip.")
-            return
+            print("[ZIP] No processed signed-note appointments. Skipping zip.", flush=True)
+            return {
+                "attempted_count": 0,
+                "uploaded_count": 0,
+                "failed_count": 0,
+                "container": RCM_ATTACHMENTS_CONTAINER,
+            }
 
         # folder date: end of window (backfill) else today
         folder_dt = sel.end_date or now_cst().date()
@@ -157,18 +216,53 @@ def pass_zip(sel, practice_name, no_upload=False):
         print(f"[ZIP] {len(records)} appointments, {len(needed_pdfs)} unique PDFs")
 
         # Drop records whose local PDF is missing this run.
+        missing_pdf_files = []
+        missing_pdf_db_ids = []
         for facesheet_id, pdf_filename in list(needed_pdfs.items()):
             if not os.path.exists(os.path.join(DOWNLOAD_DIR, pdf_filename)):
-                print(f"[ZIP] Missing local PDF {pdf_filename}")
+                print(f"[ZIP] Missing local PDF {pdf_filename}", flush=True)
+                missing_pdf_files.append(pdf_filename)
+                dropped_ids = [
+                    included_db_ids[i]
+                    for i, r in enumerate(records)
+                    if r["facesheet_id"] == facesheet_id
+                ]
+                missing_pdf_db_ids.extend(dropped_ids)
                 keep = [i for i, r in enumerate(records) if r["facesheet_id"] != facesheet_id]
                 before = len(records)
                 records = [records[i] for i in keep]
                 included_db_ids = [included_db_ids[i] for i in keep]
-                print(f"[ZIP] Dropped {before - len(records)} records")
+                print(f"[ZIP] Dropped {before - len(records)} records", flush=True)
+
+        if missing_pdf_db_ids:
+            cur.execute(
+                f"""
+                UPDATE {TABLE_NAME}
+                SET process_status='Error',
+                    process_error_stage='ZIP',
+                    process_error_message=%s,
+                    updated_date=now()
+                WHERE id = ANY(%s)
+                """,
+                (
+                    "Missing local PDF during ZIP build; facesheet will be re-downloaded on next run",
+                    missing_pdf_db_ids,
+                ),
+            )
+            conn.commit()
 
         if not records:
-            print("[ZIP] No records left after local-PDF checks. Skipping zip.")
-            return
+            print("[ZIP] No records left after local-PDF checks. Skipping zip.", flush=True)
+            return {
+                "attempted_count": 0,
+                "uploaded_count": 0,
+                "failed_count": 1,
+                "container": RCM_ATTACHMENTS_CONTAINER,
+                "upload_error": (
+                    "All ZIP candidates were missing local PDFs. "
+                    f"missing={len(missing_pdf_files)}"
+                ),
+            }
 
         practice_abbr = get_practice_abbr(practice_name)
         suffix = generate_random_suffix()
@@ -199,14 +293,41 @@ def pass_zip(sel, practice_name, no_upload=False):
         if no_upload:
             print(f"[ZIP][DRY-RUN] Built {zip_name} ({len(unique_pdfs)} PDFs) at "
                   f"{zip_path} — skipping SFTP upload and file_path write-back. "
-                  f"Local ZIP kept for inspection.")
-            return
+                  f"Local ZIP kept for inspection.", flush=True)
+            return {
+                "attempted_count": 0,
+                "uploaded_count": 0,
+                "failed_count": 0,
+                "container": RCM_ATTACHMENTS_CONTAINER,
+            }
 
         zip_blob_path = None
+        attempted_count = 1
+        uploaded_count = 0
+        failed_count = 0
+        upload_error = None
         try:
-            zip_blob_path = upload_zip_to_rcm_sftp(zip_path, zip_name, practice_name)
+            zip_blob_path = upload_zip_to_rcm_sftp(
+                zip_path,
+                zip_name,
+                practice_name,
+                db_cursor=cur,
+            )
+            uploaded_count = 1
         except Exception as e:
-            print(f"[ZIP SFTP ERROR] {e}")
+            failed_count = 1
+            upload_error = str(e)
+            print(
+                f"[ZIP SFTP ERROR] practice={practice_name} zip={zip_name} error={e}",
+                flush=True,
+            )
+
+        print(
+            f"[ZIP] Upload summary practice={practice_name} "
+            f"container={RCM_ATTACHMENTS_CONTAINER} attempted={attempted_count} "
+            f"uploaded={uploaded_count} failed={failed_count}",
+            flush=True,
+        )
 
         if included_db_ids and zip_blob_path:
             cur.execute(
@@ -224,6 +345,15 @@ def pass_zip(sel, practice_name, no_upload=False):
                 os.remove(os.path.join(DOWNLOAD_DIR, pdf_filename))
             except OSError:
                 pass
+        return {
+            "attempted_count": attempted_count,
+            "uploaded_count": uploaded_count,
+            "failed_count": failed_count,
+            "container": RCM_ATTACHMENTS_CONTAINER,
+            "blob_path": zip_blob_path,
+            "zip_name": zip_name,
+            "upload_error": upload_error,
+        }
     finally:
         cur.close()
         conn.close()

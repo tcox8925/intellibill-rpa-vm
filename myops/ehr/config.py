@@ -59,6 +59,7 @@ PASSWORD = os.environ.get("TEBRA_PASSWORD", "").strip()
 # ---- Blob delivery (834labs-sftp) ----
 STORAGE_ACCOUNT_NAME = os.environ.get("TEBRA_STORAGE_ACCOUNT_NAME", "").strip()
 AZURE_STORAGE_CONNECTION_STRING = os.environ.get("AZURE_STORAGE_CONNECTION_STRING", "").strip()
+RCM_ATTACHMENTS_CONTAINER = os.environ.get("RCM_ATTACHMENTS_CONTAINER", "rcm-attachments").strip() or "rcm-attachments"
 
 
 # ---- Playwright runtime mode ----

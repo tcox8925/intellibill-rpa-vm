@@ -151,8 +151,20 @@ def run(sel: WorkSelector, scrape_patients=None, no_upload=False):
                 _log(f"Practice={practice} charges pass done elapsed={time.monotonic() - phase_clock:.1f}s")
 
                 phase_clock = time.monotonic()
-                pass_zip(psel, practice, no_upload=no_upload)  # one ZIP incl. charge_data
-                _log(f"Practice={practice} zip/upload pass done elapsed={time.monotonic() - phase_clock:.1f}s")
+                zip_result = pass_zip(psel, practice, no_upload=no_upload)  # one ZIP incl. charge_data
+                zip_result = zip_result or {}
+                _log(
+                    f"Practice={practice} zip/upload pass done elapsed={time.monotonic() - phase_clock:.1f}s "
+                    f"attempted={zip_result.get('attempted_count', 0)} "
+                    f"uploaded={zip_result.get('uploaded_count', 0)} "
+                    f"failed={zip_result.get('failed_count', 0)} "
+                    f"container={zip_result.get('container', 'n/a')}"
+                )
+                if zip_result.get("failed_count", 0) > 0:
+                    raise RuntimeError(
+                        "ZIP upload failed: "
+                        f"{zip_result.get('upload_error') or 'unknown upload error'}"
+                    )
 
                 phase_clock = time.monotonic()
                 pass_patient_match(psel, practice, from_date, to_date)
