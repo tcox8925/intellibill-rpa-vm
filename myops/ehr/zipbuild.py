@@ -45,46 +45,14 @@ def _safe_segment(value):
     return text
 
 
-def _resolve_inbound_folder_from_db(cur, practice_name):
-    """
-    Resolve mapped folder:
-      EDI_Tebra.group.grpName -> client_id -> client.client_taxid + client.entity_id
-
-    Returns:
-      <client_taxid>-<entity_id>/Exchange/Medical Extraction/INBOUND
-    """
-    practice = (practice_name or "").strip()
-    if not practice:
-        raise RuntimeError("Practice name is required for upload path resolution")
-
-    cur.execute(
-        """
-        SELECT c."client_taxid", g."entity_id"
-        FROM "EDI_Tebra"."group" g
-        JOIN "EDI_Tebra"."client" c ON c."client_id" = g."client_id"
-        WHERE replace(lower(trim(g."grp_name")), ' ', '') = replace(lower(trim(%s)), ' ', '')
-        LIMIT 1
-        """,
-        (practice,),
-    )
-    row = cur.fetchone()
-    if not row:
-        raise RuntimeError(
-            f"No client mapping found for practice '{practice_name}' in EDI_Tebra.group"
-        )
-
-    client_taxid, entity_id = row
-    taxid = _safe_segment(client_taxid)
-    ent = _safe_segment(entity_id)
-    if not taxid or not ent:
-        raise RuntimeError(
-            f"Invalid mapping values for practice '{practice_name}': "
-            f"client_taxid={client_taxid!r}, entity_id={entity_id!r}"
-        )
-    return f"{taxid}-{ent}/Exchange/Medical Extraction/INBOUND"
+def _resolve_inbound_folder_from_structure(folder_structure):
+    folder_root = _safe_segment(folder_structure)
+    if not folder_root:
+        raise RuntimeError("folder_structure is required for upload path resolution")
+    return f"{folder_root}/Exchange/Medical Extraction/INBOUND"
 
 
-def upload_zip_to_rcm_sftp(local_zip_path, zip_name, practice_name, db_cursor=None):
+def upload_zip_to_rcm_sftp(local_zip_path, zip_name, folder_structure):
     sftp_container = RCM_ATTACHMENTS_CONTAINER
     print(
         f"[SFTP] Upload start account={STORAGE_ACCOUNT_NAME} "
@@ -100,23 +68,7 @@ def upload_zip_to_rcm_sftp(local_zip_path, zip_name, practice_name, db_cursor=No
     except Exception:
         pass
 
-    owns_conn = False
-    conn = None
-    cur = db_cursor
-    if cur is None:
-        conn = get_ehr_connection()
-        cur = conn.cursor()
-        owns_conn = True
-
-    try:
-        inbound_folder = _resolve_inbound_folder_from_db(cur, practice_name)
-    finally:
-        if owns_conn and conn is not None:
-            try:
-                cur.close()
-            except Exception:
-                pass
-            conn.close()
+    inbound_folder = _resolve_inbound_folder_from_structure(folder_structure)
 
     blob_path = f"{inbound_folder}/{zip_name}"
     with open(local_zip_path, "rb") as f:
@@ -310,8 +262,7 @@ def pass_zip(sel, practice_name, no_upload=False):
             zip_blob_path = upload_zip_to_rcm_sftp(
                 zip_path,
                 zip_name,
-                practice_name,
-                db_cursor=cur,
+                sel.folder_structure,
             )
             uploaded_count = 1
         except Exception as e:

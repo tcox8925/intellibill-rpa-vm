@@ -87,6 +87,7 @@ class TebraRequest(BaseModel):
     start_date: str
     end_date: str
     practice_name: str
+    folder_structure: str | None = None
     wait_for_completion: bool = True
     entity: str | None = None
     sub_entity: str | None = None
@@ -156,6 +157,7 @@ def run_tebra(request: TebraRequest):
         sel = WorkSelector.backfill(
             start_date=start_dt.date(), end_date=end_dt.date(),
             practice=practice_name,
+            folder_structure=request.folder_structure,
         )
         sel.entity, sel.sub_entity, sel.ehr_name = entity, sub_entity, ehr_name
         summary = run(sel, scrape_patients=False)

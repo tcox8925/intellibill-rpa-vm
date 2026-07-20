@@ -30,6 +30,7 @@ from .config import ENTITY, SUB_ENTITY, EHR_NAME
 class WorkSelector:
     mode: str  # 'daily' | 'backfill' | 'target'
     practice: Optional[str] = None          # None = all discovered practices
+    folder_structure: Optional[str] = None  # Upload folder root from payload
     start_date: Optional[date] = None
     end_date: Optional[date] = None
     appt_id: Optional[str] = None
@@ -67,31 +68,34 @@ class WorkSelector:
     # ---- Convenience constructors ----
 
     @classmethod
-    def daily(cls, practice=None):
-        return cls(mode="daily", practice=practice)
+    def daily(cls, practice=None, folder_structure=None):
+        return cls(mode="daily", practice=practice, folder_structure=folder_structure)
 
     @classmethod
-    def backfill(cls, start_date, end_date, practice=None):
+    def backfill(cls, start_date, end_date, practice=None, folder_structure=None):
         return cls(
             mode="backfill",
             start_date=start_date,
             end_date=end_date,
             practice=practice,
+            folder_structure=folder_structure,
         )
 
     @classmethod
-    def target(cls, appt_id=None, patient_name=None, on_date=None, practice=None):
+    def target(cls, appt_id=None, patient_name=None, on_date=None, practice=None,
+               folder_structure=None):
         return cls(
             mode="target",
             appt_id=appt_id,
             patient_name=patient_name,
             start_date=on_date,
             practice=practice,
+            folder_structure=folder_structure,
         )
 
     @classmethod
     def from_args(cls, start_date=None, end_date=None, appt_id=None,
-                  patient_name=None, practice=None):
+                  patient_name=None, practice=None, folder_structure=None):
         """
         Infer mode from whatever the caller supplied:
           nothing                          -> daily
@@ -99,12 +103,18 @@ class WorkSelector:
           appt_id / name / single date     -> target
         """
         if start_date and end_date:
-            return cls.backfill(start_date, end_date, practice=practice)
+            return cls.backfill(
+                start_date,
+                end_date,
+                practice=practice,
+                folder_structure=folder_structure,
+            )
         if appt_id or patient_name or start_date:
             return cls.target(
                 appt_id=appt_id,
                 patient_name=patient_name,
                 on_date=start_date,
                 practice=practice,
+                folder_structure=folder_structure,
             )
-        return cls.daily(practice=practice)
+        return cls.daily(practice=practice, folder_structure=folder_structure)
