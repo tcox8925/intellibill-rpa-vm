@@ -97,8 +97,17 @@ def run(sel: WorkSelector, scrape_patients=None, no_upload=False):
         discovered = discover_practices(page)
         browser.close()
 
+    skipped = []
     if sel.practice:
-        practices = [resolve_practice_name(sel.practice, discovered)]
+        try:
+            practices = [resolve_practice_name(sel.practice, discovered)]
+        except Exception as e:
+            _log(
+                f"Requested practice not found in Tebra UI; skipping "
+                f"practice={sel.practice!r} error={e!r}"
+            )
+            practices = []
+            skipped.append(sel.practice)
     else:
         practices = discovered
 
@@ -111,6 +120,7 @@ def run(sel: WorkSelector, scrape_patients=None, no_upload=False):
         practice_clock = time.monotonic()
         psel = WorkSelector(
             mode=sel.mode, practice=practice,
+            folder_structure=sel.folder_structure,
             start_date=sel.start_date, end_date=sel.end_date,
             appt_id=sel.appt_id, patient_name=sel.patient_name,
             entity=sel.entity, sub_entity=sel.sub_entity, ehr_name=sel.ehr_name,
@@ -192,6 +202,7 @@ def run(sel: WorkSelector, scrape_patients=None, no_upload=False):
         "practices": practices,
         "completed": completed,
         "failed": failed,
+        "skipped": skipped,
         "failed_details": failed_details,
     }
 
