@@ -52,6 +52,10 @@ desktop.ini
 config.json
 secrets.json
 
+# Practice Fusion selector configs are non-secret code, not runtime output
+!pf-soap-sync/pf_pdf_sync_config.json
+!pf-soap-sync/pf_appointment_report_config.json
+
 # ======================================
 # BYTECODE & CACHE
 # ======================================
