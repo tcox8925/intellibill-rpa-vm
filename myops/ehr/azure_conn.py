@@ -29,17 +29,27 @@ _cached_sp_credential = None
 def get_sp_credential():
     """
     Build and cache the ServicePrincipalCredential so we don't hit Key Vault
-    on every DB / blob call.
+    on every DB / blob call. Prefers the creds already present in the
+    environment (.env); only hits Key Vault if they're not set there.
     """
     global _cached_sp_credential
     if _cached_sp_credential is None:
-        kv = SecretClient(
-            vault_url=KEY_VAULT_URL,
-            credential=DefaultAzureCredential(),
-        )
+        tenant_id = os.environ.get("AZURE_TENANT_ID", "").strip()
+        client_id = os.environ.get("AZURE_CLIENT_ID", "").strip()
+        client_secret = os.environ.get("AZURE_CLIENT_SECRET", "").strip()
+
+        if not (tenant_id and client_id and client_secret):
+            kv = SecretClient(
+                vault_url=KEY_VAULT_URL,
+                credential=DefaultAzureCredential(),
+            )
+            tenant_id = kv.get_secret(TENANT_ID_KEY).value
+            client_id = kv.get_secret(CLIENT_ID_KEY).value
+            client_secret = kv.get_secret(CLIENT_SECRET_KEY).value
+
         _cached_sp_credential = ClientSecretCredential(
-            tenant_id=kv.get_secret(TENANT_ID_KEY).value,
-            client_id=kv.get_secret(CLIENT_ID_KEY).value,
-            client_secret=kv.get_secret(CLIENT_SECRET_KEY).value,
+            tenant_id=tenant_id,
+            client_id=client_id,
+            client_secret=client_secret,
         )
     return _cached_sp_credential

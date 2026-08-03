@@ -159,6 +159,35 @@ def _normalize_text(text):
 # UI HELPERS
 # =========================================================
 
+def _wait_for_grid_content_stable(page, checks=3, interval_ms=250, max_polls=20):
+    """
+    "Some row exists" can be true from the PREVIOUS filter/search's rows while
+    the new one's request is still in flight — a stale-DOM race that makes
+    row lookups (or a full-grid scrape) read data that's about to be
+    replaced. Poll each row's data-id (MUI DataGrid's own row key) until the
+    set stops changing across a few consecutive reads, so callers only
+    proceed once the grid has actually caught up to the latest change.
+    """
+    prev = None
+    stable = 0
+    for _ in range(max_polls):
+        try:
+            ids = page.evaluate(
+                "() => Array.from(document.querySelectorAll('.MuiDataGrid-row'))"
+                ".map(r => r.getAttribute('data-id'))"
+            )
+        except Exception:
+            ids = None
+        if ids is not None and ids == prev:
+            stable += 1
+            if stable >= checks:
+                return
+        else:
+            stable = 0
+        prev = ids
+        page.wait_for_timeout(interval_ms)
+
+
 def wait_for_grid_settled(page, timeout_ms=60_000):
     page.wait_for_selector(".MuiDataGrid-virtualScroller", timeout=timeout_ms)
     page.wait_for_function(
@@ -175,6 +204,7 @@ def wait_for_grid_settled(page, timeout_ms=60_000):
         timeout=timeout_ms,
     )
     page.wait_for_timeout(300)
+    _wait_for_grid_content_stable(page)
 
 
 # =========================================================

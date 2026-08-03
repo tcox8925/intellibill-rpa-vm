@@ -98,12 +98,13 @@ def pass_zip(sel, practice_name, no_upload=False):
             "process_status = 'Processed'",
             "tebra_facesheet_id IS NOT NULL",
         ]
-        # daily/backfill: only rows NOT already delivered (file_path IS NULL),
-        # so the ZIP contains exactly what this run produced and never re-ships
-        # history (which caused the "Missing local PDF" flood — old delivered
-        # rows whose local PDFs were long since cleaned up). target mode is an
-        # on-demand re-delivery, so it zips the requested rows regardless.
-        if sel.mode != "target":
+        # daily: only rows NOT already delivered (file_path IS NULL), so the
+        # unbounded nightly sweep never re-ships the entire historical backlog
+        # (which caused the "Missing local PDF" flood — old delivered rows
+        # whose local PDFs were long since cleaned up). backfill/target are
+        # explicit, scoped requests — re-zip and re-upload regardless of
+        # file_path, same as the facesheet re-pull.
+        if sel.mode == "daily":
             where.append("file_path IS NULL")
         cur.execute(
             f"""

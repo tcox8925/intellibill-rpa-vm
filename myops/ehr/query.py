@@ -32,6 +32,14 @@ GATES = {
     "missed_charges": "retry_flag = 1 AND retry_reason = 'Missed Charges' AND appt_note IS NOT NULL",
 }
 
+# For backfill/target, "facesheets" should re-pull regardless of prior
+# process_status — the caller explicitly asked for this window/target, so
+# already-processed rows are redone too. Daily's unbounded sweep keeps the
+# full gate so it doesn't reprocess the entire historical backlog every night.
+UNGATED_REPULL = {
+    "facesheets": "appt_note IS NOT NULL",
+}
+
 
 def scope_clause(sel, alias=""):
     """
@@ -86,7 +94,12 @@ def build_appointment_query(sel, needing, table=TABLE_NAME):
         params.append(sel.practice)
 
     # Per-pass gate (parenthesized so it composes safely with AND filters).
-    where.append(f"({GATES[needing]})")
+    # backfill/target re-pull regardless of prior process_status/file_path for
+    # gates listed in UNGATED_REPULL; daily keeps the full "needs work" gate.
+    if sel.mode != "daily" and needing in UNGATED_REPULL:
+        where.append(f"({UNGATED_REPULL[needing]})")
+    else:
+        where.append(f"({GATES[needing]})")
 
     # Per-mode scope.
     if sel.mode == "backfill":
