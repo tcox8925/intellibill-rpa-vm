@@ -5,7 +5,9 @@ charges into PostgreSQL and delivers per-practice facesheet ZIPs to Azure Blob
 (`834labs-sftp`). One `WorkSelector` decides *what* to process; one pipeline
 processes it. Three modes: **daily**, **backfill**, **target**.
 
----
+--- Project Run 
+.venv/bin/python -m uvicorn server:app --host 0.0.0.0 --port 8010
+
 
 ## 1. What's in the package
 

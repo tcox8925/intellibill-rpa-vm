@@ -70,6 +70,58 @@ def _close_filters(page):
     page.wait_for_timeout(100)
 
 
+def ensure_worklist_filters_checked(page, group_names=("Providers", "Staff", "Rooms", "Service Locations")):
+    """
+    Open the Table filters drawer and select-all for each Provider/Staff/
+    Room/Service Location group, if present on this grid — otherwise
+    appointments outside whatever's checked by default are invisible in the
+    worklist no matter how long you wait or scroll for them. Same idea as
+    the dashboard's filter check (passes.py's _ensure_dashboard_filters),
+    just for the Worklist/Appointments grid used for facesheet lookups.
+    """
+    _open_filters(page)
+    for group_name in group_names:
+        group = page.locator(f"[data-testid='{group_name}-checkbox-group']")
+        if group.count() == 0:
+            continue
+        parent_cb = group.locator("input[type='checkbox']").first
+        if parent_cb.count() and not parent_cb.is_checked():
+            parent_cb.click(force=True)
+            page.wait_for_timeout(200)
+    _close_filters(page)
+    wait_for_grid_settled(page)
+
+
+def _wait_for_grid_content_stable(page, checks=3, interval_ms=250, max_polls=20):
+    """
+    "Some row exists" can be true from the PREVIOUS filter's rows while the
+    new filter's request is still in flight — a stale-DOM race that makes
+    row lookups (or a full-grid scrape) search data that's about to be
+    replaced. Poll each row's data-id (MUI DataGrid's own row key, stable
+    across any grid/columns) until the set stops changing across a few
+    consecutive reads, so callers only proceed once the grid has actually
+    caught up to the latest filter/date change.
+    """
+    prev = None
+    stable = 0
+    for _ in range(max_polls):
+        try:
+            ids = page.evaluate(
+                "() => Array.from(document.querySelectorAll('.MuiDataGrid-row'))"
+                ".map(r => r.getAttribute('data-id'))"
+            )
+        except Exception:
+            ids = None
+        if ids is not None and ids == prev:
+            stable += 1
+            if stable >= checks:
+                return
+        else:
+            stable = 0
+        prev = ids
+        page.wait_for_timeout(interval_ms)
+
+
 def wait_for_grid_settled(page, timeout_ms=60_000, max_retries=3):
     for attempt in range(1, max_retries + 1):
         try:
@@ -88,6 +140,7 @@ def wait_for_grid_settled(page, timeout_ms=60_000, max_retries=3):
                 timeout=timeout_ms,
             )
             page.wait_for_timeout(150)
+            _wait_for_grid_content_stable(page)
             return
         except Exception:
             if attempt < max_retries:
@@ -236,8 +289,16 @@ def scrape_virtual_grid(page, extract_fn, max_scrolls=300):
                 rec = extract_fn(r)
             except Exception:
                 continue
-            if rec.get("appt_id"):
-                seen[rec["appt_id"]] = rec
+            appt_id = rec.get("appt_id")
+            if not appt_id:
+                continue
+            prev = seen.get(appt_id)
+            if prev:
+                # A row can be revisited across scroll passes while mid-render
+                # (see cell()'s short timeout); don't let a blank re-read on a
+                # later pass clobber a good value captured earlier.
+                rec = {k: (v if v not in (None, "") else prev.get(k)) for k, v in rec.items()}
+            seen[appt_id] = rec
 
         stable = stable + 1 if len(seen) == last_count else 0
         if stable >= 5:

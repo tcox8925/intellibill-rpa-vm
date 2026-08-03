@@ -21,6 +21,7 @@ from .config import TABLE_NAME, PATIENTS_TABLE, DOWNLOAD_DIR
 from .browser import (
     apply_date_filter, wait_for_grid_settled,
     find_row_by_appt_id_with_scroll, click_patient_row, scrape_tebra_patient_id,
+    ensure_worklist_filters_checked,
 )
 import os
 import re
@@ -172,13 +173,17 @@ def _collect_cards(page, date_str):
                     link.first.inner_text().strip() if link.count() else card_text
                 )
                 key = name_key(card_patient)
-                if key in collected:
+                is_new = key not in collected
+                if not is_new and collected[key]["signed"]:
+                    # Already confirmed signed on an earlier pass — no need to
+                    # re-read (the signed badge doesn't un-sign itself).
                     continue
                 collected[key] = {
                     "signed": "Note Signed" in card_text,
                     "charge": _charge_badge(card_text),
                 }
-                new_this_pass += 1
+                if is_new:
+                    new_this_pass += 1
             except Exception as e:
                 print(f"[NOTES ERROR] collect card: {e}")
 
@@ -308,6 +313,7 @@ def _reset_to_grid(page):
     wait_for_grid_settled(page)
     page.locator("[data-testid='tree-option-All Appointments']").click()
     wait_for_grid_settled(page)
+    ensure_worklist_filters_checked(page)
 
 
 def _process_by_patient(page, context, cur, conn, rows, phase,
