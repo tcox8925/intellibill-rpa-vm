@@ -39,7 +39,6 @@ pydub
 pandas
 apscheduler
 playwright
-filelock
 
 # Cloud
 azure-identity<1.15.0

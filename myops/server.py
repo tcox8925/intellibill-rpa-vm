@@ -8,19 +8,6 @@ endpoint now builds a WorkSelector and calls the one pipeline.
 - /run-tebra-daily              — daily trigger for ALL Tebra practices
 - /run-patient-insurance-daily  — daily patient insurance scrape
 - /run-combined-daily           — patients, then Tebra daily (scheduled task)
-
-Practice Fusion (pf-soap-sync/pf_soap_sync_v5_13.py) is a standalone CLI, not
-an importable pipeline, so these shell out to it as a subprocess via pf.runner.
-Per the VM handoff (Practice_Fusion_SOAP_Sync_VM_Handoff_Revised.pdf), nightly
-is a Windows Scheduled Task, NOT a FastAPI endpoint — this API only exposes
-the manual per-appointment refresh path:
-
-- /appointments/{row_id}/refresh — POST, queues one refresh, returns 202 + job_id
-- /refresh-jobs/{job_id}         — GET, poll job status/result
-- /pf-status                     — GET, queue counts and unresolved/review rows
-
-Job state lives in pf.jobs (in-memory), standing in for the handoff's
-dbo.pf_refresh_jobs table until that SQL layer exists — see pf-soap-sync/README.md.
 """
 
 import os
@@ -41,9 +28,6 @@ from ehr.db import log_run_event, ensure_appointments_schema
 from ehr.config import ENTITY, SUB_ENTITY, EHR_NAME
 from ehr.patients import run_patient_insurance_rpa
 from ehr.session import normalize_practice_compare
-from pf import runner as pf_runner
-from pf import jobs as pf_jobs
-from pf.config import PF_ENTITY, PF_SUB_ENTITY
 
 log = logging.getLogger(__name__)
 
@@ -114,11 +98,6 @@ class DailyRequest(BaseModel):
     entity: str | None = None
     sub_entity: str | None = None
     ehr_name: str | None = None
-
-
-class PFRefreshRequest(BaseModel):
-    dry_run: bool = False
-    requested_by: str = ""
 
 
 def validate_dates(start_date: datetime, end_date: datetime):
@@ -356,59 +335,3 @@ def run_combined_daily(request: DailyRequest):
     return {"status": "started", "job_id": job_id,
             "date": str(datetime.now(CST).date()),
             "message": "Combined daily run started (patients first, then Tebra)"}
-
-
-@app.post("/appointments/{row_id}/refresh", status_code=202)
-def refresh_appointment(row_id: str, request: PFRefreshRequest):
-    """Matches the handoff's POST /appointments/{appointment_pk}/refresh. row_id
-    (the JSON queue's stable key) stands in for appointment_pk until the SQL
-    table exists — see pf-soap-sync/README.md."""
-    existing = pf_jobs.find_active_job_for_appointment(row_id)
-    if existing:
-        _slog(f"refresh-appointment row_id={row_id} reusing active job_id={existing['job_id']}")
-        return JSONResponse(status_code=202, content=existing)
-
-    job = pf_jobs.create_job(row_id, requested_by=request.requested_by)
-    _slog(f"refresh-appointment row_id={row_id} job_id={job['job_id']} accepted")
-
-    def _worker():
-        run_start = datetime.now(CST)
-        pf_jobs.mark_running(job["job_id"])
-        has_error, err = False, None
-        try:
-            pf_runner.run_refresh(row_id=row_id, dry_run=request.dry_run)
-            row = pf_runner.get_appointment_row(row_id)
-            status, message, pdf_uri = pf_runner.classify_refresh_outcome(row, request.dry_run)
-            pf_jobs.mark_done(job["job_id"], status, message=message, pdf_uri=pdf_uri)
-            has_error = status == "failed"
-            err = message if has_error else None
-        except pf_runner.PFWorkerBusyError as e:
-            has_error, err = True, str(e)
-            pf_jobs.mark_failed(job["job_id"], str(e))
-        except Exception as e:
-            has_error, err = True, repr(e)
-            pf_jobs.mark_failed(job["job_id"], repr(e))
-            _slog(f"refresh-appointment job_id={job['job_id']} failed error={e!r}")
-        finally:
-            _log_rpa_run("PF_REFRESH", PF_ENTITY, PF_SUB_ENTITY, run_start,
-                         datetime.now(CST), has_error, error_message=err)
-
-    threading.Thread(target=_worker, daemon=True).start()
-    return JSONResponse(status_code=202, content=job)
-
-
-@app.get("/refresh-jobs/{job_id}")
-def get_refresh_job(job_id: str):
-    job = pf_jobs.get_job(job_id)
-    if job is None:
-        raise HTTPException(status_code=404, detail="Unknown job_id")
-    return job
-
-
-@app.get("/pf-status")
-def pf_status(show_limit: int = 20):
-    try:
-        result = pf_runner.get_status(show_limit=show_limit)
-    except pf_runner.PFCommandError as e:
-        raise HTTPException(status_code=502, detail=str(e))
-    return {"status": "ok", "raw_output": result["stdout"]}
