@@ -1,5 +1,0 @@
-requests
-sqlalchemy
-psycopg2-binary
-tenacity
-# optional: urllib3 (installed as a dependency of requests)
