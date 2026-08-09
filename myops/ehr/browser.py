@@ -17,7 +17,15 @@ def slow_fill(locator, text):
 def cell(row, field):
     try:
         el = row.locator(f"div[data-field='{field}']")
-        if not el.count():
+        # el.count()==0 doesn't mean the field is empty -- it means the cell
+        # hasn't mounted into the DOM yet (MUI DataGrid builds a row's cells
+        # asynchronously, and a field can be briefly virtualized out even
+        # while the row itself is visible). Give it a real chance to attach
+        # instead of bailing instantly; only return None if it genuinely
+        # never shows up.
+        try:
+            el.wait_for(state="attached", timeout=1200)
+        except Exception:
             return None
         # Short timeout: during virtual-scroll a row can be mid-render or
         # detached. Return None so callers re-read on a later pass rather than
@@ -276,41 +284,76 @@ def scrape_tebra_patient_id(fs_page):
         return None
 
 
-def scrape_virtual_grid(page, extract_fn, max_scrolls=300):
-    """Scroll a MUI virtual DataGrid, collecting extract_fn(row) keyed by appt_id."""
-    seen = {}
-    stable = 0
-    last_count = 0
+def scrape_virtual_grid(page, extract_fn, max_scrolls=300, repair_passes=1):
+    """
+    Scroll a MUI virtual DataGrid top-to-bottom, collecting extract_fn(row)
+    keyed by appt_id.
 
-    for _ in range(max_scrolls):
-        rows = page.locator(".MuiDataGrid-row")
-        for r in rows.all():
+    A single top-to-bottom sweep with a full-screen, zero-overlap scroll step
+    reads almost every row exactly once. If a field misses on that one read
+    (cell() catching a row mid-render -- see cell()'s docstring), there is no
+    second chance and it's recorded as None/"" forever, even though Tebra's
+    own data isn't actually missing. To make that field-level flakiness
+    self-heal for real, do one or more full extra sweeps after the first,
+    each independently re-reading every row and patching only fields that
+    are still None/"" -- a field that already has a value is never
+    overwritten, so a bad read on a later sweep can't clobber a good one.
+    """
+    seen = {}
+
+    def _merge(rec):
+        appt_id = rec.get("appt_id")
+        if not appt_id:
+            return
+        prev = seen.get(appt_id)
+        if prev:
+            rec = {k: (v if v not in (None, "") else prev.get(k)) for k, v in rec.items()}
+        seen[appt_id] = rec
+
+    def _scroll_top():
+        return page.evaluate(
+            "() => { const g = document.querySelector('.MuiDataGrid-virtualScroller'); "
+            "return g ? g.scrollTop : 0; }"
+        )
+
+    def _scroll_to(pos):
+        page.evaluate(
+            "(p) => { const g = document.querySelector('.MuiDataGrid-virtualScroller'); "
+            "if (g) g.scrollTop = p; }",
+            pos,
+        )
+
+    def _scroll_forward():
+        page.evaluate(
+            "() => { const g = document.querySelector('.MuiDataGrid-virtualScroller'); "
+            "if (g) g.scrollTop += g.clientHeight; }"
+        )
+
+    def _scan_current():
+        for r in page.locator(".MuiDataGrid-row").all():
             try:
-                rec = extract_fn(r)
+                _merge(extract_fn(r))
             except Exception:
                 continue
-            appt_id = rec.get("appt_id")
-            if not appt_id:
-                continue
-            prev = seen.get(appt_id)
-            if prev:
-                # A row can be revisited across scroll passes while mid-render
-                # (see cell()'s short timeout); don't let a blank re-read on a
-                # later pass clobber a good value captured earlier.
-                rec = {k: (v if v not in (None, "") else prev.get(k)) for k, v in rec.items()}
-            seen[appt_id] = rec
 
-        stable = stable + 1 if len(seen) == last_count else 0
-        if stable >= 5:
-            break
+    def _sweep():
+        """One independent full top-to-bottom read of every currently-loaded row."""
+        _scroll_to(0)
+        page.wait_for_timeout(200)
+        prev_pos = -1
+        for _ in range(max_scrolls):
+            _scan_current()
+            pos = _scroll_top()
+            if pos == prev_pos:
+                break  # scrollTop stopped advancing -- we've hit the bottom
+            prev_pos = pos
+            _scroll_forward()
+            page.wait_for_timeout(150)
 
-        last_count = len(seen)
-        page.evaluate("""
-            () => {
-                const g = document.querySelector('.MuiDataGrid-virtualScroller');
-                g.scrollTop += g.clientHeight;
-            }
-        """)
-        page.wait_for_timeout(150)
+    _sweep()
+    for _ in range(repair_passes):
+        if not any(v in (None, "") for rec in seen.values() for v in rec.values()):
+            break  # every field on every row already has a value -- done early
+        _sweep()
 
     return seen

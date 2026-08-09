@@ -60,8 +60,17 @@ from .config import TABLE_NAME  # noqa: E402
 
 
 def upsert_appointment(cur, rec):
-    """Insert a new appointment (process_status explicitly NULL) or update
-    status/practice on an existing one."""
+    """Insert a new appointment (process_status explicitly NULL), or update
+    an existing one against the freshest scrape.
+
+    Tebra is the source of truth, and fields like service_location can
+    legitimately change after the first scrape (reassigned, corrected, etc.),
+    so a fresh non-null read always wins -- COALESCE(new, existing). Only
+    when *this* read came back None/"" (e.g. cell() catching the row
+    mid-render) do we fall back to whatever's already on file, so a single
+    bad transient read can't blank out a good value someone already
+    captured. Same rule already applied to appt_status; now applied
+    consistently to every scraped field."""
     cur.execute(
         f"SELECT 1 FROM {TABLE_NAME} WHERE entity=%s AND sub_entity=%s AND appt_id=%s AND ehr_name=%s",
         (rec["entity"], rec["sub_entity"], rec["appt_id"], rec["ehr_name"]),
@@ -89,12 +98,22 @@ def upsert_appointment(cur, rec):
         cur.execute(
             f"""
             UPDATE {TABLE_NAME}
-            SET appt_status = COALESCE(%s, appt_status),
-                practice = %s, updated_date = now()
-            WHERE entity=%s AND sub_entity=%s AND appt_id=%s AND ehr_name=%s
+            SET appt_status = COALESCE(%(appt_status)s, appt_status),
+                practice = %(practice)s,
+                appt_date = COALESCE(%(appt_date)s, appt_date),
+                appt_time = COALESCE(%(appt_time)s, appt_time),
+                patient_name = COALESCE(%(patient_name)s, patient_name),
+                dob = COALESCE(%(dob)s, dob),
+                home_phone = COALESCE(%(home_phone)s, home_phone),
+                mobile_phone = COALESCE(%(mobile_phone)s, mobile_phone),
+                provider_name = COALESCE(%(provider_name)s, provider_name),
+                service_location = COALESCE(%(service_location)s, service_location),
+                appt_reason = COALESCE(%(appt_reason)s, appt_reason),
+                updated_date = now()
+            WHERE entity=%(entity)s AND sub_entity=%(sub_entity)s
+              AND appt_id=%(appt_id)s AND ehr_name=%(ehr_name)s
             """,
-            (rec.get("appt_status"), rec.get("practice"),
-             rec["entity"], rec["sub_entity"], rec["appt_id"], rec["ehr_name"]),
+            rec,
         )
 
 
