@@ -17,7 +17,7 @@ cd ~/intellibill-rpa-vm
 ## 3) Pull latest code
 
 ```bash
-git checkout prod
+git checkout dev
 git fetch origin
 git reset --hard origin/prod
 ```
