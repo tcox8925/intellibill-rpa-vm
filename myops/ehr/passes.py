@@ -500,6 +500,11 @@ def pass_appointments(page, sel, practice_name, from_date, to_date):
     cur = conn.cursor()
     try:
         goto_worklist(page)
+        # Without this, appointments whose Provider/Staff/Room/Service
+        # Location checkbox isn't checked by default are entirely invisible
+        # to the grid scrape below -- not blank, just never seen at all. See
+        # ensure_worklist_filters_checked's docstring.
+        ensure_worklist_filters_checked(page)
         apply_date_filter(page, from_date, to_date)
 
         def extract(row):
