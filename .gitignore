@@ -42,6 +42,15 @@ desktop.ini
 *.eml
 *.bak
 
+# pf_sync_v5_6/config/ holds hand-tuned Practice Fusion UI selectors (CSS/XPath),
+# not secrets or patient data -- the blanket *.json rule above was originally meant
+# to keep PHI-bearing JSON (queue files, patient exports) out of git, not these.
+# Tracking them means selector fixes (like PF silently dropping a data-tracking
+# attribute -- happened live 2026-08-11) get a real diff/history/rollback instead
+# of only ever existing as an untracked edit on whichever box someone SSHed into.
+!pf_sync_v5_6/config/
+!pf_sync_v5_6/config/*.json
+
 # ======================================
 # SECRETS / CONFIG
 # ======================================

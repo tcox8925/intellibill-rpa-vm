@@ -46,8 +46,8 @@ PF_SYNC_API_ENV=development             # "development"/"local" enables /docs; a
 
 | File | What it is |
 |---|---|
-| `pf_pdf_sync_config.json` | Selectors/behavior for the Print Chart flow (facesheet sections, notes mode). Already populated — don't touch unless Practice Fusion changes its UI. |
-| `pf_appointment_report_config.json` | Selectors for pulling the Appointment report from Practice Fusion. |
+| `config/pf_pdf_sync_config.json` | Selectors/behavior for the Print Chart flow (facesheet sections, notes mode). Already populated — don't touch unless Practice Fusion changes its UI. Tracked in git (not a secret/PHI, just UI selectors) — see `.gitignore`'s `pf_sync_v5_6/config/` exception. |
+| `config/pf_appointment_report_config.json` | Selectors for pulling the Appointment report from Practice Fusion. Also tracked in git, same reason. |
 | `practice_fusion_patients.csv` | Patient registry export (name/DOB/phone/PRN/GUID) used to match appointments to charts. Produced by `pull_patients.py` (§5) or supplied manually. |
 | `pf_appointment_queue.json` | The persistent queue: every appointment row, its match status, and its processing status (`ready`/`needs_attention`/`processed`/`ignored`/`failed`). This is the file everything below reads and updates. |
 | `pf_encounter_pdfs/` | Where generated PDFs (and their metadata JSON siblings) land. |
@@ -85,8 +85,8 @@ All commands below assume you're `cd`'d into `pf_sync_v5_6/` with the venv activ
 
 ```bash
 python3 pf_soap_sync_v5_16.py doctor \
-  --config-json pf_pdf_sync_config.json \
-  --report-config-json pf_appointment_report_config.json \
+  --config-json config/pf_pdf_sync_config.json \
+  --report-config-json config/pf_appointment_report_config.json \
   --patients-file practice_fusion_patients.csv \
   --queue-json pf_appointment_queue.json
 ```
@@ -106,7 +106,7 @@ they'll be picked up by `process` — they're skipped automatically otherwise.
 ```bash
 python3 pf_soap_sync_v5_16.py process \
   --queue-json pf_appointment_queue.json \
-  --config-json pf_pdf_sync_config.json \
+  --config-json config/pf_pdf_sync_config.json \
   --downloads-dir pf_encounter_pdfs \
   --chrome-user-data-dir "$HOME/pf_rpa_chrome"
 ```
@@ -134,7 +134,7 @@ Recommended first real run:
 ```bash
 python3 pf_soap_sync_v5_16.py process \
   --queue-json pf_appointment_queue.json \
-  --config-json pf_pdf_sync_config.json \
+  --config-json config/pf_pdf_sync_config.json \
   --downloads-dir pf_encounter_pdfs \
   --chrome-user-data-dir "$HOME/pf_rpa_chrome" \
   --limit 3
@@ -180,7 +180,7 @@ curl -X POST http://127.0.0.1:8011/process \
   -H "Content-Type: application/json" \
   -d '{
     "queue_json": "/Users/hmg/Documents/RPA-VM-UPDATE/pf_sync_v5_6/pf_appointment_queue.json",
-    "config_json": "/Users/hmg/Documents/RPA-VM-UPDATE/pf_sync_v5_6/pf_pdf_sync_config.json",
+    "config_json": "/Users/hmg/Documents/RPA-VM-UPDATE/pf_sync_v5_6/config/pf_pdf_sync_config.json",
     "downloads_dir": "/Users/hmg/Documents/RPA-VM-UPDATE/pf_sync_v5_6/pf_encounter_pdfs",
     "chrome_user_data_dir": "/Users/hmg/pf_rpa_chrome",
     "limit": 3,
@@ -206,8 +206,8 @@ curl -X POST http://127.0.0.1:8011/nightly \
   -H "Content-Type: application/json" \
   -d '{
     "queue_json": "/Users/hmg/Documents/RPA-VM-UPDATE/pf_sync_v5_6/pf_appointment_queue.json",
-    "config_json": "/Users/hmg/Documents/RPA-VM-UPDATE/pf_sync_v5_6/pf_pdf_sync_config.json",
-    "report_config_json": "/Users/hmg/Documents/RPA-VM-UPDATE/pf_sync_v5_6/pf_appointment_report_config.json",
+    "config_json": "/Users/hmg/Documents/RPA-VM-UPDATE/pf_sync_v5_6/config/pf_pdf_sync_config.json",
+    "report_config_json": "/Users/hmg/Documents/RPA-VM-UPDATE/pf_sync_v5_6/config/pf_appointment_report_config.json",
     "patients_file": "/Users/hmg/Documents/RPA-VM-UPDATE/pf_sync_v5_6/practice_fusion_patients.csv",
     "downloads_dir": "/Users/hmg/Documents/RPA-VM-UPDATE/pf_sync_v5_6/pf_encounter_pdfs",
     "practice": "your-practice-name",
@@ -304,7 +304,7 @@ patient auto-resolves on future ingests.
 - **`command not found: python`** — macOS/Linux only ship `python3`. Always use `python3`, and confirm `which python3` points inside `.venv/bin/` after `source .venv/bin/activate`.
 - **Login form visible but nothing happens** — `PF_USERNAME`/`PF_PASSWORD` are missing or wrong in `.env`; the script raises a clear error naming this rather than hanging silently.
 - **Stuck on "security verification/OTP is open"** — expected; go complete it in the visible Chrome window. The script polls and continues automatically once you're through.
-- **`CHECKBOX_NOT_SETTABLE` / `FACESHEET_SELECTION_MISMATCH` / `SOAP_NOTE_NOT_FOUND_FOR_DATE`** — Practice Fusion's UI changed a selector; check `pf_pdf_sync_config.json` against the current page, or re-run `doctor`.
+- **`CHECKBOX_NOT_SETTABLE` / `FACESHEET_SELECTION_MISMATCH` / `SOAP_NOTE_NOT_FOUND_FOR_DATE`** — Practice Fusion's UI changed a selector; check `config/pf_pdf_sync_config.json` against the current page, or re-run `doctor`.
 - **`pull_patients.py` seems to be missing patients** — check whether `scroll_report_and_collect()` is actually scrolling; the Patient list report virtualizes rows inside each page (see §5).
 - **A second browser job returns 409/"already running"** — only one Chrome/CDP session runs at a time through `server.py`; wait for the current job or check `/status`.
 - **Port 8011 already in use** — set `PF_SYNC_API_PORT` in `.env` to something else and restart.
