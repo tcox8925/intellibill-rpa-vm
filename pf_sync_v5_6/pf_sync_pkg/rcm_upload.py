@@ -87,12 +87,27 @@ def upload_zip_to_rcm(local_zip_path: str, zip_name: str, folder_structure: str 
     return blob_path
 
 
+def _delete_local_files(paths: list) -> Dict[str, object]:
+    deleted = []
+    errors = []
+    for path in paths:
+        try:
+            os.remove(path)
+            deleted.append(path)
+        except FileNotFoundError:
+            pass  # already gone -- not an error worth surfacing.
+        except Exception as exc:
+            errors.append(f"{path}: {type(exc).__name__}: {exc}")
+    return {"deleted": deleted, "errors": errors}
+
+
 def build_and_upload_zip(
     manifest_path: str,
     downloads_dir: str,
     practice_name: str,
     folder_structure: str = PF_RCM_FOLDER_STRUCTURE,
     no_upload: bool = False,
+    delete_local_after_upload: bool = True,
 ) -> Dict[str, object]:
     """Reads a PF appointments manifest (written by
     pdf_pipeline.write_appointments_metadata_json), zips it together with every
@@ -106,6 +121,16 @@ def build_and_upload_zip(
     return a clear {"error": ...}/{"skipped": ...} instead, since this runs as
     the last stage of a longer pipeline (run_full_sync_by_date) where a hard
     crash here shouldn't erase everything the earlier stages already did.
+
+    delete_local_after_upload=True (the default): once the zip has actually
+    landed in Azure, the source PDFs and the local zip itself are deleted from
+    downloads_dir -- Azure is the only place this PHI should persist once
+    delivery is confirmed, not the VM's local disk. Nothing is deleted on a
+    failed/skipped upload (no_upload=True included) since that's the only
+    local copy of the work in that case. pdf_path on the queue rows is left
+    as-is on purpose -- it's only ever used as a "was a PDF produced" marker
+    (see chart_ui.has_prior_chart_pdf), never checked against the filesystem,
+    so a stale path after cleanup doesn't break anything downstream.
     """
     if not manifest_path or not os.path.exists(manifest_path):
         return {"skipped": True, "reason": "no manifest produced this run (no PDFs generated)"}
@@ -165,5 +190,28 @@ def build_and_upload_zip(
     except Exception as exc:
         result["uploaded"] = False
         result["error"] = f"{type(exc).__name__}: {exc}"
+        # Upload failed -- the zip/PDFs are the only copy of this work, so leave
+        # them on disk for a retry instead of deleting anything.
+        return result
+
+    if delete_local_after_upload:
+        local_paths = [os.path.join(downloads_dir, name) for name in present] + [zip_path]
+        cleanup = _delete_local_files(local_paths)
+        result["local_cleanup"] = {
+            "deleted_count": len(cleanup["deleted"]),
+            "errors": cleanup["errors"],
+        }
+        if cleanup["errors"]:
+            print(
+                f"[RCM-UPLOAD] WARNING: uploaded OK but failed to delete "
+                f"{len(cleanup['errors'])} local file(s): {cleanup['errors']}",
+                flush=True,
+            )
+        else:
+            print(
+                f"[RCM-UPLOAD] Deleted {len(cleanup['deleted'])} local file(s) "
+                f"({len(present)} PDF(s) + the zip) after a confirmed upload.",
+                flush=True,
+            )
 
     return result

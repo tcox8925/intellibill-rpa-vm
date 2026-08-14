@@ -301,6 +301,12 @@ def build_parser() -> argparse.ArgumentParser:
     zip_upload.add_argument("--downloads-dir", required=True)
     zip_upload.add_argument("--practice", required=True)
     zip_upload.add_argument("--no-upload", action="store_true", help="Build the zip locally but skip the Azure upload (inspect before sending).")
+    zip_upload.add_argument(
+        "--keep-local",
+        action="store_true",
+        help="Keep the source PDFs and the zip on disk after a confirmed upload "
+             "(default: delete them once Azure has the zip, so PHI doesn't linger locally).",
+    )
 
     write_config = sub.add_parser("write-config", help="Write the complete PDF config.")
     write_config.add_argument("--config-json", required=True)
@@ -864,6 +870,7 @@ def main() -> int:
             result = build_and_upload_zip(
                 args.manifest_json, args.downloads_dir, args.practice,
                 no_upload=args.no_upload,
+                delete_local_after_upload=not args.keep_local,
             )
             print(json.dumps(result, indent=2))
             return 0
