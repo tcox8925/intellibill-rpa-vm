@@ -11,7 +11,7 @@ from pf_sync_pkg.utils import clean
 def read_tabular_rows(path: str) -> List[Dict[str, Any]]:
     suffix = Path(path).suffix.lower()
     if suffix == ".json":
-        with open(path, "r", encoding="utf-8") as handle:
+        with open(path, "r", encoding="utf-8-sig") as handle:
             raw = json.load(handle)
         if isinstance(raw, dict):
             raw = raw.get("rows", raw.get("data", []))

@@ -101,6 +101,71 @@ def _delete_local_files(paths: list) -> Dict[str, object]:
     return {"deleted": deleted, "errors": errors}
 
 
+def retry_orphaned_zips(downloads_dir: str, folder_structure: str = PF_RCM_FOLDER_STRUCTURE) -> Dict[str, object]:
+    """Re-attempt delivery of any zip left over from a previous run whose upload
+    failed. build_and_upload_zip only ever zips the CURRENT run's freshly-
+    processed records -- a zip that fails to upload once is otherwise orphaned
+    forever, since nothing re-scans for it (see this module's docstring: unlike
+    Tebra's zipbuild.pass_zip, which re-queries `file_path IS NULL` every run
+    and so self-heals from a failed delivery, pf_sync has no DB to re-query).
+    Call this before building today's new zip so a stuck delivery gets retried
+    on every subsequent run instead of sitting on disk untouched.
+
+    A retried zip's PDFs are only deleted once THIS retry actually succeeds --
+    same "never delete on a failed/skipped upload" rule as build_and_upload_zip.
+    The zip's own manifest json entry (already embedded from the run that built
+    it) travels with it, so no manifest_path is needed here.
+    """
+    directory = Path(downloads_dir)
+    if not directory.is_dir():
+        return {"retried": 0, "uploaded": 0, "failed": 0}
+
+    stale_zips = sorted(directory.glob("pf_facesheets_*.zip"))
+    retried = 0
+    uploaded = 0
+    failed = 0
+    details = []
+    for zip_path in stale_zips:
+        retried += 1
+        zip_name = zip_path.name
+        print(f"[RCM-UPLOAD] Retrying orphaned zip {zip_name}", flush=True)
+        try:
+            with zipfile.ZipFile(zip_path, "r") as z:
+                pdf_names = [n for n in z.namelist() if n.lower().endswith(".pdf")]
+        except Exception as exc:
+            failed += 1
+            details.append({"zip_name": zip_name, "error": f"unreadable zip: {type(exc).__name__}: {exc}"})
+            print(f"[RCM-UPLOAD] Orphaned zip {zip_name} is unreadable, leaving it in place: {exc}", flush=True)
+            continue
+
+        try:
+            blob_path = upload_zip_to_rcm(str(zip_path), zip_name, folder_structure)
+        except Exception as exc:
+            failed += 1
+            details.append({"zip_name": zip_name, "error": f"{type(exc).__name__}: {exc}"})
+            print(f"[RCM-UPLOAD] Retry FAILED for orphaned zip {zip_name}: {type(exc).__name__}: {exc}", flush=True)
+            continue
+
+        uploaded += 1
+        details.append({"zip_name": zip_name, "blob_path": blob_path})
+        local_paths = [str(directory / name) for name in pdf_names] + [str(zip_path)]
+        cleanup = _delete_local_files(local_paths)
+        if cleanup["errors"]:
+            print(
+                f"[RCM-UPLOAD] WARNING: retried upload of {zip_name} succeeded but failed to delete "
+                f"{len(cleanup['errors'])} local file(s): {cleanup['errors']}",
+                flush=True,
+            )
+        else:
+            print(
+                f"[RCM-UPLOAD] Retry succeeded for orphaned zip {zip_name} -- deleted "
+                f"{len(cleanup['deleted'])} local file(s).",
+                flush=True,
+            )
+
+    return {"retried": retried, "uploaded": uploaded, "failed": failed, "details": details}
+
+
 def build_and_upload_zip(
     manifest_path: str,
     downloads_dir: str,
@@ -136,7 +201,7 @@ def build_and_upload_zip(
         return {"skipped": True, "reason": "no manifest produced this run (no PDFs generated)"}
 
     try:
-        manifest = json.loads(Path(manifest_path).read_text(encoding="utf-8"))
+        manifest = json.loads(Path(manifest_path).read_text(encoding="utf-8-sig"))
     except Exception as exc:
         return {"error": f"could not read manifest {manifest_path}: {type(exc).__name__}: {exc}"}
 
@@ -190,6 +255,13 @@ def build_and_upload_zip(
     except Exception as exc:
         result["uploaded"] = False
         result["error"] = f"{type(exc).__name__}: {exc}"
+        # Previously this failure was only visible in the JSON response body --
+        # a console-only view of a run (e.g. server.log) showed "Upload start"
+        # and then nothing, with no way to tell an upload failure apart from a
+        # slow-but-fine upload. Print it so it shows up wherever the run is
+        # actually being watched, not just in a response body someone may not
+        # be looking at.
+        print(f"[RCM-UPLOAD] Upload FAILED zip={zip_name}: {result['error']}", flush=True)
         # Upload failed -- the zip/PDFs are the only copy of this work, so leave
         # them on disk for a retry instead of deleting anything.
         return result

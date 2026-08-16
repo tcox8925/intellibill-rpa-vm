@@ -7,19 +7,27 @@ import sys
 from dataclasses import asdict
 from datetime import date
 from pathlib import Path
-from typing import Dict, Tuple
+from typing import Any, Dict, Tuple
 
 from playwright.sync_api import Page
 
 from pf_sync_pkg.browser import build_browser, close_browser, find_chrome_exe, wait_for_pf_login
 from pf_sync_pkg.constants import BUILD_ID, CSV_FIELD_LIMIT, PRACTICE_TZ_NAME
+from pf_sync_pkg.identity import normalize_person_name, normalize_phone
 from pf_sync_pkg.ingest import (
     OPTIONAL_APPOINTMENT_FIELDS,
     REQUIRED_APPOINTMENT_FIELDS,
+    ingest_appointment_rows,
     ingest_appointments,
     map_appointment_row,
 )
-from pf_sync_pkg.matching import load_patient_registry, match_patients, resolve_patient_manually, select_queue_rows
+from pf_sync_pkg.matching import (
+    load_patient_registry,
+    match_patients,
+    match_patients_against_registry,
+    resolve_patient_manually,
+    select_queue_rows,
+)
 from pf_sync_pkg.models import AppointmentReportConfig, SyncConfig
 from pf_sync_pkg.pdf_pipeline import default_process_candidates, full_sync_on_page, process_records_on_page
 from pf_sync_pkg.queue_admin import queue_status, reset_rows
@@ -281,6 +289,31 @@ def build_parser() -> argparse.ArgumentParser:
     add_report_dates(full_sync_by_date)
     add_browser_arguments(full_sync_by_date)
 
+    facesheet_pull_by_date = sub.add_parser(
+        "facesheet-pull-by-date",
+        help=(
+            "Discover (Schedule-scoped) -> pull-report -> ingest -> match against the live "
+            "discovery -> process, forcing every Facesheet section on for this run only -- the "
+            "default (full-sync-by-date/process/nightly) stays notes-only. No patients_file CSV: "
+            "schedule discovery resolves real patient GUIDs directly from PF, in memory, and "
+            "those become the match registry. The whole-practice-scrape fallback is blocked "
+            "since a single date has no business triggering that."
+        ),
+    )
+    facesheet_pull_by_date.add_argument("--queue-json", required=True)
+    facesheet_pull_by_date.add_argument("--config-json", required=True)
+    facesheet_pull_by_date.add_argument("--report-config-json", required=True)
+    facesheet_pull_by_date.add_argument("--downloads-dir", required=True)
+    facesheet_pull_by_date.add_argument("--practice", required=True)
+    facesheet_pull_by_date.add_argument("--report-output-csv", default="")
+    facesheet_pull_by_date.add_argument("--limit", type=int, default=0)
+    facesheet_pull_by_date.add_argument("--dry-run", action="store_true")
+    facesheet_pull_by_date.add_argument("--include-failed", action="store_true")
+    facesheet_pull_by_date.add_argument("--fuzzy-threshold", type=float, default=0.82)
+    facesheet_pull_by_date.add_argument("--dob-match-threshold", type=float, default=0.85)
+    add_report_dates(facesheet_pull_by_date)
+    add_browser_arguments(facesheet_pull_by_date)
+
     status = sub.add_parser("status", help="Show queue counts and unresolved/review rows.")
     status.add_argument("--queue-json", required=True)
     status.add_argument("--show-limit", type=int, default=20)
@@ -480,9 +513,24 @@ def run_refresh(args: argparse.Namespace) -> dict:
     return browser_command_wrapper(args, callback)
 
 
-def run_nightly(args: argparse.Namespace) -> dict:
+def run_nightly(
+    args: argparse.Namespace,
+    config: "SyncConfig | None" = None,
+    manifest_run_id: str = "",
+) -> dict:
     """Pull -> ingest -> match -> process, factored out of main() so server.py's
     /nightly endpoint can call the exact same orchestration the CLI uses.
+
+    config: pass an already-built SyncConfig to use in place of loading
+    args.config_json fresh -- run_facesheet_pull_by_date uses this to force every
+    Facesheet section on for one call without touching the on-disk config default
+    (which stays notes-only).
+
+    manifest_run_id: passed straight through to process_records_on_page. Left blank
+    by default so plain /nightly calls keep their existing per-call random-UUID
+    manifest naming; run_facesheet_pull_by_date passes a date-scoped value so
+    repeated calls for the same date converge on one manifest instead of each
+    producing its own fragment (see write_appointments_metadata_json's docstring).
     """
     start_date, end_date = resolve_report_dates(args)
     report_file = args.appointments_file
@@ -491,7 +539,7 @@ def run_nightly(args: argparse.Namespace) -> dict:
             f"appointments_{start_date.isoformat()}_to_{end_date.isoformat()}.csv"
         )
 
-    config = SyncConfig.load(args.config_json)
+    config = config or SyncConfig.load(args.config_json)
     report_config = AppointmentReportConfig.load(args.report_config_json)
 
     def callback(page: Page):
@@ -527,6 +575,7 @@ def run_nightly(args: argparse.Namespace) -> dict:
             args.limit,
             args.dry_run,
             False,
+            manifest_run_id,
         )
         return {
             "report_file": report_file,
@@ -538,7 +587,11 @@ def run_nightly(args: argparse.Namespace) -> dict:
     return browser_command_wrapper(args, callback)
 
 
-def run_full_sync_by_date(args: argparse.Namespace) -> dict:
+def run_full_sync_by_date(
+    args: argparse.Namespace,
+    config: "SyncConfig | None" = None,
+    allow_full_sweep_fallback: bool = True,
+) -> dict:
     """One-call pipeline: discover (Schedule-scoped, falling back to the full
     age-bucket sweep if that fails) -> merge into the canonical patients
     registry -> pull-report -> ingest -> match-patients -> process.
@@ -549,6 +602,18 @@ def run_full_sync_by_date(args: argparse.Namespace) -> dict:
     match-patients after refreshing it, or not knowing which of several
     scattered CSV copies was current. One call resolves all of that in a fixed
     order, every time.
+
+    config: pass an already-built SyncConfig to use in place of loading
+    args.config_json fresh -- run_facesheet_pull_by_date uses this to force
+    every Facesheet section on for one call without touching the on-disk
+    config default (which stays notes-only).
+
+    allow_full_sweep_fallback: when discovery genuinely comes back empty, the
+    default (True) falls back to a full, live scrape of every patient in the
+    practice. run_facesheet_pull_by_date passes False -- a single date's
+    facesheet pull has no business kicking off a whole-practice scrape just
+    because that one date's Schedule view came back empty; it reports that
+    instead of firing the expensive fallback.
 
     Each stage is wrapped individually so ONE stage failing surfaces in the
     returned dict instead of taking down the whole request -- the goal is "do
@@ -573,7 +638,13 @@ def run_full_sync_by_date(args: argparse.Namespace) -> dict:
         except Exception as exc:
             stages["discover"] = {"method": "schedule_range", "error": f"{type(exc).__name__}: {exc}"}
 
-        if not discovered:
+        if not discovered and not allow_full_sweep_fallback:
+            stages["discover_fallback"] = {
+                "skipped": True,
+                "reason": "allow_full_sweep_fallback=False -- schedule discovery came back "
+                          "empty, but a whole-practice scrape was not triggered.",
+            }
+        elif not discovered:
             # Fallback: the full age-bucket sweep is slower but doesn't depend
             # on the Schedule view at all -- a different code path, so a bug or
             # PF UI change specific to one doesn't take out both.
@@ -620,7 +691,8 @@ def run_full_sync_by_date(args: argparse.Namespace) -> dict:
         report_file = args.report_output_csv or (
             f"appointments_{start_date.isoformat()}_to_{end_date.isoformat()}.csv"
         )
-        config = SyncConfig.load(args.config_json)
+        nonlocal config
+        config = config or SyncConfig.load(args.config_json)
         report_config = AppointmentReportConfig.load(args.report_config_json)
 
         try:
@@ -670,18 +742,158 @@ def run_full_sync_by_date(args: argparse.Namespace) -> dict:
         if args.dry_run:
             stages["rcm_upload"] = {"skipped": True, "reason": "dry_run=True -- no PDFs were generated"}
         else:
+            from pf_sync_pkg.rcm_upload import build_and_upload_zip, retry_orphaned_zips
+
+            # Retry any zip a PRIOR run built but failed to deliver before touching
+            # today's records -- otherwise a failed upload is orphaned forever,
+            # since build_and_upload_zip below only ever looks at this run's own
+            # manifest. See retry_orphaned_zips' docstring.
+            try:
+                stages["rcm_upload_retry"] = retry_orphaned_zips(args.downloads_dir)
+            except Exception as exc:
+                stages["rcm_upload_retry"] = {"error": f"{type(exc).__name__}: {exc}"}
+
             manifest_path = ""
             process_result = stages.get("process")
             if isinstance(process_result, dict):
                 manifest_path = process_result.get("metadata_manifest_path", "")
             try:
-                from pf_sync_pkg.rcm_upload import build_and_upload_zip
-
                 stages["rcm_upload"] = build_and_upload_zip(
                     manifest_path, args.downloads_dir, args.practice,
                 )
             except Exception as exc:
                 stages["rcm_upload"] = {"error": f"{type(exc).__name__}: {exc}"}
+
+        return stages
+
+    return browser_command_wrapper(args, callback)
+
+
+def _registry_row_from_report_patient(rp) -> Dict[str, Any]:
+    """Convert a patient_scraper.ReportPatient (live Schedule scrape) into the same
+    dict shape matching.map_patient_registry_row produces from a registry file, so
+    match_patients_against_registry can score it identically either way."""
+    name = clean(f"{rp.first_name} {rp.last_name}")
+    phone = normalize_phone(rp.preferred_contact)
+    return {
+        "patient_id": rp.patient_id,
+        "ehr_patient_guid": rp.ehr_patient_guid,
+        "patient_name": name,
+        "normalized_name": normalize_person_name(name),
+        "dob": parse_date(rp.dob).isoformat() if parse_date(rp.dob) else "",
+        "phones": [phone] if phone else [],
+        "patient_status": rp.status,
+    }
+
+
+def run_facesheet_pull_by_date(args: argparse.Namespace) -> dict:
+    """Discover (Schedule-scoped) -> pull-report -> ingest -> match against the live
+    discovery, not a registry file -> process, forcing every Facesheet section on for
+    this call only.
+
+    v5.18's production default (full-sync-by-date, process, nightly) is notes-only --
+    see chart_ui.prepare_print_chart_sections. This command exists for an on-demand
+    facesheet pull scoped to one date/date-range, without flipping the on-disk config's
+    include_facesheet_sections default (which every other command keeps reading as
+    notes-only).
+
+    No patients_file CSV anywhere in this path: discover_via_schedule_range() checks
+    the actual Practice Fusion Schedule for that date and returns real patient GUIDs
+    directly from PF, in memory. Those become the match registry
+    (match_patients_against_registry), so identity resolution is exact-GUID-scoped to
+    just the patients on that date's schedule -- not fuzzy name/DOB matching against
+    the whole practice's static registry file. The one CSV kept is the appointment
+    report itself (report_file), pulled fresh every call, purely so ingest can read
+    appointment_status/type/provider (the Schedule scrape doesn't expose those) --
+    ingest's ignored_statuses gate still screens out canceled/no-show/rescheduled
+    appointments before they reach process. Resolved GUIDs flow straight into the
+    queue DB (ehr_pf_queue_rows), same as every other command.
+
+    A whole-practice scrape is never triggered here: if discover_via_schedule_range
+    for that date comes back completely empty, this reports that in "discover" and
+    stops -- a single date has no business kicking off a scan of every patient in
+    the practice.
+    """
+    import dataclasses
+
+    from pf_sync_pkg import patient_scraper as ps
+
+    base_config = SyncConfig.load(args.config_json)
+    facesheet_config = dataclasses.replace(
+        base_config,
+        include_facesheet_sections=True,
+        facesheet_checkbox_selectors=list(base_config.facesheet_known_option_selectors),
+    )
+    config = facesheet_config
+    start_date, end_date = resolve_report_dates(args)
+    report_config = AppointmentReportConfig.load(args.report_config_json)
+    report_file = args.report_output_csv or (
+        f"appointments_{start_date.isoformat()}_to_{end_date.isoformat()}.csv"
+    )
+    manifest_run_id = f"{Path(args.queue_json).stem}_{start_date.isoformat()}_to_{end_date.isoformat()}"
+    stages: dict = {}
+
+    def callback(page: Page):
+        discovered = ps.discover_via_schedule_range(page, start_date, end_date)
+        stages["discover"] = {"method": "schedule_range", "unique_patients": len(discovered)}
+        registry = [
+            _registry_row_from_report_patient(rp)
+            for rp in discovered.values()
+            if rp.ehr_patient_guid
+        ]
+
+        try:
+            pull_result = pull_appointment_report_on_page(
+                page, report_config, start_date, end_date, report_file,
+                include_rows_data=True,
+            )
+            rows_data = pull_result.pop("rows_data", [])
+            stages["pull_report"] = pull_result
+        except Exception as exc:
+            stages["pull_report"] = {"error": f"{type(exc).__name__}: {exc}"}
+            return stages  # nothing downstream can run without the report
+
+        try:
+            # Rows are already in memory from pull_result above -- ingest_appointment_rows
+            # takes them directly instead of ingest_appointments re-reading report_file.
+            # The download method still lands report_file on disk (Practice Fusion
+            # produces that file itself, not something this code can avoid), but it is
+            # never read a second time here.
+            stages["ingest"] = ingest_appointment_rows(
+                rows_data,
+                args.queue_json,
+                args.practice,
+                source_report_name=os.path.basename(report_file),
+                config=config,
+                run_details={"report_file": str(Path(report_file).resolve())},
+            )
+        except Exception as exc:
+            stages["ingest"] = {"error": f"{type(exc).__name__}: {exc}"}
+            return stages  # nothing downstream can run without an ingested queue
+
+        try:
+            stages["match"] = match_patients_against_registry(
+                args.queue_json,
+                registry,
+                args.fuzzy_threshold,
+                dob_match_threshold=args.dob_match_threshold,
+                run_details={"source": "schedule_discovery", "report_date_range": f"{start_date.isoformat()}_to_{end_date.isoformat()}"},
+            )
+        except Exception as exc:
+            stages["match"] = {"error": f"{type(exc).__name__}: {exc}"}
+            # process still runs below against whatever matched on a prior run.
+
+        try:
+            store = load_store(args.queue_json)
+            rows = store_rows(store)
+            candidates = default_process_candidates(rows, args.include_failed)
+            stages["process"] = process_records_on_page(
+                page, args.queue_json, config, args.downloads_dir,
+                candidates, rows, store, args.limit, args.dry_run, False,
+                manifest_run_id,
+            )
+        except Exception as exc:
+            stages["process"] = {"error": f"{type(exc).__name__}: {exc}"}
 
         return stages
 
@@ -861,6 +1073,11 @@ def main() -> int:
 
         if args.command == "full-sync-by-date":
             result = run_full_sync_by_date(args)
+            print(json.dumps(result, indent=2))
+            return 0
+
+        if args.command == "facesheet-pull-by-date":
+            result = run_facesheet_pull_by_date(args)
             print(json.dumps(result, indent=2))
             return 0
 

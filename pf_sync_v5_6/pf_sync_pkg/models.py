@@ -149,8 +149,15 @@ class SyncConfig:
         ]
     )
 
-    # Sections to CHECK. Everything else in the modal is explicitly cleared first, so
-    # this list is the complete intended selection, not a set of additions.
+    # v5.18: production PDFs are NOTES ONLY. Keep the Facesheet section selectors and
+    # selection implementation available for an explicit future/manual override, but do
+    # not select demographics, insurance, diagnoses, or any other Facesheet section by
+    # default. The Print Chart modal is still cleared before the appointment-date note is
+    # selected, which prevents Practice Fusion defaults/stale state from leaking in.
+    include_facesheet_sections: bool = False
+
+    # Sections to CHECK when include_facesheet_sections=True. Everything else in the modal
+    # is explicitly cleared first, so this list remains the complete intended selection.
     facesheet_checkbox_selectors: List[str] = field(
         default_factory=lambda: [
             "[data-element='chk-patient-demographics'] input[type='checkbox']",
@@ -185,10 +192,11 @@ class SyncConfig:
     # Fail rather than print a chart whose section selection could not be verified.
     enforce_exact_facesheet_selection: bool = True
 
-    # "auto"  - all notes on the first PDF for a patient, then only the appointment date
-    # "all"   - always every note
-    # "date"  - always only the appointment date
-    notes_selection_mode: str = "auto"
+    # SOAP notes are date-scoped for every appointment/PDF.
+    # "date"  - select only notes matching the appointment date (default)
+    # "auto"  - legacy alias for "date"
+    # "all"   - explicit override only; selects every note
+    notes_selection_mode: str = "date"
 
     note_option_selector: str = "input[type='checkbox']"
     generate_pdf_button_selector: str = "[data-element='btn-print-modal-print']"
@@ -230,8 +238,18 @@ class SyncConfig:
     def load(cls, path: str) -> "SyncConfig":
         if not path or not os.path.exists(path):
             return cls()
-        with open(path, "r", encoding="utf-8") as handle:
-            raw = json.load(handle)
+        try:
+            with open(path, "r", encoding="utf-8-sig") as handle:
+                raw = json.load(handle)
+        except (json.JSONDecodeError, OSError) as exc:
+            # A missing/empty/corrupt override file is not fatal -- this file's
+            # entire job is to override the defaults below, and those defaults
+            # are already a complete, valid config on their own. Falling back
+            # here (instead of raising) keeps a mid-write or truncated file
+            # from taking down the whole sync run; see load_checkpoint's and
+            # FileQueue._load's identical fallback for the same reasoning.
+            print(f"SyncConfig.load: could not parse {path} ({exc}); using defaults")
+            return cls()
         allowed = cls.__dataclass_fields__.keys()
         defaults = asdict(cls())
 
@@ -372,8 +390,14 @@ class AppointmentReportConfig:
     def load(cls, path: str) -> "AppointmentReportConfig":
         if not path or not os.path.exists(path):
             return cls()
-        with open(path, "r", encoding="utf-8") as handle:
-            raw = json.load(handle)
+        try:
+            with open(path, "r", encoding="utf-8-sig") as handle:
+                raw = json.load(handle)
+        except (json.JSONDecodeError, OSError) as exc:
+            # See SyncConfig.load's identical fallback -- a missing/empty/corrupt
+            # override file isn't fatal, the defaults below are already complete.
+            print(f"AppointmentReportConfig.load: could not parse {path} ({exc}); using defaults")
+            return cls()
         defaults = asdict(cls())
         allowed = cls.__dataclass_fields__.keys()
         # Backward-compatible singular keys from earlier config drafts.
