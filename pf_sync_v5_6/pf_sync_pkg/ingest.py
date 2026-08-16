@@ -191,6 +191,43 @@ def ingest_appointments(
     reset_existing: bool = False,
     config: Optional[SyncConfig] = None,
 ) -> Dict[str, int]:
+    """Ingest an appointment report file (CSV/JSON/XLSX) into the queue.
+
+    Thin wrapper around ingest_appointment_rows -- see that function for the actual
+    upsert logic. Kept separate so callers that already have parsed report rows in
+    memory (e.g. run_facesheet_pull_by_date, when the DOM-scrape fallback fires
+    instead of Practice Fusion's own CSV export) can skip the file read entirely.
+    """
+    source_rows = read_tabular_rows(appointments_file)
+    return ingest_appointment_rows(
+        source_rows,
+        queue_json,
+        practice,
+        source_report_name=source_report_name or os.path.basename(appointments_file),
+        reset_existing=reset_existing,
+        config=config,
+        run_details={"appointments_file": str(Path(appointments_file).resolve())},
+    )
+
+
+def ingest_appointment_rows(
+    source_rows: List[Dict[str, Any]],
+    queue_json: str,
+    practice: str,
+    source_report_name: str = "",
+    reset_existing: bool = False,
+    config: Optional[SyncConfig] = None,
+    run_details: Optional[Dict[str, Any]] = None,
+) -> Dict[str, int]:
+    """Upsert already-parsed appointment report rows into the queue.
+
+    source_rows: raw report rows (same dict-per-row shape read_tabular_rows/csv.
+    DictReader produce -- PF's own export headers, unmapped). run_details: extra
+    fields recorded on the ingest run-log entry alongside practice/source_rows;
+    ingest_appointments passes the resolved appointments_file path here, callers
+    with no backing file can pass whatever's meaningful for their case or leave
+    it blank.
+    """
     # v5.4: ingest previously read the module-level DEFAULT_IGNORED_STATUSES directly
     # while process() read config.ignored_statuses. Editing ignored_statuses in
     # pf_pdf_sync_config.json therefore changed only half the pipeline. Both paths now
@@ -200,7 +237,6 @@ def ingest_appointments(
     store = empty_store() if reset_existing else load_store(queue_json)
     rows = [] if reset_existing else store_rows(store)
     by_id = {row.row_id: row for row in rows}
-    source_rows = read_tabular_rows(appointments_file)
     mapped_rows = [map_appointment_row(source) for source in source_rows]
     validate_appointment_report_mapping(source_rows, mapped_rows)
     if source_rows:
@@ -217,7 +253,7 @@ def ingest_appointments(
             flush=True,
         )
 
-    source_name = source_report_name or os.path.basename(appointments_file)
+    source_name = source_report_name or "in_memory_rows"
     # v5.1 could create unusable queue rows because PF's DATE/TIME header was not
     # recognized. Remove only those unprocessed, date-less rows from this same
     # source report before re-ingesting the corrected export.
@@ -332,7 +368,8 @@ def ingest_appointments(
         store,
         "ingest",
         {
-            "appointments_file": str(Path(appointments_file).resolve()),
+            **(run_details or {}),
+            "source_report_name": source_name,
             "practice": practice,
             "source_rows": len(source_rows),
         },

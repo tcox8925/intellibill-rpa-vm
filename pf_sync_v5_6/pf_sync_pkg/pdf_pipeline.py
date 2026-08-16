@@ -14,7 +14,7 @@ from pf_sync_pkg.chart_ui import (
     find_encounter_for_appointment,
     open_print_chart,
     patient_summary_url,
-    select_facesheet_sections,
+    prepare_print_chart_sections,
     select_notes_for_record,
 )
 from pf_sync_pkg.constants import PATIENT_NAME_SELECTOR
@@ -156,7 +156,7 @@ def write_appointments_metadata_json(
     new_rows = [appointment_metadata_row(record) for record in eligible]
     if manifest_run_id and destination.exists():
         try:
-            existing_data = json.loads(destination.read_text(encoding="utf-8"))
+            existing_data = json.loads(destination.read_text(encoding="utf-8-sig"))
             existing_rows = existing_data.get("appointments", [])
         except Exception:
             existing_rows = []
@@ -253,7 +253,7 @@ def process_one_record(
         page.goto(summary_url, wait_until="domcontentloaded")
 
     modal = open_print_chart(page, config)
-    record.selected_sections = select_facesheet_sections(page, config, modal)
+    record.selected_sections = prepare_print_chart_sections(page, config, modal)
     notes_mode, record.selected_soap_note_text = select_notes_for_record(
         page, config, record, all_rows
     )
@@ -335,14 +335,14 @@ def process_records_on_page(
 
     for index, record in enumerate(candidates, start=1):
         label = record.appointment_id or record.encounter_key or record.row_id
-        print(f"[{index}/{len(candidates)}] {record.patient_name} | {record.appointment_date} | {label}")
+        print(f"[{index}/{len(candidates)}] {record.patient_name} | {record.appointment_date} | {label}", flush=True)
         if is_ignored(record, config):
             record.status = "ignored"
             record.status_reason = f"ignored_appointment_status:{normalize_status(record.appointment_status)}"
             record.updated_at = now_iso()
             counts["ignored"] += 1
             save_store(queue_json, store, all_rows)
-            print("  ignored")
+            print("  ignored", flush=True)
             continue
         if record.patient_match_status != "matched" or not record.ehr_patient_guid:
             record.status = "needs_attention"
@@ -351,7 +351,7 @@ def process_records_on_page(
             record.updated_at = now_iso()
             counts["needs_attention"] += 1
             save_store(queue_json, store, all_rows)
-            print("  needs_attention: patient not resolved")
+            print("  needs_attention: patient not resolved", flush=True)
             continue
         try:
             process_one_record(
@@ -366,7 +366,7 @@ def process_records_on_page(
             )
             if dry_run:
                 counts["validated"] += 1
-                print(f"  validated in {record.elapsed_seconds:.3f}s")
+                print(f"  validated in {record.elapsed_seconds:.3f}s", flush=True)
             else:
                 processed_for_manifest.append(record)
                 metadata_manifest_path = write_appointments_metadata_json(
@@ -376,18 +376,18 @@ def process_records_on_page(
                     manifest_run_id,
                 )
                 counts["processed"] += 1
-                print(f"  processed in {record.elapsed_seconds:.3f}s -> {record.pdf_path}")
+                print(f"  processed in {record.elapsed_seconds:.3f}s -> {record.pdf_path}", flush=True)
         except Exception as exc:
             state = handle_process_error(record, config, exc)
             counts[state] = counts.get(state, 0) + 1
-            print(f"  {state}: {record.error_message}")
+            print(f"  {state}: {record.error_message}", flush=True)
         finally:
             # v5.4: always tear the Print Chart modal down so a record that failed inside
             # the modal cannot leave it open over the next patient's chart.
             close_print_chart(page, config)
             save_store(queue_json, store, all_rows)
     if metadata_manifest_path:
-        print(f"Metadata manifest: {metadata_manifest_path}")
+        print(f"Metadata manifest: {metadata_manifest_path}", flush=True)
     # Exposed so callers (e.g. cli.run_full_sync_by_date's zip/upload stage) can
     # find the manifest this run produced without re-deriving scrape_run_id --
     # previously only printed to stdout, never returned.
@@ -454,7 +454,8 @@ def full_sync_on_page(
         patient_name = clean(patient.get("patient_name"))
         print(
             f"[patient {patient_index}/{len(registry)}] {patient_name} "
-            f"({patient_id or patient_guid})"
+            f"({patient_id or patient_guid})",
+            flush=True,
         )
         if not patient_guid:
             counts["patients_failed"] += 1
@@ -559,7 +560,7 @@ def full_sync_on_page(
                     processed_keys.add(key)
         except Exception as exc:
             counts["patients_failed"] += 1
-            print(f"  patient ERROR: {type(exc).__name__}: {exc}")
+            print(f"  patient ERROR: {type(exc).__name__}: {exc}", flush=True)
         finally:
             patient_timings.append(
                 {

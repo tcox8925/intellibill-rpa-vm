@@ -39,6 +39,7 @@ from pf_sync_pkg.cli import (
     browser_command_wrapper,
     resolve_report_dates,
     run_doctor,
+    run_facesheet_pull_by_date,
     run_full_sync_by_date,
     run_nightly,
     run_refresh,
@@ -96,25 +97,51 @@ def _acquire_key_lock(key: str) -> threading.Lock:
 # ---------------------------------------------------------------------------
 
 
-class BrowserFields(BaseModel):
-    """Mirrors cli.add_browser_arguments()'s argparse defaults."""
+def _default_chrome_user_data_dir() -> str:
+    """The reusable, already-logged-in Practice Fusion Chrome profile.
+
+    %USERPROFILE%\\pf_rpa_chrome on the Windows VM this normally runs on. On a
+    dev box with no USERPROFILE (this Mac), falls back to ~/pf_rpa_chrome --
+    the actual trusted profile lives at /Users/hmg/pf_rpa_chrome here. Without
+    this fallback the field silently defaulted to "" on Mac, which is exactly
+    what let Swagger's "string" placeholder get submitted instead and spin up
+    a brand-new, never-logged-in profile (hence the repeated OTP prompts).
+    """
+    if os.getenv("USERPROFILE"):
+        return os.path.join(os.getenv("USERPROFILE"), "pf_rpa_chrome")
+    return os.path.join(os.path.expanduser("~"), "pf_rpa_chrome")
+
+
+class BrowserFieldsNoCreds(BaseModel):
+    """Mirrors cli.add_browser_arguments()'s argparse defaults, minus username/
+    password. Base for endpoints where credentials must always resolve from
+    .env and should never appear as request fields at all -- see
+    FacesheetPullByDateRequest."""
 
     attach: bool = False
     chrome_user_data_dir: str = Field(
-        default_factory=lambda: (
-            os.path.join(os.getenv("USERPROFILE", ""), "pf_rpa_chrome") if os.getenv("USERPROFILE") else ""
-        )
+        default_factory=_default_chrome_user_data_dir,
+        # default_factory results don't surface in the OpenAPI schema's "default", so
+        # Swagger's "Try it out" would otherwise pre-fill the generic "string"
+        # placeholder instead of the real path -- examples= makes Swagger show (and
+        # auto-fill) the actual resolved profile path instead.
+        examples=[_default_chrome_user_data_dir()],
     )
     source_user_data_dir: str = ""
     source_profile: str = "Profile 11"
     refresh_profile: bool = False
     chrome_exe: str = ""
     debug_port: str = "9222"
-    username: str = Field(default_factory=lambda: os.getenv("PF_USERNAME", ""))
-    password: str = Field(default_factory=lambda: os.getenv("PF_PASSWORD", ""))
     typing_delay_ms: int = 65
     login_timeout_seconds: int = 900
     keep_browser_open: bool = False
+
+
+class BrowserFields(BrowserFieldsNoCreds):
+    """Mirrors cli.add_browser_arguments()'s argparse defaults."""
+
+    username: str = Field(default_factory=lambda: os.getenv("PF_USERNAME", ""))
+    password: str = Field(default_factory=lambda: os.getenv("PF_PASSWORD", ""))
 
 
 class ReportDateFields(BaseModel):
@@ -127,8 +154,34 @@ class ReportDateFields(BaseModel):
 
 def _namespace(model: BaseModel, **extra) -> argparse.Namespace:
     payload = model.model_dump()
+    # Swagger/most JSON clients always send every field, including "username": ""
+    # explicitly -- that beats BrowserFields' default_factory (which only fires when
+    # a field is *omitted*), so a blank credential in the request body silently wins
+    # over .env instead of falling back to it. Credentials must always resolve from
+    # .env, not from client input, so re-apply the env fallback here whenever the
+    # request left them blank.
+    if "username" in payload and not payload["username"]:
+        payload["username"] = os.getenv("PF_USERNAME", "")
+    if "password" in payload and not payload["password"]:
+        payload["password"] = os.getenv("PF_PASSWORD", "")
     payload.update(extra)
     return argparse.Namespace(**payload)
+
+
+def _namespace_with_env_creds(model: BaseModel, **extra) -> argparse.Namespace:
+    """_namespace(), plus always injecting username/password straight from .env.
+
+    For request models built on BrowserFieldsNoCreds (no username/password fields
+    at all -- every /process, /full-sync, /refresh, /nightly, /full-sync-by-date,
+    /pull-report, /facesheet-pull-by-date endpoint), this is the only place
+    credentials get set. Never reads them off the request body.
+    """
+    return _namespace(
+        model,
+        username=os.getenv("PF_USERNAME", ""),
+        password=os.getenv("PF_PASSWORD", ""),
+        **extra,
+    )
 
 
 def _run_browser_job(lock_key: str, callback):
@@ -152,15 +205,34 @@ def _dispatch_browser_job(wait_for_completion: bool, job_name: str, callback):
     """
     if wait_for_completion:
         started = time.monotonic()
-        try:
-            result = _run_browser_job(_BROWSER_LOCK_KEY, callback)
-        except HTTPException:
-            raise
-        except Exception as exc:
+        outcome: dict = {}
+
+        def _runner():
+            try:
+                outcome["result"] = _run_browser_job(_BROWSER_LOCK_KEY, callback)
+            except Exception as exc:  # re-raised on the caller's thread below
+                outcome["error"] = exc
+
+        # FastAPI runs a plain `def` endpoint via Starlette's implicit threadpool --
+        # a worker thread that anyio/uvloop machinery has already touched. Playwright's
+        # sync API refuses to run there ("Sync API inside the asyncio loop"), even
+        # though nothing is actually running on that thread's loop. A fresh, plain
+        # threading.Thread here has never been touched by that machinery, so
+        # Playwright's guard passes; .join() still blocks this request until the
+        # browser job finishes, exactly like calling it inline would have.
+        thread = threading.Thread(target=_runner, daemon=True)
+        thread.start()
+        thread.join()
+
+        if "error" in outcome:
+            exc = outcome["error"]
+            if isinstance(exc, HTTPException):
+                raise exc
             _slog(f"{job_name} failed: {type(exc).__name__}: {exc}")
             raise HTTPException(status_code=500, detail=str(exc))
+
         _slog(f"{job_name} completed in {time.monotonic() - started:.1f}s")
-        return {"status": "completed", "result": result}
+        return {"status": "completed", "result": outcome["result"]}
 
     job_id = str(uuid.uuid4())
 
@@ -190,9 +262,12 @@ class DoctorRequest(BaseModel):
     chrome_exe: str = ""
     attach: bool = False
     chrome_user_data_dir: str = Field(
-        default_factory=lambda: (
-            os.path.join(os.getenv("USERPROFILE", ""), "pf_rpa_chrome") if os.getenv("USERPROFILE") else ""
-        )
+        default_factory=_default_chrome_user_data_dir,
+        # default_factory results don't surface in the OpenAPI schema's "default", so
+        # Swagger's "Try it out" would otherwise pre-fill the generic "string"
+        # placeholder instead of the real path -- examples= makes Swagger show (and
+        # auto-fill) the actual resolved profile path instead.
+        examples=[_default_chrome_user_data_dir()],
     )
 
 
@@ -241,13 +316,13 @@ class ResetRequest(BaseModel):
 # ---------------------------------------------------------------------------
 
 
-class PullReportRequest(BrowserFields, ReportDateFields):
+class PullReportRequest(BrowserFieldsNoCreds, ReportDateFields):
     report_config_json: str
     output_csv: str
     wait_for_completion: bool = True
 
 
-class ProcessRequest(BrowserFields):
+class ProcessRequest(BrowserFieldsNoCreds):
     queue_json: str
     config_json: str
     downloads_dir: str
@@ -264,7 +339,7 @@ class ProcessRequest(BrowserFields):
     wait_for_completion: bool = True
 
 
-class FullSyncRequest(BrowserFields):
+class FullSyncRequest(BrowserFieldsNoCreds):
     queue_json: str
     config_json: str
     patients_file: str
@@ -276,7 +351,7 @@ class FullSyncRequest(BrowserFields):
     wait_for_completion: bool = True
 
 
-class RefreshRequest(BrowserFields):
+class RefreshRequest(BrowserFieldsNoCreds):
     queue_json: str
     config_json: str
     downloads_dir: str
@@ -289,7 +364,7 @@ class RefreshRequest(BrowserFields):
     wait_for_completion: bool = True
 
 
-class NightlyRequest(BrowserFields, ReportDateFields):
+class NightlyRequest(BrowserFieldsNoCreds, ReportDateFields):
     queue_json: str
     config_json: str
     report_config_json: str
@@ -306,7 +381,7 @@ class NightlyRequest(BrowserFields, ReportDateFields):
     wait_for_completion: bool = True
 
 
-class FullSyncByDateRequest(BrowserFields, ReportDateFields):
+class FullSyncByDateRequest(BrowserFieldsNoCreds, ReportDateFields):
     """Discover (Schedule-scoped, full-sweep fallback) -> merge registry ->
     pull-report -> ingest -> match-patients -> process, in one call. Unlike
     /nightly, this refreshes the patient registry itself first instead of
@@ -316,12 +391,56 @@ class FullSyncByDateRequest(BrowserFields, ReportDateFields):
     and the appointment report pull to the same window.
     """
 
-    queue_json: str
-    config_json: str
-    report_config_json: str
-    patients_file: str
-    downloads_dir: str
-    practice: str
+    # Real defaults (not bare `str`) on purpose -- see FacesheetPullByDateRequest's
+    # docstring and _default_chrome_user_data_dir's docstring above: a required
+    # field with no default gets Swagger's literal "string" placeholder submitted
+    # if a caller forgets to override it in "Try it out", which then gets used as
+    # a real path (e.g. downloads_dir="string" makes generate_pdf's mkdir collide
+    # with a stray file of that name and fail every record with FileExistsError).
+    # Defaults below point at this repo's real, current files/practice so a normal
+    # call only needs report_date and chrome_user_data_dir.
+    queue_json: str = "pf_appointment_queue.json"
+    config_json: str = "config/pf_pdf_sync_config.json"
+    report_config_json: str = "config/pf_appointment_report_config.json"
+    patients_file: str = "practice_fusion_patients.csv"
+    downloads_dir: str = "pf_encounter_pdfs"
+    practice: str = "NWARK Internal Medicine"
+    report_output_csv: str = ""
+    limit: int = 0
+    dry_run: bool = False
+    include_failed: bool = False
+    fuzzy_threshold: float = 0.82
+    dob_match_threshold: float = 0.85
+    wait_for_completion: bool = True
+
+
+class FacesheetPullByDateRequest(BrowserFieldsNoCreds, ReportDateFields):
+    """Discover (Schedule-scoped) -> pull-report -> ingest -> match against the live
+    discovery -> process, forcing every Facesheet section on for this call only. The
+    default (/full-sync-by-date, /process, /nightly) stays notes-only -- pass a date
+    (or start_date/end_date) here to pull complete Facesheet + notes PDFs for every
+    appointment on that date without changing the on-disk config default.
+
+    No username/password fields at all -- credentials always resolve from
+    PF_USERNAME/PF_PASSWORD in .env, never from the request body (see the endpoint
+    below, which injects them directly rather than reading them off this model).
+
+    No patients_file CSV anywhere in this path: schedule discovery resolves real
+    patient GUIDs directly from PF, in memory, and those become the match registry --
+    not fuzzy name/DOB matching against a static registry CSV. The whole-practice-
+    scrape fallback (triggered only if schedule discovery comes back completely
+    empty) is blocked for this command -- a single date's facesheet pull has no
+    business kicking off a scrape of every patient in the practice.
+
+    Defaults below point at this repo's real, current files/practice so a normal call
+    only needs report_date and chrome_user_data_dir -- override any of them only when
+    you actually mean a different file or practice."""
+
+    queue_json: str = "pf_appointment_queue.json"
+    config_json: str = "config/pf_pdf_sync_config.json"
+    report_config_json: str = "config/pf_appointment_report_config.json"
+    downloads_dir: str = "pf_encounter_pdfs"
+    practice: str = "NWARK Internal Medicine"
     report_output_csv: str = ""
     limit: int = 0
     dry_run: bool = False
@@ -431,7 +550,7 @@ def reset_endpoint(request: ResetRequest):
 
 @app.post("/pull-report")
 def pull_report_endpoint(request: PullReportRequest):
-    args = _namespace(request)
+    args = _namespace_with_env_creds(request)
     start_date, end_date = resolve_report_dates(args)
 
     def job():
@@ -451,7 +570,7 @@ def pull_report_endpoint(request: PullReportRequest):
 
 @app.post("/process")
 def process_endpoint(request: ProcessRequest):
-    args = _namespace(request)
+    args = _namespace_with_env_creds(request)
 
     def job():
         store = load_store(request.queue_json)
@@ -487,7 +606,7 @@ def process_endpoint(request: ProcessRequest):
 
 @app.post("/full-sync")
 def full_sync_endpoint(request: FullSyncRequest):
-    args = _namespace(request)
+    args = _namespace_with_env_creds(request)
 
     def job():
         store = load_store(request.queue_json)
@@ -530,7 +649,7 @@ def full_sync_endpoint(request: FullSyncRequest):
 
 @app.post("/refresh")
 def refresh_endpoint(request: RefreshRequest):
-    args = _namespace(request)
+    args = _namespace_with_env_creds(request)
 
     def job():
         # Same patient_id/ehr_patient_guid vs row/appointment/encounter-id selection
@@ -543,7 +662,7 @@ def refresh_endpoint(request: RefreshRequest):
 
 @app.post("/nightly")
 def nightly_endpoint(request: NightlyRequest):
-    args = _namespace(request)
+    args = _namespace_with_env_creds(request)
 
     def job():
         # Same pull -> ingest -> match -> process orchestration as the CLI's nightly
@@ -555,7 +674,7 @@ def nightly_endpoint(request: NightlyRequest):
 
 @app.post("/full-sync-by-date")
 def full_sync_by_date_endpoint(request: FullSyncByDateRequest):
-    args = _namespace(request)
+    args = _namespace_with_env_creds(request)
 
     def job():
         # Same discover -> merge registry -> pull -> ingest -> match -> process
@@ -564,3 +683,18 @@ def full_sync_by_date_endpoint(request: FullSyncByDateRequest):
         return run_full_sync_by_date(args)
 
     return _dispatch_browser_job(request.wait_for_completion, "full-sync-by-date", job)
+
+
+@app.post("/facesheet-pull-by-date")
+def facesheet_pull_by_date_endpoint(request: FacesheetPullByDateRequest):
+    args = _namespace_with_env_creds(request)
+
+    def job():
+        # Same discover -> merge registry -> pull -> ingest -> match -> process
+        # orchestration as /full-sync-by-date, but forces every Facesheet section on
+        # for this call only -- reused via cli.run_facesheet_pull_by_date, which
+        # builds the forced-on SyncConfig and hands it to run_full_sync_by_date
+        # instead of reimplementing the pipeline here.
+        return run_facesheet_pull_by_date(args)
+
+    return _dispatch_browser_job(request.wait_for_completion, "facesheet-pull-by-date", job)

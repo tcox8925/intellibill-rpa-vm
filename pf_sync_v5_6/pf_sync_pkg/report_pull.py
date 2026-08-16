@@ -53,7 +53,7 @@ def wait_report_ready(page: Page, config: AppointmentReportConfig) -> None:
         )
 
 
-def copy_download_to_csv(download, output_csv: str) -> int:
+def copy_download_to_csv(download, output_csv: str) -> Tuple[int, List[Dict[str, str]]]:
     target = Path(output_csv)
     target.parent.mkdir(parents=True, exist_ok=True)
     suggested = clean(download.suggested_filename)
@@ -66,14 +66,18 @@ def copy_download_to_csv(download, output_csv: str) -> int:
         rows = read_tabular_rows(str(temporary))
         write_csv(str(target), rows)
         temporary.unlink(missing_ok=True)
-    return len(read_tabular_rows(str(target)))
+    # Already read back to confirm the write and compute the count -- return those
+    # same rows so callers with an in-memory pipeline (run_facesheet_pull_by_date)
+    # don't need a second, independent read of this file.
+    rows_data = read_tabular_rows(str(target))
+    return len(rows_data), rows_data
 
 
 def try_export_report(
     page: Page,
     config: AppointmentReportConfig,
     output_csv: str,
-) -> Optional[int]:
+) -> Optional[Tuple[int, List[Dict[str, str]]]]:
     export_button = first_visible_locator(
         page, config.export_report_button_selectors, timeout_ms=5_000
     )
@@ -230,7 +234,9 @@ def _report_pager_state(page: Page) -> Tuple[Optional[int], Optional[int], Optio
     return None, None, None, ""
 
 
-def scrape_report_to_csv(page: Page, config: AppointmentReportConfig, output_csv: str) -> int:
+def scrape_report_to_csv(
+    page: Page, config: AppointmentReportConfig, output_csv: str
+) -> Tuple[int, List[Dict[str, str]]]:
     collected: Dict[str, List[str]] = {}
     headers = report_headers(page, config)
     page_guard = 0
@@ -331,7 +337,7 @@ def scrape_report_to_csv(page: Page, config: AppointmentReportConfig, output_csv
     width = max([len(headers), *(len(row) for row in rows)], default=0)
     if width == 0:
         write_csv(output_csv, [])
-        return 0
+        return 0, []
     if len(headers) < width:
         headers = headers + [f"column_{index + 1}" for index in range(len(headers), width)]
     headers = [header or f"column_{index + 1}" for index, header in enumerate(headers[:width])]
@@ -340,7 +346,7 @@ def scrape_report_to_csv(page: Page, config: AppointmentReportConfig, output_csv
         for row in rows
     ]
     write_csv(output_csv, dictionaries)
-    return len(dictionaries)
+    return len(dictionaries), dictionaries
 
 
 def save_report_diagnostics(page: Page, output_csv: str) -> Tuple[str, str]:
@@ -364,7 +370,14 @@ def pull_appointment_report_on_page(
     start_date: date,
     end_date: date,
     output_csv: str,
+    include_rows_data: bool = False,
 ) -> Dict[str, Any]:
+    """include_rows_data: when True, the returned dict also carries the parsed report
+    rows under "rows_data" (in memory already either way -- see copy_download_to_csv/
+    scrape_report_to_csv). Defaults to False so every existing caller's returned dict
+    -- and its json.dumps(...) logging -- is completely unchanged; only
+    run_facesheet_pull_by_date opts in, to feed those rows straight into
+    ingest_appointment_rows without a second file read."""
     if start_date > end_date:
         raise ValueError("start_date cannot be after end_date")
 
@@ -397,18 +410,28 @@ def pull_appointment_report_on_page(
 
         if first_visible_locator(page, config.no_results_selectors, timeout_ms=1_000):
             write_csv(output_csv, [])
-            return {"rows": 0, "method": "no_results", "output_csv": output_csv}
+            result = {"rows": 0, "method": "no_results", "output_csv": output_csv}
+            if include_rows_data:
+                result["rows_data"] = []
+            return result
 
         exported = try_export_report(page, config, output_csv)
         if exported is not None:
-            return {"rows": exported, "method": "download", "output_csv": output_csv}
+            row_count, rows_data = exported
+            result = {"rows": row_count, "method": "download", "output_csv": output_csv}
+            if include_rows_data:
+                result["rows_data"] = rows_data
+            return result
 
         print(
             "Export did not produce a browser download; scraping all report pages instead.",
             flush=True,
         )
-        scraped = scrape_report_to_csv(page, config, output_csv)
-        return {"rows": scraped, "method": "dom_scrape", "output_csv": output_csv}
+        row_count, rows_data = scrape_report_to_csv(page, config, output_csv)
+        result = {"rows": row_count, "method": "dom_scrape", "output_csv": output_csv}
+        if include_rows_data:
+            result["rows_data"] = rows_data
+        return result
     except Exception as exc:
         html_path, png_path = save_report_diagnostics(page, output_csv)
         raise RuntimeError(

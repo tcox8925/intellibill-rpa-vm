@@ -220,9 +220,43 @@ def match_patients(
     rematch_all: bool = False,
     dob_match_threshold: float = 0.85,
 ) -> Dict[str, int]:
+    """Match queue rows against the registry CSV/JSON/XLSX at patients_file.
+
+    Thin wrapper around match_patients_against_registry -- see that function for the
+    actual matching logic. Kept separate so callers that already have an in-memory
+    registry (e.g. run_facesheet_pull_by_date, which builds one straight from a live
+    Schedule scrape instead of a static file) can skip the file load entirely.
+    """
+    registry = load_patient_registry(patients_file)
+    return match_patients_against_registry(
+        queue_json,
+        registry,
+        fuzzy_threshold=fuzzy_threshold,
+        rematch_all=rematch_all,
+        dob_match_threshold=dob_match_threshold,
+        run_details={"patients_file": str(Path(patients_file).resolve())},
+    )
+
+
+def match_patients_against_registry(
+    queue_json: str,
+    registry: List[Dict[str, Any]],
+    fuzzy_threshold: float = 0.82,
+    rematch_all: bool = False,
+    dob_match_threshold: float = 0.85,
+    run_details: Optional[Dict[str, Any]] = None,
+) -> Dict[str, int]:
+    """Match queue rows against an already-loaded registry (list of patient dicts in
+    the same shape map_patient_registry_row produces: patient_id, ehr_patient_guid,
+    patient_name, normalized_name, dob, phones, patient_status).
+
+    run_details: extra fields recorded on the match-patients run-log entry alongside
+    registry_rows/fuzzy_threshold -- match_patients passes the resolved patients_file
+    path here; callers with no backing file (e.g. a live Schedule-scrape registry)
+    can pass whatever's meaningful for their case, or leave it blank.
+    """
     store = load_store(queue_json)
     rows = store_rows(store)
-    registry = load_patient_registry(patients_file)
     dob_buckets = index_registry_by_dob(registry)
     mappings = store.setdefault("patient_mappings", [])
     counts = {
@@ -347,7 +381,7 @@ def match_patients(
         store,
         "match-patients",
         {
-            "patients_file": str(Path(patients_file).resolve()),
+            **(run_details or {}),
             "registry_rows": len(registry),
             "fuzzy_threshold": fuzzy_threshold,
         },

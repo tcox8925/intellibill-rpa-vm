@@ -2,6 +2,7 @@
 
 import json
 import tempfile
+import uuid
 from datetime import date
 from pathlib import Path
 from typing import Any, Dict
@@ -151,7 +152,16 @@ def run_self_test() -> int:
         root = Path(tmp)
         appointments = root / "appointments.csv"
         patients = root / "patients.csv"
-        queue = root / "queue.json"
+        # store.py's queue backend is Postgres now, namespaced by the queue file's
+        # basename (not its full path) -- see store._queue_key. A fixed "queue.json"
+        # here used to be safely isolated back when the queue was a JSON file at this
+        # unique tempdir path; now it collides with every other self-test run's rows
+        # under that same basename, so a fresh run finds its own prior rows already
+        # there and reports them as "updated" instead of "inserted". A uuid-suffixed
+        # name keeps this run's queue_key unique in the shared table, same as any two
+        # real callers already stay isolated by using distinct queue_json basenames
+        # (e.g. pf_appointment_queue.json vs pf_appointment_queue_tomorrow_test.json).
+        queue = root / f"selftest_queue_{uuid.uuid4().hex}.json"
 
         # v5.4: this fixture used to invent headers (Appointment ID, PATIENT, DATE/TIME,
         # APPT. TYPE, SEEN BY PROVIDER) that no Practice Fusion export actually emits, then
@@ -460,32 +470,28 @@ def run_self_test() -> int:
         assert name_token_containment("Ruben Tejada", "Ruben Alvarez") == 0.0
         assert identity_score("Peyton Hicks", "Peyton Peyton") < 0.85
 
-        # v5.5: notes mode. First chart for a patient takes every note; once a PDF exists
-        # for that patient, later appointments take only the appointment date's note.
+        # v5.18: SOAP notes are always appointment-date scoped during normal processing.
+        # The legacy "auto" value must also resolve to date so old config files cannot
+        # accidentally select the patient's entire note history on the first PDF.
         notes_cfg = SyncConfig()
-        assert notes_cfg.notes_selection_mode == "auto"
+        assert notes_cfg.notes_selection_mode == "date"
         first = QueueRecord(
             row_id="r1", ehr_patient_guid="guid-a", appointment_date="07/29/2026 09:15 AM"
         )
         later = QueueRecord(
             row_id="r2", ehr_patient_guid="guid-a", appointment_date="08/05/2026 09:15 AM"
         )
-        assert resolve_notes_mode(first, notes_cfg, [first, later]) == "all"
-        # A retry of the same row must not count as its own prior history.
+        assert resolve_notes_mode(first, notes_cfg, [first, later]) == "date"
         first.status = "processed"
         first.pdf_path = "C:\\charts\\guid-a.pdf"
-        assert resolve_notes_mode(first, notes_cfg, [first, later]) == "all"
+        assert resolve_notes_mode(first, notes_cfg, [first, later]) == "date"
         assert resolve_notes_mode(later, notes_cfg, [first, later]) == "date"
-        # A different patient is unaffected.
         other = QueueRecord(row_id="r3", ehr_patient_guid="guid-b", appointment_date="08/05/2026")
-        assert resolve_notes_mode(other, notes_cfg, [first, later, other]) == "all"
-        # Explicit overrides win over auto.
+        assert resolve_notes_mode(other, notes_cfg, [first, later, other]) == "date"
+        # Legacy auto is now date-scoped; explicit all remains available only as an override.
+        assert resolve_notes_mode(first, SyncConfig(notes_selection_mode="auto"), [first]) == "date"
         assert resolve_notes_mode(later, SyncConfig(notes_selection_mode="all"), [first, later]) == "all"
         assert resolve_notes_mode(first, SyncConfig(notes_selection_mode="date"), [first]) == "date"
-        # A processed row with no pdf_path is not prior history.
-        stub = QueueRecord(row_id="r4", ehr_patient_guid="guid-c", status="processed")
-        target = QueueRecord(row_id="r5", ehr_patient_guid="guid-c")
-        assert resolve_notes_mode(target, notes_cfg, [stub, target]) == "all"
 
         # The modal-ready selector list must prefer the real dialog over the hidden
         # carbon-content-modal-component wrapper that shares its data-element.
@@ -494,8 +500,13 @@ def run_self_test() -> int:
             "not(.carbon-content-modal-component)" in selector
             for selector in notes_cfg.print_modal_ready_selectors
         )
-        # Every configured section must appear in the known-option manifest, or the
-        # exact-selection pass would clear it immediately after checking it.
+        # v5.18: production Print Chart output is notes-only. The prior Facesheet selector
+        # configuration remains present (disabled, not deleted) for explicit override.
+        assert notes_cfg.include_facesheet_sections is False
+        assert notes_cfg.facesheet_checkbox_selectors, "Facesheet selector code/config was removed"
+
+        # Every retained configured section must appear in the known-option manifest, or
+        # an explicit include_facesheet_sections=True override could not be verified.
         for selector in notes_cfg.facesheet_checkbox_selectors:
             assert selector in notes_cfg.facesheet_known_option_selectors, selector
 

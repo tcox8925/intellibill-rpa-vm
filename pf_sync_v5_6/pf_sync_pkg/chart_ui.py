@@ -426,6 +426,38 @@ def select_facesheet_sections(page: Page, config: SyncConfig, modal: Optional[Lo
     return selected
 
 
+def prepare_print_chart_sections(
+    page: Page, config: SyncConfig, modal: Optional[Locator] = None
+) -> List[str]:
+    """Prepare non-note Print Chart sections before selecting the SOAP note.
+
+    v5.18 production behavior is notes-only: clear every non-note Facesheet section and
+    verify none remain selected.  The prior Facesheet selection code is intentionally
+    retained and can still be enabled explicitly with include_facesheet_sections=True.
+    """
+    if config.include_facesheet_sections:
+        return select_facesheet_sections(page, config, modal)
+
+    if modal is None:
+        modal = require_visible_locator(
+            page, config.print_modal_ready_selectors, SHORT_TIMEOUT, "Print Chart modal"
+        )
+
+    if not clear_all_facesheet_sections(page, config, modal):
+        raise RuntimeError(
+            "NOTES_ONLY_SELECTION_CLEAR_FAILED: could not clear all non-note Print Chart sections."
+        )
+
+    state = modal_checkbox_state(modal, config)
+    unexpected = sorted(owner for owner, checked in state.items() if checked)
+    if unexpected:
+        raise RuntimeError(
+            "NOTES_ONLY_SELECTION_MISMATCH: non-note Print Chart sections remain checked: "
+            + ", ".join(unexpected)
+        )
+    return []
+
+
 def note_date_tokens(appointment_date: str, formats: Iterable[str]) -> List[str]:
     """Build the date strings to look for in Print Chart note labels.
 
@@ -606,46 +638,29 @@ def select_soap_note_for_date(page: Page, config: SyncConfig, appointment_date: 
     return " | ".join(selected)
 
 
-def patient_has_prior_pdf(record: QueueRecord, all_rows: Sequence[QueueRecord]) -> bool:
-    """Has a chart PDF already been produced for this patient?
-
-    Keyed on ehr_patient_guid because that is the identifier every matched row carries;
-    631 registry patients have no PRN. The record being processed is excluded so a retry
-    of the same appointment does not count as prior history.
-    """
-    guid = clean(record.ehr_patient_guid)
-    if not guid:
-        return False
-    for other in all_rows:
-        if other.row_id == record.row_id:
-            continue
-        if clean(other.ehr_patient_guid) != guid:
-            continue
-        if other.status == "processed" and clean(other.pdf_path):
-            return True
-    return False
-
-
 def resolve_notes_mode(
     record: QueueRecord,
     config: SyncConfig,
     all_rows: Sequence[QueueRecord],
 ) -> str:
-    """Decide between every note and only the appointment date's note.
+    """Resolve SOAP-note selection mode.
 
-    "auto" selects every note the first time a patient is printed, so the initial chart
-    carries the full note history, then narrows to the appointment date on later runs so
-    each subsequent PDF adds only the new visit.
+    Normal processing is always appointment-date scoped.  The legacy ``auto`` value is
+    intentionally treated as ``date`` so older config files cannot revert to the previous
+    first-chart behavior that selected the patient's entire note history.  ``all`` remains
+    available only as an explicit override for manual/debug use.
     """
-    mode = clean(config.notes_selection_mode).lower() or "auto"
-    if mode in {"all", "date"}:
-        return mode
-    if mode != "auto":
-        print(
-            f"  WARNING: unknown notes_selection_mode {mode!r}; treating it as 'auto'.",
-            flush=True,
-        )
-    return "date" if patient_has_prior_pdf(record, all_rows) else "all"
+    del record, all_rows  # kept in the signature for backward compatibility with callers
+    mode = clean(config.notes_selection_mode).lower() or "date"
+    if mode == "all":
+        return "all"
+    if mode in {"date", "auto"}:
+        return "date"
+    print(
+        f"  WARNING: unknown notes_selection_mode {mode!r}; treating it as 'date'.",
+        flush=True,
+    )
+    return "date"
 
 
 def select_notes_for_record(
@@ -656,10 +671,10 @@ def select_notes_for_record(
 ) -> Tuple[str, str]:
     mode = resolve_notes_mode(record, config, all_rows)
     if mode == "all":
-        print("  notes: first chart for this patient -> selecting all SOAP notes", flush=True)
+        print("  notes: explicit all-notes override enabled", flush=True)
         return mode, select_all_notes(page, config)
     print(
-        f"  notes: prior chart exists -> selecting notes dated {record.appointment_date}",
+        f"  notes: selecting SOAP notes dated {record.appointment_date}",
         flush=True,
     )
     return mode, select_soap_note_for_date(page, config, record.appointment_date)

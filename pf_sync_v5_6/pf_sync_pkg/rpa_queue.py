@@ -170,7 +170,7 @@ class FileQueue:
 
     def _load(self) -> dict:
         try:
-            with open(self.path, "r", encoding="utf-8") as f:
+            with open(self.path, "r", encoding="utf-8-sig") as f:
                 return json.load(f)
         except Exception:
             return {"rows": {}}
@@ -252,7 +252,7 @@ class FileQueue:
     # --- job control (file-based signal the UI/endpoint can also write) ---
     def _load_control(self) -> dict:
         try:
-            with open(self.control_path, "r", encoding="utf-8") as f:
+            with open(self.control_path, "r", encoding="utf-8-sig") as f:
                 return json.load(f)
         except Exception:
             return {}
