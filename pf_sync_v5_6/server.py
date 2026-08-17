@@ -1,16 +1,22 @@
 """
 Practice Fusion SOAP/PDF sync API
 ==================================
-FastAPI server for pf_sync_v5_6, on port PF_SYNC_API_PORT (default 8011).
+FastAPI server for pf_sync_v5_6.
 
-Run it with:
+In production this app is mounted as a sub-application by the repo-root
+server.py (see server.py's `app.mount("/pf-sync", pf_sync_app)`), alongside a
+same-way-mounted myops/server.py, so both Tebra and Practice Fusion sync are
+served by one uvicorn process on one port (8010) -- every route below is
+reachable at /pf-sync/<route> in that setup. Because the combined process's
+cwd/entrypoint is the repo root (not this directory), every relative-path
+request-field default here is anchored via _pf_path() to this file's own
+directory rather than left as a bare relative string.
+
+For local/standalone development it can still be run on its own:
     python -m uvicorn server:app --host 0.0.0.0 --port 8011
 or, honoring the environment override:
     python -m uvicorn server:app --host 0.0.0.0 --port %PF_SYNC_API_PORT%
-
-This is intentionally a *different* port than the sibling myops/server.py project
-in this same repo (which listens on 8010), so both APIs can run at once on the
-same VM without a collision.
+This is not the production path -- see server.py and myops/DEPLOYMENT.md.
 
 Every endpoint here is a thin wrapper calling straight into pf_sync_pkg.*  -- the
 same code the pf_soap_sync_v5_16.py CLI drives. Only one browser/CDP session can
@@ -95,6 +101,20 @@ def _acquire_key_lock(key: str) -> threading.Lock:
 # ---------------------------------------------------------------------------
 # Shared request field groups
 # ---------------------------------------------------------------------------
+
+
+from pathlib import Path as _Path
+
+PF_SYNC_DIR = _Path(__file__).resolve().parent
+
+
+def _pf_path(rel: str) -> str:
+    """Anchor a relative default path to this file's own directory, not the
+    process's cwd. Needed because this app can now be mounted as a sub-app
+    inside myops/server.py's process (see module docstring above), whose cwd
+    is myops/ -- without this, defaults like "pf_appointment_queue.json"
+    would silently read/write inside myops/ instead of pf_sync_v5_6/."""
+    return str(PF_SYNC_DIR / rel)
 
 
 def _default_chrome_user_data_dir() -> str:
@@ -398,12 +418,15 @@ class FullSyncByDateRequest(BrowserFieldsNoCreds, ReportDateFields):
     # a real path (e.g. downloads_dir="string" makes generate_pdf's mkdir collide
     # with a stray file of that name and fail every record with FileExistsError).
     # Defaults below point at this repo's real, current files/practice so a normal
-    # call only needs report_date and chrome_user_data_dir.
-    queue_json: str = "pf_appointment_queue.json"
-    config_json: str = "config/pf_pdf_sync_config.json"
-    report_config_json: str = "config/pf_appointment_report_config.json"
-    patients_file: str = "practice_fusion_patients.csv"
-    downloads_dir: str = "pf_encounter_pdfs"
+    # call only needs report_date and chrome_user_data_dir. Anchored via _pf_path()
+    # to pf_sync_v5_6/'s own directory -- see _pf_path's docstring -- so they still
+    # resolve correctly when this app is mounted as a sub-app under myops/server.py
+    # with a different process cwd.
+    queue_json: str = Field(default_factory=lambda: _pf_path("pf_appointment_queue.json"))
+    config_json: str = Field(default_factory=lambda: _pf_path("config/pf_pdf_sync_config.json"))
+    report_config_json: str = Field(default_factory=lambda: _pf_path("config/pf_appointment_report_config.json"))
+    patients_file: str = Field(default_factory=lambda: _pf_path("practice_fusion_patients.csv"))
+    downloads_dir: str = Field(default_factory=lambda: _pf_path("pf_encounter_pdfs"))
     practice: str = "NWARK Internal Medicine"
     report_output_csv: str = ""
     limit: int = 0
@@ -434,12 +457,13 @@ class FacesheetPullByDateRequest(BrowserFieldsNoCreds, ReportDateFields):
 
     Defaults below point at this repo's real, current files/practice so a normal call
     only needs report_date and chrome_user_data_dir -- override any of them only when
-    you actually mean a different file or practice."""
+    you actually mean a different file or practice. Anchored via _pf_path() for the
+    same sub-app-mounting reason as FullSyncByDateRequest above."""
 
-    queue_json: str = "pf_appointment_queue.json"
-    config_json: str = "config/pf_pdf_sync_config.json"
-    report_config_json: str = "config/pf_appointment_report_config.json"
-    downloads_dir: str = "pf_encounter_pdfs"
+    queue_json: str = Field(default_factory=lambda: _pf_path("pf_appointment_queue.json"))
+    config_json: str = Field(default_factory=lambda: _pf_path("config/pf_pdf_sync_config.json"))
+    report_config_json: str = Field(default_factory=lambda: _pf_path("config/pf_appointment_report_config.json"))
+    downloads_dir: str = Field(default_factory=lambda: _pf_path("pf_encounter_pdfs"))
     practice: str = "NWARK Internal Medicine"
     report_output_csv: str = ""
     limit: int = 0

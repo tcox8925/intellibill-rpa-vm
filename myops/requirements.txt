@@ -1,5 +1,11 @@
 # FastAPI core
 # python version 3.12
+# NOTE: this file also covers pf_sync_v5_6/requirements_pf_sync.txt's dependencies
+# (fastapi, uvicorn, pydantic, python-dotenv, azure-storage-blob, psycopg2-binary,
+# playwright, openpyxl) now that pf_sync_v5_6/server.py is mounted as a sub-app
+# inside myops/server.py's process and runs under this same venv -- see
+# myops/server.py's pf_sync mount and pf_sync_v5_6/server.py's module docstring.
+# pf_sync_v5_6/.venv (Python 3.14) is retired; both apps now share this 3.12 venv.
 fastapi==0.115.0
 uvicorn[standard]==0.30.6
 gunicorn

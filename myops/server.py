@@ -15,6 +15,7 @@ import logging
 import threading
 import time
 import uuid
+from contextlib import asynccontextmanager
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -44,24 +45,32 @@ def _docs_enabled() -> bool:
     return _env_name() in {"dev", "development", "local"}
 
 
-app = FastAPI(
-    title="OPS EMR RPA API",
-    docs_url="/docs" if _docs_enabled() else None,
-    redoc_url="/redoc" if _docs_enabled() else None,
-    openapi_url="/openapi.json" if _docs_enabled() else None,
-)
-
 CST = ZoneInfo("America/Chicago")
 
 
-@app.on_event("startup")
-def _run_migrations():
-    # Keep startup schema checks local to the new ehr package.
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    # Keep startup schema checks local to the new ehr package. Exposed as a
+    # module-level `lifespan` (not the deprecated @app.on_event("startup"))
+    # so the combined repo-root server.py can compose it directly
+    # (`async with lifespan(tebra_app): ...`) instead of duplicating this
+    # logic -- mounting this app as a sub-app does not make its own lifespan
+    # fire automatically, so whoever hosts it must invoke it explicitly.
     try:
         ensure_appointments_schema()
         print("[STARTUP] ensure_appointments_schema OK", flush=True)
     except Exception as e:
         print(f"[STARTUP] schema migration skipped: {e!r}", flush=True)
+    yield
+
+
+app = FastAPI(
+    title="OPS EMR RPA API",
+    docs_url="/docs" if _docs_enabled() else None,
+    redoc_url="/redoc" if _docs_enabled() else None,
+    openapi_url="/openapi.json" if _docs_enabled() else None,
+    lifespan=lifespan,
+)
 
 
 def _log_rpa_run(product_name, entity, sub_entity, start_dt, end_dt,

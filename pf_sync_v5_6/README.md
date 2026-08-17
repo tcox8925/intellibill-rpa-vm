@@ -8,7 +8,11 @@ Chrome session.
 
 - Build: `PF-SOAP-SYNC-v5.16.0-batch-appointment-metadata`
 - Code: `pf_sync_pkg/` (package). `pf_soap_sync_v5_16.py` is a thin CLI shim over it.
-- HTTP API: `server.py` (FastAPI, port **8011**).
+- HTTP API: `server.py` (FastAPI). In production, mounted as a sub-app at
+  `/pf-sync` by the repo-root `server.py` combined entrypoint, so it's served
+  on port **8010** alongside Tebra (see `../server.py` and myops/DEPLOYMENT.md)
+  rather than run standalone. It can still be run standalone on port **8011**
+  for local development (§4 below).
 - No database — everything is files: JSON queue, CSV/XLSX reports, PDF output.
 
 ---
@@ -150,9 +154,15 @@ python3 pf_soap_sync_v5_16.py status --queue-json pf_appointment_queue.json
 
 ---
 
-## 4. Running it — HTTP API (`server.py`, port 8011)
+## 4. Running it — HTTP API (`server.py`)
 
-Start the server:
+**Production**: this app is mounted at `/pf-sync` by the repo-root `server.py`
+combined entrypoint (one uvicorn process, port 8010, serving both Tebra and
+Practice Fusion sync — see `../server.py` and myops/DEPLOYMENT.md). Every
+route below is reachable at `/pf-sync/<route>` in that setup, e.g.
+`http://127.0.0.1:8010/pf-sync/healthz`.
+
+**Local/standalone dev only** — run it directly on its own port:
 ```bash
 python3 -m uvicorn server:app --host 0.0.0.0 --port 8011
 ```
