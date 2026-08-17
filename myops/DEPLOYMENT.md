@@ -269,6 +269,21 @@ MYOPS_API_ENV=development
 PF_SYNC_API_ENV=development
 ```
 
+**`.env` is the single source of truth for these two vars** -- `myops.service`
+only does `EnvironmentFile=.../.env`, it does NOT hardcode `Environment=` lines
+for `MYOPS_API_ENV`/`PF_SYNC_API_ENV` on top of that. If you ever add an
+`Environment=MYOPS_API_ENV=...` (or `PF_SYNC_API_ENV=...`) line directly to the
+unit file, know that it silently wins over whatever `.env` says (systemd
+applies `EnvironmentFile=` first, then explicit `Environment=` lines override
+it) -- editing `.env` afterward would look like it does nothing.
+
+After changing `.env`, restart for it to take effect -- editing the file alone
+doesn't affect an already-running process:
+
+```bash
+sudo systemctl restart myops
+```
+
 If docs are disabled in production, `/docs`, `/redoc`, `/openapi.json`,
 `/pf-sync/docs`, `/pf-sync/redoc`, and `/pf-sync/openapi.json` will not be
 available.
