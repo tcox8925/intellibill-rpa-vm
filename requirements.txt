@@ -1,0 +1,7 @@
+# Root-level requirements for the combined server.py entrypoint (Tebra +
+# Practice Fusion sync in one process -- see server.py's module docstring).
+# myops/requirements.txt already covers every dependency pf_sync_v5_6 needs
+# (fastapi, uvicorn, pydantic, python-dotenv, azure-storage-blob,
+# psycopg2-binary, playwright, openpyxl -- see myops/requirements.txt's own
+# note), so this just points pip at it rather than duplicating the list.
+-r myops/requirements.txt

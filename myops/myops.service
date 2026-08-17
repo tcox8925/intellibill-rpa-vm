@@ -1,0 +1,16 @@
+[Unit]
+Description=MyOps combined RPA API (Tebra + Practice Fusion sync)
+After=network.target
+
+[Service]
+User=ibrcmadmin
+WorkingDirectory=/home/ibrcmadmin/intellibill-rpa-vm
+EnvironmentFile=/home/ibrcmadmin/intellibill-rpa-vm/.env
+Environment=MYOPS_API_ENV=production
+Environment=PF_SYNC_API_ENV=production
+ExecStart=/home/ibrcmadmin/intellibill-rpa-vm/venv/bin/python -m uvicorn server:app --host 0.0.0.0 --port 8010
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

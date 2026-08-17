@@ -15,6 +15,13 @@ from pf_sync_pkg.dom_utils import first_visible_locator
 from pf_sync_pkg.models import QueueRecord, SyncConfig
 from pf_sync_pkg.utils import clean
 
+# Anchor debug-artifact output to pf_sync_v5_6/ (this package's parent dir) rather
+# than a bare relative path -- this app can be mounted as a sub-app inside
+# myops/server.py's process (see pf_sync_v5_6/server.py's module docstring),
+# whose cwd is myops/, which would otherwise silently create pf_sync_debug/
+# inside myops/ instead of pf_sync_v5_6/.
+_PF_SYNC_DEBUG_DIR = Path(__file__).resolve().parent.parent / "pf_sync_debug"
+
 
 def _mark_current_visible_print_links(page: Page, selector: str, marker: str) -> int:
     """Mark print links that already exist before PF creates the chart preview.
@@ -263,7 +270,7 @@ def _find_and_mark_print_document(
         time.sleep(0.25)
 
     # Save evidence that is useful if PF changes the preview structure again.
-    debug_dir = Path("pf_sync_debug")
+    debug_dir = _PF_SYNC_DEBUG_DIR
     debug_dir.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     try:
@@ -728,7 +735,7 @@ def _save_pdf_debug_artifacts(
     pdf_bytes: bytes,
     prefix: str,
 ) -> Path:
-    debug_dir = Path("pf_sync_debug")
+    debug_dir = _PF_SYNC_DEBUG_DIR
     debug_dir.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     base = debug_dir / f"{prefix}_{stamp}"
