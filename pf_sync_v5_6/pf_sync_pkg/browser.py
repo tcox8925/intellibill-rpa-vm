@@ -302,6 +302,55 @@ def wait_for_pf_login(context: BrowserContext, page: Page, args: argparse.Namesp
     )
 
 
+def _pid_is_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        # Process exists but is owned by someone else -- still alive.
+        return True
+    return True
+
+
+def _clear_stale_chrome_lock(user_data_dir: str) -> None:
+    """Remove Chrome's single-instance lock files for this profile if the
+    process that created them is no longer running.
+
+    Chrome refuses to open a second window on a profile another instance
+    already has open -- it just silently forwards the request to that
+    existing process instead. If a prior run's Chrome subprocess got
+    orphaned (e.g. myops.service restarting mid-job kills the Python
+    process but not its already-spawned Chrome child), that lock survives
+    and every subsequent launch attempt on this profile gets silently
+    redirected into the dead/invisible orphan instead of opening a real,
+    visible window -- exactly what looked like being "stuck on about:blank"
+    during initial setup.
+
+    SingletonLock is a symlink named "<hostname>-<pid>" on Linux/macOS. Only
+    ever removes it (plus its SingletonCookie/SingletonSocket siblings) when
+    the embedded pid is confirmed dead -- never touches actual session data
+    (cookies, Local State, etc.), so this has no effect on how long Practice
+    Fusion's login session lasts.
+    """
+    lock_path = os.path.join(user_data_dir, "SingletonLock")
+    if not os.path.islink(lock_path):
+        return
+    try:
+        target = os.readlink(lock_path)
+    except OSError:
+        return
+    pid_str = target.rsplit("-", 1)[-1]
+    if not pid_str.isdigit() or _pid_is_alive(int(pid_str)):
+        return
+    print(f"Clearing stale Chrome lock left by dead pid {pid_str} in {user_data_dir}")
+    for name in ("SingletonLock", "SingletonCookie", "SingletonSocket"):
+        try:
+            os.remove(os.path.join(user_data_dir, name))
+        except OSError:
+            pass
+
+
 def build_browser(args: argparse.Namespace):
     global _CHROME_PROC
     port = int(args.debug_port)
@@ -322,6 +371,7 @@ def build_browser(args: argparse.Namespace):
 
     clone_profile_if_needed(args)
     user_data_dir = os.path.abspath(args.chrome_user_data_dir)
+    _clear_stale_chrome_lock(user_data_dir)
     chrome_exe = find_chrome_exe(args.chrome_exe)
     command = [
         chrome_exe,
