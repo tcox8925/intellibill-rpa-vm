@@ -56,21 +56,84 @@ use:
 
 ### 4) One-time RPA/browser setup (do this before starting the service)
 
-Both Tebra and Practice Fusion sync drive a **real, headed Chrome browser**
-against an already-logged-in profile -- neither can log in unattended the
-first time (Tebra needs an OTP; Practice Fusion needs its own login flow).
-This is a manual, interactive, one-time step per environment:
+Both Tebra and Practice Fusion sync drive a **real Chrome browser**, but they
+differ in what that actually requires on a headless Linux VM (no monitor, no
+X server by default):
 
-- **Tebra**: follow `myops/README.md` (session/OTP setup, §4a for the Graph
-  OTP-mailbox wiring) to get a working logged-in Chrome profile and confirm
-  `otp_info.py`/`email_read.py` can read the OTP mailbox.
-- **Practice Fusion**: follow `pf_sync_v5_6/README.md` §1 to log into Practice
-  Fusion once in the Chrome profile at `~/pf_rpa_chrome` (or
-  `%USERPROFILE%\pf_rpa_chrome` on Windows) so it's reusable headlessly-ish
-  afterward.
+- **Tebra can run fully headless.** `myops/ehr/pipeline.py` calls
+  `playwright.chromium.launch(headless=...)` directly, and its OTP step is
+  automated by reading the code from an email mailbox via Microsoft Graph
+  (`otp_info.py`/`email_read.py`) -- no human ever needs to see the browser.
+  Set `EHR_PLAYWRIGHT_HEADLESS=true` in `.env` explicitly (don't leave it
+  blank -- see the Xvfb note below for why) and follow `myops/README.md`
+  (§4a) once to wire up the Graph OTP-mailbox app.
+- **Practice Fusion sync can run headless too, but only *after* its first
+  login.** `pf_sync_pkg/browser.py`'s `_pf_headless()` reads
+  `PF_PLAYWRIGHT_HEADLESS` from `.env` (same true/false parsing as
+  `EHR_PLAYWRIGHT_HEADLESS`) and adds real Chrome's own `--headless=new` flag
+  when it's true -- same profile, same binary, just off-screen. Its OTP/
+  security-check step still has **no automated reader**, though -- a human
+  has to see and solve it -- so:
+  - **Leave `PF_PLAYWRIGHT_HEADLESS=false` (the default) until the first
+    login below has already succeeded** in this exact
+    `chrome_user_data_dir` (`~/pf_rpa_chrome`).
+  - **Only flip it to `true` afterward**, for ongoing unattended runs. PF's
+    "remember this device" session persists in that Chrome profile across
+    runs, so headless calls shouldn't hit the OTP screen again -- but if PF
+    ever does re-challenge it, a headless run has no way for anyone to see or
+    solve it and will just time out after `login_timeout_seconds`. Set it
+    back to `false` and re-run the login step below (via VNC) to recover.
+  - Either way, on this display-less VM the **first login itself always
+    needs**:
+    1. A **virtual display (Xvfb)** so headed Chrome has somewhere to render
+       into at all -- without this it crashes immediately with
+       `Missing X server or $DISPLAY`.
+    2. A **VNC session** into that virtual display, to actually see and solve
+       Practice Fusion's OTP challenge.
 
-Skip this and the first real API call will hang waiting for a login prompt
-that never gets answered.
+**Set up Xvfb (once, before anything else in this section):**
+
+```bash
+sudo apt update
+sudo apt install -y xvfb x11vnc
+sudo cp ~/intellibill-rpa-vm/myops/xvfb.service /etc/systemd/system/xvfb.service
+sudo systemctl daemon-reload
+sudo systemctl enable --now xvfb
+```
+
+`myops.service` (see step 5 below) already depends on `xvfb.service` and sets
+`DISPLAY=:99` for the app -- **important side effect**: this also makes
+`DISPLAY` visible to Tebra's own auto-headless-detection in
+`myops/ehr/config.py`, which otherwise defaults to headless *because* no
+`DISPLAY` was set. With Xvfb's `DISPLAY=:99` now present, that auto-detection
+would flip Tebra to headed too unless `EHR_PLAYWRIGHT_HEADLESS=true` is set
+explicitly in `.env` -- which is why that's called out above as required, not
+optional, once Xvfb is in the picture.
+
+**Log into Practice Fusion once, via VNC on the virtual display:**
+
+```bash
+# On the VM: start a temporary VNC server pointed at the Xvfb display
+x11vnc -display :99 -nopw -listen localhost -xkb &
+
+# On your laptop: tunnel that port over SSH, then connect a VNC client to localhost:5900
+ssh -L 5900:localhost:5900 ibrcmadmin@20.46.228.47
+# (in a VNC client) connect to localhost:5900
+
+# Now, ALSO on the VM, run pf_sync's login flow with DISPLAY=:99 so Chrome
+# renders into the display you're VNC'd into -- follow pf_sync_v5_6/README.md
+# §1's login steps, e.g.:
+cd ~/intellibill-rpa-vm/pf_sync_v5_6
+DISPLAY=:99 ../venv/bin/python pf_soap_sync_v5_16.py doctor \
+  --config-json config/pf_pdf_sync_config.json \
+  --report-config-json config/pf_appointment_report_config.json
+# watch the VNC window, solve the OTP challenge when it appears, then close
+# the temporary x11vnc process (kill %1) once login succeeds
+```
+
+Skip this and the first real API call will either hang waiting for a login
+prompt no one can see, or crash immediately with a `Missing X server`
+error -- see whichever applies based on whether Xvfb is installed yet.
 
 ### 5) Install the systemd unit
 
@@ -121,6 +184,14 @@ this VM's username or clone path differs from the checked-in example.)
 If a **separate, standalone `pf_sync` systemd unit** exists on the VM from
 before this merge (serving port 8011 on its own), disable and remove it --
 see the port-8011 check in step 8 below.
+
+**If this VM didn't already have a virtual display set up**: the updated
+`myops.service` now sets `Environment=DISPLAY=:99` and depends on
+`xvfb.service` -- if that unit doesn't exist yet on the VM, `myops` will fail
+to start (or Chrome-driving endpoints will crash with `Missing X server or
+$DISPLAY`). Do the [Xvfb + one-time Practice Fusion login setup](#4-one-time-rpabrowser-setup-do-this-before-starting-the-service)
+from the fresh-deployment section above before restarting `myops` -- it
+applies here too, not just to brand-new VMs.
 
 ### 1) SSH into the VM
 

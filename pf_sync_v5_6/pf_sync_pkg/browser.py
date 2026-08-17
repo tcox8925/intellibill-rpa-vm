@@ -25,6 +25,27 @@ from pf_sync_pkg.constants import (
 _CHROME_PROC: Optional[subprocess.Popen] = None
 
 
+def _pf_headless() -> bool:
+    """Whether to launch Chrome with --headless=new instead of a real, visible
+    window. Mirrors myops/ehr/config.py's EHR_PLAYWRIGHT_HEADLESS parsing
+    (same truthy strings), but the *default* here is the opposite of Tebra's:
+    headed unless explicitly turned on, because Practice Fusion's OTP/
+    security-check step has no automated reader (see wait_for_pf_login below)
+    -- a human has to see and solve it the first time (and again whenever PF's
+    "remember this device" session lapses), which requires a real/visible
+    window, not a headless one. Only set PF_PLAYWRIGHT_HEADLESS=true in .env
+    AFTER that first login has already succeeded in this exact
+    chrome_user_data_dir, so ongoing automated runs skip past the login form
+    without ever hitting the OTP screen. If PF ever does re-challenge OTP
+    while this is headless, wait_for_pf_login() will just time out after
+    login_timeout_seconds with no way for anyone to see or solve it -- flip
+    this back to false (and use the Xvfb+VNC setup in myops/DEPLOYMENT.md) to
+    re-authenticate, then switch back to headless once it succeeds again.
+    """
+    raw = os.environ.get("PF_PLAYWRIGHT_HEADLESS", "").strip().lower()
+    return raw in {"1", "true", "yes", "on"}
+
+
 def find_chrome_exe(explicit: str = "") -> str:
     if explicit and os.path.isfile(explicit):
         return explicit
@@ -300,7 +321,17 @@ def build_browser(args: argparse.Namespace):
         "--start-maximized",
         "about:blank",
     ]
-    print("Launching Chrome with the reusable Practice Fusion profile...")
+    headless = _pf_headless()
+    if headless:
+        # Real Chrome's own --headless=new flag (not Playwright's bundled
+        # browser -- this is still the same chrome_exe/profile as the headed
+        # path above, just rendering off-screen instead of into a real/Xvfb
+        # display) -- see _pf_headless()'s docstring for when this is safe.
+        command.append("--headless=new")
+    print(
+        "Launching Chrome with the reusable Practice Fusion profile"
+        + (" (headless)..." if headless else "...")
+    )
     _CHROME_PROC = subprocess.Popen(command)
     wait_devtools(endpoint)
     playwright = sync_playwright().start()
