@@ -117,7 +117,15 @@ def wait_devtools(endpoint: str, timeout_seconds: float = 30.0) -> None:
                     return
         except Exception:
             time.sleep(0.4)
-    raise SystemExit(f"Chrome DevTools endpoint did not start: {endpoint}")
+    # NOT SystemExit -- this used to raise SystemExit, which is a BaseException,
+    # not an Exception. That silently escaped server.py's `except Exception`
+    # handlers (e.g. _dispatch_browser_job's background-thread wrapper), got
+    # swallowed by Python's default handling of an uncaught SystemExit in a
+    # non-main thread, and left the dispatch code with no recorded result OR
+    # error -- surfacing as a confusing `KeyError: 'result'` instead of this
+    # message. A normal exception propagates correctly through both the CLI
+    # and the server's job dispatch.
+    raise RuntimeError(f"Chrome DevTools endpoint did not start: {endpoint}")
 
 
 def is_logged_in(page: Page) -> bool:

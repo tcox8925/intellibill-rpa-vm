@@ -230,7 +230,13 @@ def _dispatch_browser_job(wait_for_completion: bool, job_name: str, callback):
         def _runner():
             try:
                 outcome["result"] = _run_browser_job(_BROWSER_LOCK_KEY, callback)
-            except Exception as exc:  # re-raised on the caller's thread below
+            except BaseException as exc:  # re-raised on the caller's thread below
+                # BaseException, not Exception -- SystemExit/KeyboardInterrupt raised
+                # inside this background thread otherwise escape this handler
+                # entirely, get silently swallowed by Python's default handling of
+                # an uncaught SystemExit in a non-main thread, and leave `outcome`
+                # with neither "result" nor "error" set -- surfacing below as a
+                # confusing `KeyError: 'result'` instead of the real failure.
                 outcome["error"] = exc
 
         # FastAPI runs a plain `def` endpoint via Starlette's implicit threadpool --
@@ -261,7 +267,10 @@ def _dispatch_browser_job(wait_for_completion: bool, job_name: str, callback):
         try:
             _run_browser_job(_BROWSER_LOCK_KEY, callback)
             _slog(f"{job_name} background job_id={job_id} done")
-        except Exception as exc:
+        except BaseException as exc:
+            # BaseException, not Exception -- see the wait_for_completion=True
+            # branch above for why (SystemExit otherwise vanishes silently here,
+            # with no "done" or "failed" log line at all).
             _slog(f"{job_name} background job_id={job_id} failed: {type(exc).__name__}: {exc}")
 
     threading.Thread(target=_runner, daemon=True).start()
