@@ -86,7 +86,8 @@ def clone_profile_if_needed(args: argparse.Namespace) -> None:
         os.path.abspath(args.source_user_data_dir), args.source_profile
     )
     if not os.path.isdir(source_profile):
-        raise SystemExit(f"Source Chrome profile does not exist: {source_profile}")
+        # NOT SystemExit -- see wait_devtools' comment above for why.
+        raise RuntimeError(f"Source Chrome profile does not exist: {source_profile}")
     if args.refresh_profile and os.path.isdir(destination_profile):
         shutil.rmtree(destination_profile, ignore_errors=True)
 
@@ -99,7 +100,8 @@ def clone_profile_if_needed(args: argparse.Namespace) -> None:
             dirs_exist_ok=True,
         )
     except PermissionError as exc:
-        raise SystemExit(
+        # NOT SystemExit -- see wait_devtools' comment above for why.
+        raise RuntimeError(
             "Chrome profile files are locked. Close every Chrome window and try again."
         ) from exc
 
