@@ -59,7 +59,10 @@ def find_chrome_exe(explicit: str = "") -> str:
     for candidate in candidates:
         if candidate and os.path.isfile(candidate):
             return candidate
-    raise SystemExit("Could not locate Google Chrome. Pass --chrome-exe explicitly.")
+    # NOT SystemExit -- see wait_devtools' comment above for why: a BaseException
+    # here silently escapes server.py's dispatch code instead of surfacing as a
+    # clean error.
+    raise RuntimeError("Could not locate Google Chrome. Pass --chrome-exe explicitly.")
 
 
 def clone_profile_if_needed(args: argparse.Namespace) -> None:
