@@ -224,6 +224,124 @@ def run_tebra(request: TebraRequest):
     )
 
 
+# /run-tebra caps start_date..end_date at MAX_DATE_RANGE_DAYS (7 days) because
+# that window also drives a LIVE Tebra worklist calendar scrape (pass_appointments),
+# which is slow per day. /run-tebra-recheck below skips that scrape entirely --
+# it only reruns the DB-only recheck passes (notes/facesheets/charges) for rows
+# already in the table, so a much wider window costs nothing extra. This is what
+# catches a note signed weeks after its appointment date: backfill mode's
+# facesheets gate already ignores process_status (see query.py's
+# UNGATED_REPULL), so any signed-but-unprocessed row whose appt_date falls
+# inside this window gets its facesheet pulled here, no matter how long ago it
+# was signed.
+RECHECK_MAX_DATE_RANGE_DAYS = 365
+
+
+class RecheckRequest(BaseModel):
+    start_date: str
+    end_date: str
+    practice_name: str | None = None  # None = every discovered practice
+    wait_for_completion: bool = True
+    entity: str | None = None
+    sub_entity: str | None = None
+    ehr_name: str | None = None
+
+
+@app.post("/run-tebra-recheck")
+def run_tebra_recheck(request: RecheckRequest):
+    request_clock = time.monotonic()
+    req_id = str(uuid.uuid4())
+    start_dt = datetime.strptime(request.start_date, "%Y-%m-%d")
+    end_dt = datetime.strptime(request.end_date, "%Y-%m-%d")
+    delta_days = (end_dt.date() - start_dt.date()).days
+    if delta_days < 0:
+        raise HTTPException(status_code=400, detail="end_date cannot be before start_date")
+    if delta_days > RECHECK_MAX_DATE_RANGE_DAYS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Date range cannot exceed {RECHECK_MAX_DATE_RANGE_DAYS} days (inclusive)",
+        )
+
+    practice_name = _normalize_practice_name(request.practice_name) if request.practice_name else None
+    entity = (request.entity or ENTITY).strip()
+    sub_entity = (request.sub_entity or SUB_ENTITY).strip()
+    ehr_name = (request.ehr_name or EHR_NAME).strip()
+
+    _slog(
+        f"run-tebra-recheck received req_id={req_id} practice={practice_name or 'ALL'} "
+        f"window={request.start_date}..{request.end_date} wait_for_completion={request.wait_for_completion}"
+    )
+
+    lock = _acquire_key_lock(f"tebra-recheck::{entity}::{practice_name or 'ALL'}")
+
+    def _execute_run():
+        _slog(f"run-tebra-recheck executing req_id={req_id}")
+        sel = WorkSelector.backfill(
+            start_date=start_dt.date(), end_date=end_dt.date(),
+            practice=practice_name,
+            # True (default): re-pull facesheets for every signed row in this
+            # window regardless of prior process_status -- already-Processed
+            # rows get collected/re-verified too, not skipped. This is the
+            # same contract /run-tebra already has, just over a much wider
+            # window since the live appointment scrape is skipped here.
+            ungated_repull=True,
+        )
+        sel.entity, sel.sub_entity, sel.ehr_name = entity, sub_entity, ehr_name
+        summary = run(sel, scrape_patients=False, skip_appointment_scrape=True)
+        _slog(f"run-tebra-recheck done req_id={req_id} summary={summary}")
+        return summary
+
+    def _runner():
+        try:
+            _execute_run()
+        except Exception as e:
+            _slog(f"run-tebra-recheck failed req_id={req_id} error={e!r}")
+        finally:
+            try:
+                lock.release()
+            except Exception:
+                pass
+            _slog(
+                f"run-tebra-recheck background cleanup req_id={req_id} "
+                f"elapsed={time.monotonic() - request_clock:.1f}s"
+            )
+
+    if request.wait_for_completion:
+        try:
+            summary = _execute_run()
+            _slog(
+                f"run-tebra-recheck response completed req_id={req_id} "
+                f"elapsed={time.monotonic() - request_clock:.1f}s"
+            )
+            return {
+                "status": "completed",
+                "request_id": req_id,
+                "practice": practice_name or "ALL",
+                "start_date": request.start_date,
+                "end_date": request.end_date,
+                "summary": summary,
+            }
+        finally:
+            try:
+                lock.release()
+            except Exception:
+                pass
+
+    threading.Thread(target=_runner, daemon=True).start()
+    _slog(f"run-tebra-recheck accepted background req_id={req_id}")
+    return JSONResponse(
+        status_code=202,
+        content={
+            "status": "started",
+            "request_id": req_id,
+            "practice": practice_name or "ALL",
+            "start_date": request.start_date,
+            "end_date": request.end_date,
+            "message": "Recheck accepted and executing in background. Set wait_for_completion=true to wait for completion.",
+        },
+    )
+
+
 @app.post("/run-tebra-daily")
 def run_tebra_daily(request: DailyRequest):
     entity = (request.entity or ENTITY).strip()

@@ -95,8 +95,11 @@ def build_appointment_query(sel, needing, table=TABLE_NAME):
 
     # Per-pass gate (parenthesized so it composes safely with AND filters).
     # backfill/target re-pull regardless of prior process_status/file_path for
-    # gates listed in UNGATED_REPULL; daily keeps the full "needs work" gate.
-    if sel.mode != "daily" and needing in UNGATED_REPULL:
+    # gates listed in UNGATED_REPULL, UNLESS the caller set
+    # sel.ungated_repull=False (e.g. /run-tebra-recheck) to keep the normal
+    # "skip if already Processed" gate even inside an explicit window. daily
+    # always keeps the full "needs work" gate.
+    if sel.mode != "daily" and needing in UNGATED_REPULL and sel.ungated_repull:
         where.append(f"({UNGATED_REPULL[needing]})")
     else:
         where.append(f"({GATES[needing]})")

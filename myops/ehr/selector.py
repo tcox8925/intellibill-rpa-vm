@@ -36,6 +36,15 @@ class WorkSelector:
     appt_id: Optional[str] = None
     patient_name: Optional[str] = None
 
+    # backfill/target default to True (existing behavior: re-pull facesheets
+    # regardless of prior process_status inside the window/target -- the
+    # caller explicitly asked for this scope, so already-processed rows are
+    # redone too). Set False to keep the normal "skip if already Processed"
+    # gate even inside an explicit window -- used by /run-tebra-recheck so a
+    # wide historical window only pulls rows that are signed AND genuinely
+    # not done yet, never re-downloading ones already successfully processed.
+    ungated_repull: bool = True
+
     # Tenant identity — defaults from config, overridable for future tenants.
     entity: str = ENTITY
     sub_entity: str = SUB_ENTITY
@@ -72,13 +81,15 @@ class WorkSelector:
         return cls(mode="daily", practice=practice, folder_structure=folder_structure)
 
     @classmethod
-    def backfill(cls, start_date, end_date, practice=None, folder_structure=None):
+    def backfill(cls, start_date, end_date, practice=None, folder_structure=None,
+                 ungated_repull=True):
         return cls(
             mode="backfill",
             start_date=start_date,
             end_date=end_date,
             practice=practice,
             folder_structure=folder_structure,
+            ungated_repull=ungated_repull,
         )
 
     @classmethod

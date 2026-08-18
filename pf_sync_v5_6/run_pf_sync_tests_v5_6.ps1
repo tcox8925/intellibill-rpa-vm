@@ -18,10 +18,10 @@
 $ErrorActionPreference = "Stop"
 Set-Location $ProjectDir
 
-$Worker = Join-Path $ProjectDir "pf_soap_sync_v5_6.py"
+$Worker = Join-Path $ProjectDir "pf_soap_sync_v5_16.py"
 $PdfConfig = Join-Path $ProjectDir "config\pf_pdf_sync_config.json"
 $ReportConfig = Join-Path $ProjectDir "config\pf_appointment_report_config.json"
-$ExpectedBuild = "PF-SOAP-SYNC-v5.6.0-hidden-checkbox-labels"
+$ExpectedBuild = "PF-SOAP-SYNC-v5.16.0-batch-appointment-metadata"
 
 if (-not (Test-Path $Worker)) {
     throw "Worker not found: $Worker"

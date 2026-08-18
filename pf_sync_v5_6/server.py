@@ -431,11 +431,26 @@ class FullSyncByDateRequest(BrowserFieldsNoCreds, ReportDateFields):
     # to pf_sync_v5_6/'s own directory -- see _pf_path's docstring -- so they still
     # resolve correctly when this app is mounted as a sub-app under myops/server.py
     # with a different process cwd.
-    queue_json: str = Field(default_factory=lambda: _pf_path("pf_appointment_queue.json"))
-    config_json: str = Field(default_factory=lambda: _pf_path("config/pf_pdf_sync_config.json"))
-    report_config_json: str = Field(default_factory=lambda: _pf_path("config/pf_appointment_report_config.json"))
-    patients_file: str = Field(default_factory=lambda: _pf_path("practice_fusion_patients.csv"))
-    downloads_dir: str = Field(default_factory=lambda: _pf_path("pf_encounter_pdfs"))
+    queue_json: str = Field(
+        default_factory=lambda: _pf_path("pf_appointment_queue.json"),
+        examples=[_pf_path("pf_appointment_queue.json")],
+    )
+    config_json: str = Field(
+        default_factory=lambda: _pf_path("config/pf_pdf_sync_config.json"),
+        examples=[_pf_path("config/pf_pdf_sync_config.json")],
+    )
+    report_config_json: str = Field(
+        default_factory=lambda: _pf_path("config/pf_appointment_report_config.json"),
+        examples=[_pf_path("config/pf_appointment_report_config.json")],
+    )
+    patients_file: str = Field(
+        default_factory=lambda: _pf_path("practice_fusion_patients.csv"),
+        examples=[_pf_path("practice_fusion_patients.csv")],
+    )
+    downloads_dir: str = Field(
+        default_factory=lambda: _pf_path("pf_encounter_pdfs"),
+        examples=[_pf_path("pf_encounter_pdfs")],
+    )
     practice: str = "NWARK Internal Medicine"
     report_output_csv: str = ""
     limit: int = 0
@@ -469,10 +484,22 @@ class FacesheetPullByDateRequest(BrowserFieldsNoCreds, ReportDateFields):
     you actually mean a different file or practice. Anchored via _pf_path() for the
     same sub-app-mounting reason as FullSyncByDateRequest above."""
 
-    queue_json: str = Field(default_factory=lambda: _pf_path("pf_appointment_queue.json"))
-    config_json: str = Field(default_factory=lambda: _pf_path("config/pf_pdf_sync_config.json"))
-    report_config_json: str = Field(default_factory=lambda: _pf_path("config/pf_appointment_report_config.json"))
-    downloads_dir: str = Field(default_factory=lambda: _pf_path("pf_encounter_pdfs"))
+    queue_json: str = Field(
+        default_factory=lambda: _pf_path("pf_appointment_queue.json"),
+        examples=[_pf_path("pf_appointment_queue.json")],
+    )
+    config_json: str = Field(
+        default_factory=lambda: _pf_path("config/pf_pdf_sync_config.json"),
+        examples=[_pf_path("config/pf_pdf_sync_config.json")],
+    )
+    report_config_json: str = Field(
+        default_factory=lambda: _pf_path("config/pf_appointment_report_config.json"),
+        examples=[_pf_path("config/pf_appointment_report_config.json")],
+    )
+    downloads_dir: str = Field(
+        default_factory=lambda: _pf_path("pf_encounter_pdfs"),
+        examples=[_pf_path("pf_encounter_pdfs")],
+    )
     practice: str = "NWARK Internal Medicine"
     report_output_csv: str = ""
     limit: int = 0
@@ -480,6 +507,25 @@ class FacesheetPullByDateRequest(BrowserFieldsNoCreds, ReportDateFields):
     include_failed: bool = False
     fuzzy_threshold: float = 0.82
     dob_match_threshold: float = 0.85
+    wait_for_completion: bool = True
+
+
+class FacesheetPullByDateRequestSlim(BaseModel):
+    """The only fields that matter day-to-day for /facesheet-pull-by-date.
+
+    Everything else on FacesheetPullByDateRequest (chrome_user_data_dir,
+    queue_json, config_json, report_config_json, downloads_dir, practice,
+    limit, dry_run, thresholds, ...) keeps that model's own safe, already-
+    anchored defaults -- there's no reason to make a caller see or override
+    them in Swagger, and doing so is exactly what caused the FileExistsError:
+    'string' bug (a default_factory field left at Swagger's placeholder value
+    and submitted literally). Hiding them here removes that failure mode
+    entirely for this endpoint, not just the display.
+    """
+
+    report_date: str = ""
+    start_date: str = ""
+    end_date: str = ""
     wait_for_completion: bool = True
 
 
@@ -705,9 +751,34 @@ def nightly_endpoint(request: NightlyRequest):
     return _dispatch_browser_job(request.wait_for_completion, "nightly", job)
 
 
+class FullSyncByDateRequestSlim(BaseModel):
+    """The only fields that matter day-to-day for /full-sync-by-date.
+
+    Everything else on FullSyncByDateRequest (chrome_user_data_dir, queue_json,
+    config_json, report_config_json, patients_file, downloads_dir, practice,
+    limit, dry_run, thresholds, ...) keeps that model's own real, anchored
+    defaults -- see FacesheetPullByDateRequestSlim's docstring above for why
+    those fields aren't exposed here at all.
+    """
+
+    report_date: str = ""
+    start_date: str = ""
+    end_date: str = ""
+    wait_for_completion: bool = True
+
+
 @app.post("/full-sync-by-date")
-def full_sync_by_date_endpoint(request: FullSyncByDateRequest):
-    args = _namespace_with_env_creds(request)
+def full_sync_by_date_endpoint(request: FullSyncByDateRequestSlim):
+    # Expand the slim request into the full model so every other field keeps
+    # FullSyncByDateRequest's own real, anchored defaults instead of a
+    # caller-supplied Swagger placeholder.
+    full_request = FullSyncByDateRequest(
+        report_date=request.report_date,
+        start_date=request.start_date,
+        end_date=request.end_date,
+        wait_for_completion=request.wait_for_completion,
+    )
+    args = _namespace_with_env_creds(full_request)
 
     def job():
         # Same discover -> merge registry -> pull -> ingest -> match -> process
@@ -719,8 +790,18 @@ def full_sync_by_date_endpoint(request: FullSyncByDateRequest):
 
 
 @app.post("/facesheet-pull-by-date")
-def facesheet_pull_by_date_endpoint(request: FacesheetPullByDateRequest):
-    args = _namespace_with_env_creds(request)
+def facesheet_pull_by_date_endpoint(request: FacesheetPullByDateRequestSlim):
+    # Expand the slim request into the full model so every other field keeps
+    # FacesheetPullByDateRequest's own real, anchored defaults (never a
+    # caller-supplied "string" placeholder) -- see FacesheetPullByDateRequestSlim's
+    # docstring for why those fields aren't exposed here at all.
+    full_request = FacesheetPullByDateRequest(
+        report_date=request.report_date,
+        start_date=request.start_date,
+        end_date=request.end_date,
+        wait_for_completion=request.wait_for_completion,
+    )
+    args = _namespace_with_env_creds(full_request)
 
     def job():
         # Same discover -> merge registry -> pull -> ingest -> match -> process

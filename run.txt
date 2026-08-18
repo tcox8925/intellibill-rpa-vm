@@ -1,0 +1,92 @@
+RPA-VM-UPDATE — how to run this project locally
+=================================================
+
+This repo runs Tebra (myops) and Practice Fusion sync (pf_sync_v5_6) as ONE
+combined FastAPI process, served by the root-level server.py:
+  - Tebra routes            -> http://127.0.0.1:8010/...
+  - Practice Fusion routes  -> http://127.0.0.1:8010/pf-sync/...
+
+1) One-time setup
+------------------
+cd /Users/hmg/Documents/RPA-VM-UPDATE
+source myops/.venv/bin/activate
+pip install -r requirements.txt
+playwright install chromium
+
+Make sure .env at the repo root has real values for at least:
+  MYOPS_API_ENV=development        (enables /docs)
+  PF_SYNC_API_ENV=development      (enables /pf-sync/docs)
+  PF_USERNAME / PF_PASSWORD
+  TEBRA_EMAIL / TEBRA_PASSWORD
+  EHR_PLAYWRIGHT_HEADLESS=true     (Tebra: false only if you have a real display)
+  PF_PLAYWRIGHT_HEADLESS=false     (pf_sync: keep false until the one-time PF
+                                    login/OTP has been done once in a visible
+                                    Chrome window; flip to true afterwards)
+
+NOTE: if `uvicorn` (the bare command) fails with "bad interpreter: ... no such
+file or directory", the venv's shebang paths are stale (e.g. the repo folder
+was moved/renamed after the venv was created). Don't recreate the venv for
+this — just run uvicorn via `python -m uvicorn ...` instead (see below),
+which doesn't depend on the shebang line.
+
+2) Start the server
+--------------------
+cd /Users/hmg/Documents/RPA-VM-UPDATE
+source myops/.venv/bin/activate
+python -m uvicorn server:app --host 0.0.0.0 --port 8010 --reload
+
+--reload is for local dev only (auto-restarts on code changes). Never use
+--reload in production/systemd (myops.service runs without it).
+
+3) Trigger things
+-------------------
+Swagger UI (interactive, click "Try it out" on any endpoint):
+  Tebra:    http://127.0.0.1:8010/docs
+  pf_sync:  http://127.0.0.1:8010/pf-sync/docs
+
+Quick health checks:
+  curl http://127.0.0.1:8010/healthz
+  curl http://127.0.0.1:8010/pf-sync/healthz
+
+Example Tebra trigger:
+  curl -X POST http://127.0.0.1:8010/run-tebra -H "Content-Type: application/json" -d '{}'
+
+Example pf_sync trigger (dry run, no browser writes):
+  curl -X POST http://127.0.0.1:8010/pf-sync/full-sync-by-date \
+    -H "Content-Type: application/json" \
+    -d '{"start_date":"2026-07-25","end_date":"2026-07-30","dry_run":true}'
+
+4) pf_sync CLI worker (bypasses the API, talks to the worker script directly)
+-------------------------------------------------------------------------------
+cd /Users/hmg/Documents/RPA-VM-UPDATE/pf_sync_v5_6
+source ../myops/.venv/bin/activate
+export PF_USERNAME=... PF_PASSWORD=...
+
+python pf_soap_sync_v5_16.py version         # confirms worker build
+python pf_soap_sync_v5_16.py self-test       # internal logic checks, no browser
+python pf_soap_sync_v5_16.py doctor \
+  --config-json config/pf_pdf_sync_config.json \
+  --report-config-json config/pf_appointment_report_config.json \
+  --patients-file practice_fusion_patients.csv \
+  --queue-json pf_appointment_queue.json \
+  --chrome-user-data-dir ~/pf_rpa_chrome \
+  --appointments-file <an existing appointments_*.csv>   # config/report validation, no browser
+
+# The remaining subcommands (pull-report, ingest, match-patients, status,
+# process) are documented inside run_pf_sync_tests_v5_6.ps1, which chains
+# them all in order. That script is Windows/PowerShell-only (hardcoded
+# C:\ paths) -- on macOS/Linux, either install PowerShell (`brew install
+# --cask powershell` -> `pwsh run_pf_sync_tests_v5_6.ps1 -ChromeUserDataDir
+# ... -SourceUserDataDir ... `) or just run each `python pf_soap_sync_v5_16.py
+# <command> ...` step from the .ps1 file by hand in bash.
+
+5) Stopping the server
+------------------------
+Ctrl+C in the terminal running uvicorn, or:
+  lsof -i :8010 -sTCP:LISTEN     # find the PID
+  kill <PID>
+
+6) Production (VM) deployment
+--------------------------------
+See myops/DEPLOYMENT.md — the VM runs this exact same server.py via a
+systemd unit (myops/myops.service), not via manual uvicorn/--reload.

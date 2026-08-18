@@ -45,7 +45,7 @@ def _window(sel):
     return today, today
 
 
-def run(sel: WorkSelector, scrape_patients=None, no_upload=False):
+def run(sel: WorkSelector, scrape_patients=None, no_upload=False, skip_appointment_scrape=False):
     if not DOWNLOAD_DIR:
         raise RuntimeError(
             "EHR_DOWNLOAD_DIR is empty. Set EHR_DOWNLOAD_DIR in environment or .env "
@@ -124,6 +124,7 @@ def run(sel: WorkSelector, scrape_patients=None, no_upload=False):
             start_date=sel.start_date, end_date=sel.end_date,
             appt_id=sel.appt_id, patient_name=sel.patient_name,
             entity=sel.entity, sub_entity=sel.sub_entity, ehr_name=sel.ehr_name,
+            ungated_repull=sel.ungated_repull,
         )
         from_date, to_date = _window(psel)
 
@@ -143,7 +144,13 @@ def run(sel: WorkSelector, scrape_patients=None, no_upload=False):
                 login_and_select_practice(page, practice)
                 _log(f"Practice={practice} login/select done elapsed={time.monotonic() - phase_clock:.1f}s")
 
-                if psel.mode in ("daily", "backfill"):
+                # skip_appointment_scrape=True bypasses the live Tebra worklist
+                # calendar walk (the expensive, per-day UI scrape that
+                # MAX_DATE_RANGE_DAYS caps at 7 days in /run-tebra) -- used by
+                # /run-tebra-recheck for wide-window notes/facesheets/charges
+                # catch-up over rows already in the DB, where no fresh
+                # appointment discovery is needed.
+                if psel.mode in ("daily", "backfill") and not skip_appointment_scrape:
                     phase_clock = time.monotonic()
                     pass_appointments(page, psel, practice, from_date, to_date)
                     _log(f"Practice={practice} appointments pass done elapsed={time.monotonic() - phase_clock:.1f}s")
