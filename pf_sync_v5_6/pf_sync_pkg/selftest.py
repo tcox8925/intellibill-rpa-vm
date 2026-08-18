@@ -510,6 +510,39 @@ def run_self_test() -> int:
         for selector in notes_cfg.facesheet_checkbox_selectors:
             assert selector in notes_cfg.facesheet_known_option_selectors, selector
 
+        # v5.19: full-sync-by-date builds its own config fresh per call (notes +
+        # demographics + active insurance) without ever touching the on-disk default
+        # every other command reads as notes-only (asserted above).
+        import argparse as _argparse
+
+        from pf_sync_pkg.cli import build_full_sync_by_date_config  # lazy: avoids cli<->selftest cycle
+
+        full_sync_cfg = build_full_sync_by_date_config(
+            _argparse.Namespace(config_json=str(root / "does_not_exist.json"))
+        )
+        assert full_sync_cfg.include_facesheet_sections is True
+        assert any(
+            "chk-patient-demographics" in selector for selector in full_sync_cfg.facesheet_checkbox_selectors
+        )
+        assert any(
+            "print-insurance-options" in selector for selector in full_sync_cfg.facesheet_checkbox_selectors
+        )
+        assert not any(
+            "chk-diagnoses" in selector for selector in full_sync_cfg.facesheet_checkbox_selectors
+        )
+        assert full_sync_cfg.insurance_section_data_element == "print-insurance-options"
+        assert full_sync_cfg.insurance_filter_option_text == "Active insurance"
+        # Best-effort by default: a selector miss on this must never fail the SOAP note PDF
+        # (see select_insurance_active_filter's docstring for the live run this fixes).
+        assert full_sync_cfg.enforce_insurance_active_filter is False
+        # Confirmed live 2026-08-18: the insurance filter is PF's plain input-dropdown
+        # control (a <button class="input-dropdown-button">), not the notes-style
+        # checkbox-dropdown-grouping widget originally guessed.
+        assert "input-dropdown-button" in full_sync_cfg.insurance_filter_toggle_selector
+        assert full_sync_cfg.insurance_section_data_element in full_sync_cfg.insurance_filter_toggle_selector
+        # Building full-sync-by-date's config must never mutate the on-disk default.
+        assert SyncConfig().include_facesheet_sections is False
+
         # The old singular print_modal_ready_selector key must still load.
         legacy = root / "legacy_config.json"
         atomic_write_json(

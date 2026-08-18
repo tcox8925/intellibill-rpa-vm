@@ -12,6 +12,7 @@ from playwright.sync_api import Page
 from pf_sync_pkg.chart_ui import (
     close_print_chart,
     find_encounter_for_appointment,
+    insurance_filter_toggle_label,
     open_print_chart,
     patient_summary_url,
     prepare_print_chart_sections,
@@ -254,6 +255,11 @@ def process_one_record(
 
     modal = open_print_chart(page, config)
     record.selected_sections = prepare_print_chart_sections(page, config, modal)
+    record.insurance_filter_selected = (
+        insurance_filter_toggle_label(page, config)
+        if config.insurance_section_data_element in "".join(record.selected_sections)
+        else ""
+    )
     notes_mode, record.selected_soap_note_text = select_notes_for_record(
         page, config, record, all_rows
     )

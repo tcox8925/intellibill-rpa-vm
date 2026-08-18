@@ -4,7 +4,7 @@ import argparse
 import json
 import os
 import sys
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from datetime import date
 from pathlib import Path
 from typing import Any, Dict, Tuple
@@ -294,7 +294,8 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "Discover (Schedule-scoped) -> pull-report -> ingest -> match against the live "
             "discovery -> process, forcing every Facesheet section on for this run only -- the "
-            "default (full-sync-by-date/process/nightly) stays notes-only. No patients_file CSV: "
+            "default for process/nightly/refresh/full-sync stays notes-only; full-sync-by-date's "
+            "default is notes + demographics + active insurance. No patients_file CSV: "
             "schedule discovery resolves real patient GUIDs directly from PF, in memory, and "
             "those become the match registry. The whole-practice-scrape fallback is blocked "
             "since a single date has no business triggering that."
@@ -587,6 +588,29 @@ def run_nightly(
     return browser_command_wrapper(args, callback)
 
 
+def build_full_sync_by_date_config(args: argparse.Namespace) -> SyncConfig:
+    """SyncConfig for full-sync-by-date: the appointment-date SOAP note (as configured)
+    plus Patient demographics and Patient insurance -- filtered to Active insurance only --
+    on every printed chart.
+
+    v5.19: full-sync-by-date is the one command this applies to by default. process,
+    nightly, refresh, and plain full-sync all keep reading the on-disk config's notes-only
+    default untouched (see prepare_print_chart_sections/include_facesheet_sections). This
+    never edits the on-disk config file -- same pattern run_facesheet_pull_by_date already
+    uses to force facesheet sections on for one call without changing everyone else's
+    default, except scoped to just demographics + insurance rather than every section.
+    """
+    base_config = SyncConfig.load(args.config_json)
+    return replace(
+        base_config,
+        include_facesheet_sections=True,
+        facesheet_checkbox_selectors=[
+            "[data-element='chk-patient-demographics'] input[type='checkbox']",
+            "[data-element='print-insurance-options'] input[type='checkbox']",
+        ],
+    )
+
+
 def run_full_sync_by_date(
     args: argparse.Namespace,
     config: "SyncConfig | None" = None,
@@ -603,10 +627,10 @@ def run_full_sync_by_date(
     scattered CSV copies was current. One call resolves all of that in a fixed
     order, every time.
 
-    config: pass an already-built SyncConfig to use in place of loading
-    args.config_json fresh -- run_facesheet_pull_by_date uses this to force
-    every Facesheet section on for one call without touching the on-disk
-    config default (which stays notes-only).
+    config: pass an already-built SyncConfig to use in place of the default this function
+    builds itself (build_full_sync_by_date_config: notes + demographics + active insurance).
+    run_facesheet_pull_by_date uses this to force every Facesheet section on for one call
+    instead.
 
     allow_full_sweep_fallback: when discovery genuinely comes back empty, the
     default (True) falls back to a full, live scrape of every patient in the
@@ -692,7 +716,7 @@ def run_full_sync_by_date(
             f"appointments_{start_date.isoformat()}_to_{end_date.isoformat()}.csv"
         )
         nonlocal config
-        config = config or SyncConfig.load(args.config_json)
+        config = config or build_full_sync_by_date_config(args)
         report_config = AppointmentReportConfig.load(args.report_config_json)
 
         try:
@@ -791,11 +815,13 @@ def run_facesheet_pull_by_date(args: argparse.Namespace) -> dict:
     discovery, not a registry file -> process, forcing every Facesheet section on for
     this call only.
 
-    v5.18's production default (full-sync-by-date, process, nightly) is notes-only --
-    see chart_ui.prepare_print_chart_sections. This command exists for an on-demand
-    facesheet pull scoped to one date/date-range, without flipping the on-disk config's
-    include_facesheet_sections default (which every other command keeps reading as
-    notes-only).
+    v5.18's production default for process/nightly/refresh/plain full-sync is notes-only --
+    see chart_ui.prepare_print_chart_sections; the on-disk config's include_facesheet_sections
+    default stays False for all of them. v5.19 gave full-sync-by-date its own default of
+    notes + demographics + active insurance (see build_full_sync_by_date_config) -- this
+    command exists on top of that for an on-demand pull of EVERY Facesheet section (vitals,
+    diagnoses, allergies, etc., not just demographics/insurance), scoped to one date/date
+    range, without changing full-sync-by-date's own default for other calls.
 
     No patients_file CSV anywhere in this path: discover_via_schedule_range() checks
     the actual Practice Fusion Schedule for that date and returns real patient GUIDs

@@ -75,6 +75,13 @@ class QueueRecord:
     error_message: str = ""
     scrape_run_id: str = ""
 
+    # v5.19: what the Print Chart modal's insurance filter dropdown actually confirmed to be
+    # selected for this record (see chart_ui.select_insurance_active_filter), so a printed
+    # chart can be audited after the fact without re-driving the browser -- same reasoning
+    # as selected_sections above. Empty when Patient insurance was not printed for this
+    # record (i.e. every command except full-sync-by-date).
+    insurance_filter_selected: str = ""
+
     @classmethod
     def from_dict(cls, value: Dict[str, Any]) -> "QueueRecord":
         allowed = cls.__dataclass_fields__.keys()
@@ -191,6 +198,53 @@ class SyncConfig:
     )
     # Fail rather than print a chart whose section selection could not be verified.
     enforce_exact_facesheet_selection: bool = True
+
+    # v5.19: when Patient insurance is included (facesheet_checkbox_selectors), its own
+    # filter dropdown has three options: "All insurance", "Active insurance", "Inactive
+    # insurance". Left on "All insurance", the printed chart would include every
+    # inactive/expired plan on file -- this is the "insurance active check": full-sync-by-date
+    # confirms the printed insurance section is filtered down to active coverage only. See
+    # cli.build_full_sync_by_date_config, the only caller that turns Patient insurance on by
+    # default; process/nightly/refresh/full-sync stay notes-only and never reach this.
+    #
+    # Confirmed live 2026-08-18: this is NOT the checkbox-dropdown-grouping widget the Notes
+    # row uses -- it's PF's plainer "input-dropdown" control (the same one the Vitals
+    # flowsheet range picker uses), a <button class="input-dropdown-button"> whose own text
+    # reads just "Active" (not "Active insurance") when collapsed, nested directly under
+    # print-insurance-options:
+    #   <div data-element="print-insurance-options" class="checkbox-row dropdown-print-row">
+    #     <div class="check-box ..."><input type="checkbox">...Patient insurance</div>
+    #     <div class="input-dropdown dropdown-print-select">
+    #       <button class="input-dropdown-button">    Active</button>
+    #     </div>
+    #   </div>
+    # The menu's markup once opened is still unconfirmed -- select_insurance_active_filter
+    # checks the collapsed label first and skips opening it at all when that already reads
+    # "Active", which is PF's own default for this dropdown.
+    insurance_section_data_element: str = "print-insurance-options"
+    insurance_filter_toggle_selector: str = (
+        "[data-element='print-insurance-options'] .input-dropdown-button"
+    )
+    insurance_filter_menu_selectors: List[str] = field(
+        default_factory=lambda: [
+            "[data-element='checkbox-dropdown-grouping__menu']",
+            ".ember-basic-dropdown-content",
+            ".ember-power-select-dropdown",
+            "[role='listbox']",
+            ".checkbox-dropdown-grouping__menu",
+            ".tether-element .dropdown-menu",
+            ".tether-element",
+        ]
+    )
+    insurance_filter_option_text: str = "Active insurance"
+    # v5.19 field failure: this defaulted to True (fail rather than print a chart whose
+    # insurance filter could not be confirmed) and the toggle selector -- never confirmed
+    # against the live DOM -- didn't match on the first real run, failing every record
+    # including its SOAP note. Demographics/insurance is an additive check layered on top
+    # of the note/facesheet flow, not a precondition for it, so this now defaults to
+    # best-effort: log a warning and keep going. Flip to True only after
+    # insurance_filter_toggle_selector is confirmed live.
+    enforce_insurance_active_filter: bool = False
 
     # SOAP notes are date-scoped for every appointment/PDF.
     # "date"  - select only notes matching the appointment date (default)

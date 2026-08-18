@@ -423,7 +423,167 @@ def select_facesheet_sections(page: Page, config: SyncConfig, modal: Optional[Lo
         if config.enforce_exact_facesheet_selection:
             raise RuntimeError("FACESHEET_SELECTION_MISMATCH: " + message)
         print(f"  WARNING: {message}", flush=True)
+
+    # Patient insurance carries its own filter dropdown (All insurance / Active insurance /
+    # Inactive insurance) on the same row as its checkbox -- this is the "insurance active
+    # check": left at PF's default ("All insurance"), the printed chart would include every
+    # inactive/expired plan on file. Only relevant once the row itself is checked.
+    if config.insurance_section_data_element in intended:
+        select_insurance_active_filter(page, config)
+
     return selected
+
+
+def insurance_filter_toggle_label(page: Page, config: SyncConfig) -> str:
+    toggle = visible_match(page, config.insurance_filter_toggle_selector)
+    if toggle is None:
+        return ""
+    return locator_text(toggle)
+
+
+_INSURANCE_FILTER_LABELS = ("all insurance", "active insurance", "inactive insurance")
+
+
+def find_insurance_filter_toggle_by_text(page: Page) -> Optional[Locator]:
+    """Fall back to a page-wide scan for the insurance filter toggle by its own label text.
+
+    v5.19 field failure: the toggle selector (scoped under print-insurance-options, mirroring
+    how the Notes row nests its toggle under its own data-element) was never confirmed against
+    the live DOM and did not find anything on the first real run, failing the whole record --
+    see select_insurance_active_filter's enforce_insurance_active_filter=False default, added
+    the same day, for why that no longer takes the note down with it. This is the second line
+    of defense: the toggle's own rendered text is always one of "All/Active/Inactive insurance"
+    regardless of where PF nests it in the DOM, so match on that instead of a guessed selector.
+    """
+    try:
+        candidates = page.locator("[data-element='checkbox-dropdown-grouping__toggle']")
+        count = candidates.count()
+    except Exception:
+        return None
+    for index in range(count):
+        candidate = candidates.nth(index)
+        try:
+            if not candidate.is_visible():
+                continue
+            text = clean(candidate.inner_text()).lower()
+        except Exception:
+            continue
+        if any(label in text for label in _INSURANCE_FILTER_LABELS):
+            return candidate
+    return None
+
+
+def _select_insurance_active_filter_unsafe(page: Page, config: SyncConfig) -> bool:
+    """Do the actual dropdown-driving work. Any exception here (including a Playwright
+    TimeoutError from a click) is caught by the public wrapper below -- see its docstring
+    for why this must never be allowed to fail the SOAP note PDF by default.
+    """
+    toggle = first_visible_locator(page, [config.insurance_filter_toggle_selector], SHORT_TIMEOUT)
+    if toggle is None:
+        # Give PF a moment to render the dropdown after the checkbox click, then fall back to
+        # a text-based scan in case the configured selector's assumed nesting is wrong.
+        time.sleep(0.5)
+        toggle = first_visible_locator(page, [config.insurance_filter_toggle_selector], SHORT_TIMEOUT)
+    if toggle is None:
+        toggle = find_insurance_filter_toggle_by_text(page)
+    if toggle is None:
+        raise RuntimeError(
+            "INSURANCE_FILTER_TOGGLE_NOT_FOUND: Insurance filter dropdown not found; "
+            "Patient insurance may not be checked."
+        )
+
+    option_text = clean(config.insurance_filter_option_text).lower()
+    option_key = option_text.split()[0] if option_text else ""
+
+    # PF's own default for this dropdown, confirmed live, is already "Active" -- skip
+    # opening it at all when the collapsed label already reads that way, since the menu's
+    # own markup (once opened) is still unconfirmed.
+    current_label = locator_text(toggle).lower()
+    if option_key and option_key in current_label:
+        return True
+
+    toggle.click()
+    time.sleep(0.4)
+
+    applied = False
+    for selector in config.insurance_filter_menu_selectors:
+        panel = visible_match(page, selector)
+        if panel is None:
+            continue
+        options = panel.locator("li, [role='option'], a, button")
+        for index in range(options.count()):
+            option = options.nth(index)
+            try:
+                text = clean(option.inner_text()).lower()
+            except Exception:
+                continue
+            if text == option_text or (text and option_text in text):
+                option.click()
+                time.sleep(0.4)
+                applied = True
+                break
+        if applied:
+            break
+
+    label = insurance_filter_toggle_label(page, config).lower()
+    confirmed = bool(label) and option_key in label
+    if not confirmed:
+        # TEMPORARY diagnostic (remove once insurance_filter_menu_selectors is confirmed
+        # live): the toggle wasn't already on "Active" and none of the guessed menu
+        # selectors matched an open panel -- dump what's actually visible so the real
+        # selector can be found instead of another guess.
+        try:
+            debug = page.evaluate(
+                """
+                () => {
+                    const sels = ['.ember-basic-dropdown-content', '.ember-power-select-dropdown',
+                                  "[role='listbox']", '.tether-element', '.dropdown-menu',
+                                  '.input-dropdown-menu'];
+                    const found = [];
+                    for (const sel of sels) {
+                        document.querySelectorAll(sel).forEach(el => {
+                            if (el.offsetParent !== null) found.push(el.outerHTML.slice(0, 1500));
+                        });
+                    }
+                    return found;
+                }
+                """
+            )
+            print(f"  DEBUG insurance menu candidates: {debug}", flush=True)
+        except Exception as exc:
+            print(f"  DEBUG menu dump failed: {type(exc).__name__}: {exc}", flush=True)
+        raise RuntimeError(
+            "INSURANCE_FILTER_NOT_APPLIED: Could not confirm the Patient insurance filter "
+            f"reads {config.insurance_filter_option_text!r}; toggle currently reads {label!r}."
+        )
+    return confirmed
+
+
+def select_insurance_active_filter(page: Page, config: SyncConfig) -> bool:
+    """Set the Patient insurance row's filter dropdown to "Active insurance".
+
+    Confirmed live 2026-08-18: this is PF's plain input-dropdown control (a
+    <button class="input-dropdown-button">), not the checkbox-dropdown-grouping widget the
+    Notes row uses -- see insurance_filter_toggle_selector's docstring in models.py for the
+    real markup. Its collapsed label is checked first and PF's own default for it is already
+    "Active", so most calls never need to open it at all.
+
+    Best-effort by design: this check layers on top of the note/facesheet flow, not a
+    precondition for it. enforce_insurance_active_filter defaults to False specifically so
+    NOTHING this function can raise -- a selector miss, a Playwright timeout mid-click,
+    anything -- can fail the SOAP note PDF the record exists to produce; a live run hit
+    exactly that (INSURANCE_FILTER_TOGGLE_NOT_FOUND failing the whole record) before this
+    default and the try/except below existed.
+    """
+    if not clean(config.insurance_filter_option_text):
+        return False
+    try:
+        return _select_insurance_active_filter_unsafe(page, config)
+    except Exception as exc:
+        if config.enforce_insurance_active_filter:
+            raise
+        print(f"  WARNING: insurance filter not applied ({type(exc).__name__}: {exc})", flush=True)
+        return False
 
 
 def prepare_print_chart_sections(
