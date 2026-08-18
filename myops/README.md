@@ -6,7 +6,7 @@ charges into PostgreSQL and delivers per-practice facesheet ZIPs to Azure Blob
 processes it. Three modes: **daily**, **backfill**, **target**.
 
 --- Project Run 
-.venv/bin/python -m uvicorn server:app --host 0.0.0.0 --port 8010
+myops/.venv/bin/python -m uvicorn server:app --host 0.0.0.0 --port 8010 --reload
 
 
 ## 1. What's in the package
