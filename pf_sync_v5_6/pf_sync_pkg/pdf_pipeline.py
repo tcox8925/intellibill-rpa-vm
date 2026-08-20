@@ -12,6 +12,7 @@ from playwright.sync_api import Page
 from pf_sync_pkg.chart_ui import (
     close_print_chart,
     find_encounter_for_appointment,
+    find_encounter_for_appointment_with_timeline_fallback,
     insurance_filter_toggle_label,
     open_print_chart,
     patient_summary_url,
@@ -219,6 +220,7 @@ def process_one_record(
     exact_refresh: bool,
     dry_run: bool,
     all_rows: Sequence[QueueRecord] = (),
+    use_timeline_fallback: bool = False,
 ) -> None:
     started = time.perf_counter()
     original_status = record.status
@@ -240,9 +242,15 @@ def process_one_record(
     except Exception:
         pass
 
-    detected = find_encounter_for_appointment(
-        page, config, record.ehr_patient_guid, record.appointment_date
-    )
+    # Use Timeline fallback for full-sync-by-date; Summary-only for nightly (avoids PF hangs)
+    if use_timeline_fallback:
+        detected = find_encounter_for_appointment_with_timeline_fallback(
+            page, config, record.ehr_patient_guid, record.appointment_date
+        )
+    else:
+        detected = find_encounter_for_appointment(
+            page, config, record.ehr_patient_guid, record.appointment_date
+        )
     record.encounter_key = detected.encounter_key
     record.encounter_date = detected.encounter_date
     record.encounter_type = detected.encounter_type
@@ -324,6 +332,7 @@ def process_records_on_page(
     dry_run: bool = False,
     exact_refresh: bool = False,
     manifest_run_id: str = "",
+    use_timeline_fallback: bool = False,
 ) -> Dict[str, int]:
     """manifest_run_id: pass the same value across multiple process() calls that
     belong to one logical pull (e.g. a date-scoped run that got interrupted and
@@ -369,6 +378,7 @@ def process_records_on_page(
                 exact_refresh,
                 dry_run,
                 all_rows,
+                use_timeline_fallback,
             )
             if dry_run:
                 counts["validated"] += 1

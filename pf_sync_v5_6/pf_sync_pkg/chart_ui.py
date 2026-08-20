@@ -281,6 +281,59 @@ def find_encounter_for_appointment(
     return matches[0]
 
 
+def find_encounter_for_appointment_with_timeline_fallback(
+    page: Page,
+    config: SyncConfig,
+    patient_guid: str,
+    appointment_date: str,
+) -> DetectedEncounter:
+    """Find the appointment-date encounter from Summary, falling back to Timeline.
+
+    Used by full-sync-by-date where encounters may exist on Timeline but not yet
+    synced to Summary. Checks Summary first (fast), then navigates to Timeline
+    (slower) if Summary has no match.
+
+    Unlike nightly (which never navigates to Timeline to avoid PF hangs), full-sync-by-date
+    is explicitly date-scoped and tolerates the Timeline navigation overhead.
+    """
+    requested_date = require_date(appointment_date, "appointment date")
+
+    # Try Summary first
+    summary_matches = [
+        item
+        for item in read_summary_encounters(page, config, patient_guid)
+        if parse_date(item.encounter_date) == requested_date
+    ]
+    if summary_matches:
+        return summary_matches[0]
+
+    # Fallback to Timeline if Summary is empty
+    try:
+        if open_all_encounters_timeline(page, config, patient_guid):
+            timeline_encounters = read_encounters(
+                page,
+                config,
+                patient_guid,
+                config.encounter_timeline_item_selector,
+                "timeline",
+            )
+            timeline_matches = [
+                item
+                for item in timeline_encounters
+                if parse_date(item.encounter_date) == requested_date
+            ]
+            if timeline_matches:
+                return timeline_matches[0]
+    except Exception as exc:
+        print(f"  [timeline fallback] Error opening Timeline: {exc}", flush=True)
+
+    # Neither Summary nor Timeline had a match
+    raise EncounterNotFoundError(
+        "ENCOUNTER_NOT_FOUND_AFTER_SUMMARY_AND_TIMELINE_CHECK: "
+        f"appointment_date={appointment_date}"
+    )
+
+
 def open_print_chart(page: Page, config: SyncConfig) -> Locator:
     """Click Print Chart and return the visible modal container."""
     button = page.locator(config.print_chart_button_selector).first

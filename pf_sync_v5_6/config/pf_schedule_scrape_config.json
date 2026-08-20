@@ -1,0 +1,15 @@
+{
+  "cell_patient_prefix": "[data-element^='cell-patient-']",
+  "cell_name_selector": "a[data-element='cell-name']",
+  "cell_dob_data_element": "cell-dob",
+  "cell_preferred_phone_data_element": "cell-preferred-phone",
+  "provider_name_prefix": "[data-element^='cell-provider-name-']",
+  "appointment_type_prefix": "[data-element^='cell-appointment-type-']",
+  "intake_status_button_prefix": "button[data-element^='intake-status-select-']",
+  "start_time_selector": "[data-element='start-time']",
+  "start_time_prefix_fallback": "[data-element^='start-time']",
+  "scheduler_tab_selector": "[data-element='scheduler-tab-0']",
+  "scheduler_selected_date_data_element": "scheduler-selected-date",
+  "date_next_selector": "[data-element='btn-date-next']",
+  "date_previous_selector": "[data-element='btn-date-previous']"
+}

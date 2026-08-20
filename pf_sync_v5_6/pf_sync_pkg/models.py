@@ -498,3 +498,95 @@ class AppointmentReportConfig:
 
         merged = {**defaults, **overrides}
         return cls(**merged)
+
+
+@dataclass
+class ScheduleScrapeConfig:
+    """Selectors for Practice Fusion's Schedule 'Appointments' (list/agenda) view --
+    patient_scraper.scrape_schedule_day and its per-row helpers read every one of
+    these from here instead of a hardcoded literal, the same load()-with-config-file
+    pattern SyncConfig/AppointmentReportConfig already use for the chart/report
+    pages. Confirmed live 2026-08-21 against a real Schedule row's DOM; see
+    scrape_schedule_day's own docstring for the exact HTML each came from.
+
+    Two selectors deliberately do NOT key off Ember's per-instance numeric suffix
+    (cell-provider-name-N, cell-appointment-type-N, intake-status-select-N-dropdown):
+    confirmed live that N does not line up with cell-patient-N's own N even on the
+    SAME row, so every one of these is a stable PREFIX match, scoped to the row,
+    never an exact suffixed string. Two read off a `title` ATTRIBUTE rather than a
+    dedicated data-element (appointment type, status): the status div's own class
+    name reads as an Ember-generated hash (e.g. 'item--TBn') that can change
+    between builds, so the title attribute is deliberately what's matched instead
+    of trying to select the div by that class.
+    """
+
+    cell_patient_prefix: str = "[data-element^='cell-patient-']"
+    cell_name_selector: str = "a[data-element='cell-name']"
+    cell_dob_data_element: str = "cell-dob"
+    cell_preferred_phone_data_element: str = "cell-preferred-phone"
+
+    provider_name_prefix: str = "[data-element^='cell-provider-name-']"
+    appointment_type_prefix: str = "[data-element^='cell-appointment-type-']"
+    intake_status_button_prefix: str = "button[data-element^='intake-status-select-']"
+    start_time_selector: str = "[data-element='start-time']"
+    start_time_prefix_fallback: str = "[data-element^='start-time']"
+
+    scheduler_tab_selector: str = "[data-element='scheduler-tab-0']"
+    scheduler_selected_date_data_element: str = "scheduler-selected-date"
+    date_next_selector: str = "[data-element='btn-date-next']"
+    date_previous_selector: str = "[data-element='btn-date-previous']"
+
+    # The row DOM (cell-provider-name-N etc.) uses the same data-table__cell /
+    # appointments-table__col--sm classes PF's Patient List Report and
+    # Appointment Report tables use, and both of THOSE are confirmed to render
+    # only a subset of rows into the DOM at once, virtualized inside a
+    # `data-table-scroller` -- a busy day's Schedule is very likely the same
+    # component under the hood. scroll_schedule_day_and_collect (patient_scraper.py)
+    # scrolls this container the same way scroll_report_and_collect already does
+    # for the report pages, so a day with more appointments than fit in one
+    # viewport isn't silently under-scraped.
+    schedule_table_scroller_selector: str = "[data-element='data-table-scroller']"
+
+    @classmethod
+    def load(cls, path: str) -> "ScheduleScrapeConfig":
+        if not path or not os.path.exists(path):
+            return cls()
+        try:
+            with open(path, "r", encoding="utf-8-sig") as handle:
+                raw = json.load(handle)
+        except (json.JSONDecodeError, OSError) as exc:
+            # See SyncConfig.load's identical fallback -- a missing/empty/corrupt
+            # override file isn't fatal, the defaults below are already complete.
+            print(f"ScheduleScrapeConfig.load: could not parse {path} ({exc}); using defaults")
+            return cls()
+        defaults = asdict(cls())
+        allowed = cls.__dataclass_fields__.keys()
+        overrides = {}
+        unknown = []
+        healed = []
+        for key, value in raw.items():
+            if key not in allowed:
+                unknown.append(key)
+                continue
+            if value is None:
+                healed.append(key)
+                continue
+            if isinstance(value, str) and not value.strip():
+                healed.append(key)
+                continue
+            overrides[key] = value
+
+        if unknown:
+            print(
+                f"WARNING: ignoring unrecognized keys in {path}: {sorted(unknown)}",
+                flush=True,
+            )
+        if healed:
+            print(
+                f"NOTE: empty/null keys in {path} fell back to built-in defaults: "
+                f"{sorted(set(healed))}",
+                flush=True,
+            )
+
+        merged = {**defaults, **overrides}
+        return cls(**merged)

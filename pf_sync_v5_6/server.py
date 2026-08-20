@@ -49,6 +49,7 @@ from pf_sync_pkg.cli import (
     run_full_sync_by_date,
     run_nightly,
     run_refresh,
+    run_sync_schedules_by_date,
 )
 from pf_sync_pkg.constants import BUILD_ID
 from pf_sync_pkg.ingest import ingest_appointments
@@ -529,6 +530,75 @@ class FacesheetPullByDateRequestSlim(BaseModel):
     wait_for_completion: bool = True
 
 
+class SyncSchedulesByDateRequest(BrowserFieldsNoCreds, ReportDateFields):
+    """Standalone catch-up pass, deliberately independent of /full-sync-by-date's
+    report pull/ingest/match pipeline: walks the Schedule for the requested date
+    range, keeps every appointment actually marked Seen there, diffs against the
+    queue's existing (patient, date) pairs, and injects + processes a synthetic
+    record straight from the patient chart for whatever Practice Fusion's own
+    Eligibility Report hasn't caught up on yet -- the report is never read here.
+
+    With report_date/start_date/end_date all left blank, defaults to a rolling
+    lookback window [today - lookback_days, today] instead of just today -- see
+    cli.resolve_sync_schedules_dates's docstring for why: a patient who was
+    Confirmed (correctly skipped) on a prior call and only flips to Seen a few
+    days later still needs to be re-checked on THAT date, not just today's.
+
+    Anchored via _pf_path() for the same sub-app-mounting reason as
+    FullSyncByDateRequest above."""
+
+    queue_json: str = Field(
+        default_factory=lambda: _pf_path("pf_appointment_queue.json"),
+        examples=[_pf_path("pf_appointment_queue.json")],
+    )
+    config_json: str = Field(
+        default_factory=lambda: _pf_path("config/pf_pdf_sync_config.json"),
+        examples=[_pf_path("config/pf_pdf_sync_config.json")],
+    )
+    schedule_config_json: str = Field(
+        default_factory=lambda: _pf_path("config/pf_schedule_scrape_config.json"),
+        examples=[_pf_path("config/pf_schedule_scrape_config.json")],
+    )
+    downloads_dir: str = Field(
+        default_factory=lambda: _pf_path("pf_encounter_pdfs"),
+        examples=[_pf_path("pf_encounter_pdfs")],
+    )
+    practice: str = "NWARK Internal Medicine"
+    limit: int = 0
+    dry_run: bool = False
+    include_failed: bool = False
+    lookback_days: int = 3
+    wait_for_completion: bool = True
+
+
+class SyncSchedulesByDateRequestSlim(BaseModel):
+    """The only fields that matter day-to-day for /sync-schedules-by-date.
+
+    Everything else on SyncSchedulesByDateRequest (chrome_user_data_dir,
+    queue_json, config_json, schedule_config_json, downloads_dir, practice,
+    limit, dry_run, ...) keeps that model's own safe, already-anchored defaults
+    -- see FacesheetPullByDateRequestSlim's docstring above for why those
+    fields aren't exposed here at all. Leaving report_date/start_date/end_date
+    all blank is the normal call shape: it lets lookback_days pick the rolling
+    window instead of requiring a caller to track dates themselves.
+
+    pull_failed_sheets: default False leaves existing `failed` rows alone --
+    a row here failed for a REASON (e.g. the "Printable chart preview did not
+    appear" print-chart timeout, unrelated to the Eligibility Report gap this
+    endpoint otherwise targets), so it's not retried automatically just
+    because this call happens to touch that patient/date again. Pass true to
+    also retry those failed rows this call -- maps straight onto the CLI's
+    --include-failed / cli.default_process_candidates' own include_failed arg.
+    """
+
+    report_date: str = ""
+    start_date: str = ""
+    end_date: str = ""
+    lookback_days: int = 3
+    pull_failed_sheets: bool = False
+    wait_for_completion: bool = True
+
+
 # ---------------------------------------------------------------------------
 # Endpoints
 # ---------------------------------------------------------------------------
@@ -812,3 +882,28 @@ def facesheet_pull_by_date_endpoint(request: FacesheetPullByDateRequestSlim):
         return run_facesheet_pull_by_date(args)
 
     return _dispatch_browser_job(request.wait_for_completion, "facesheet-pull-by-date", job)
+
+
+@app.post("/sync-schedules-by-date")
+def sync_schedules_by_date_endpoint(request: SyncSchedulesByDateRequestSlim):
+    # Expand the slim request into the full model so every other field keeps
+    # SyncSchedulesByDateRequest's own real, anchored defaults instead of a
+    # caller-supplied Swagger placeholder -- see SyncSchedulesByDateRequestSlim's
+    # docstring for why those fields aren't exposed here at all.
+    full_request = SyncSchedulesByDateRequest(
+        report_date=request.report_date,
+        start_date=request.start_date,
+        end_date=request.end_date,
+        lookback_days=request.lookback_days,
+        include_failed=request.pull_failed_sheets,
+        wait_for_completion=request.wait_for_completion,
+    )
+    args = _namespace_with_env_creds(full_request)
+
+    def job():
+        # Schedule scrape -> Seen-status filter -> inject synthetic record ->
+        # process, entirely independent of the Eligibility Report -- reused via
+        # cli.run_sync_schedules_by_date, not reimplemented here.
+        return run_sync_schedules_by_date(args)
+
+    return _dispatch_browser_job(request.wait_for_completion, "sync-schedules-by-date", job)

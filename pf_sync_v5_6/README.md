@@ -79,6 +79,12 @@ stage every time — if your queue is already ingested and matched (check with
 
 `nightly` = pull-report → ingest → match-patients → process, in one call.
 
+**`sync-schedules-by-date`** is a separate flow, not part of the pipeline
+above: it reads the Schedule page directly instead of the Eligibility Report,
+to catch patients marked Seen there that the Report hasn't synced yet. See
+[SYNC_SCHEDULES_BY_DATE.md](SYNC_SCHEDULES_BY_DATE.md) for why it exists and
+how to run it.
+
 ---
 
 ## 3. Running it — CLI (simplest, run this yourself, watch Chrome the first time)

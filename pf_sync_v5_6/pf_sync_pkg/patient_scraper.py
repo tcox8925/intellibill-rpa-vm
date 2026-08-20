@@ -47,7 +47,7 @@ import sys
 import time
 import uuid
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from typing import Dict, Iterable, List, Optional, Tuple
 
 from playwright.sync_api import (
@@ -57,6 +57,8 @@ from playwright.sync_api import (
     TimeoutError as PWTimeout,
     sync_playwright,
 )
+
+from pf_sync_pkg.models import ScheduleScrapeConfig
 
 # Loads PF_USERNAME/PF_PASSWORD/etc from the repo-root .env, same as
 # pf_sync_pkg.constants -- importing that module would also trigger it, but this
@@ -169,9 +171,21 @@ class ReportPatient:
     age: str = ""
     sex: str = ""
     preferred_contact: str = ""
-    status: str = ""
+    status: str = ""  # Patient List report's active/inactive registry status -- NOT
+    # the appointment's Seen/Confirmed status. Kept separate from the fields below
+    # so a Schedule-row scrape can never collide with the registry semantics this
+    # field already carries elsewhere (see collect_all_report_patients_bucketed).
     ehr_patient_guid: str = ""
     ehr_patient_url: str = ""
+
+    # Schedule-row-only fields (scrape_schedule_day): confirmed live 2026-08-21 that
+    # the Appointments list row carries all four of these alongside name/DOB/phone --
+    # they were simply never read. See scrape_schedule_day's docstring for the exact
+    # selectors/attributes each comes from.
+    appointment_status: str = ""
+    appointment_start_time: str = ""
+    appointment_type: str = ""
+    provider_name: str = ""
 
 
 def clean(value: Optional[str]) -> str:
@@ -820,7 +834,7 @@ def open_patient_list_report(page: Page) -> None:
     visible(page, "[data-element='text-input-search-criteria-range-low']", DEFAULT_TIMEOUT)
 
 
-def open_schedule_appointments_view(page: Page) -> None:
+def open_schedule_appointments_view(page: Page, config: Optional[ScheduleScrapeConfig] = None) -> None:
     """Navigate to Schedule and select the 'Appointments' (list/agenda) tab.
 
     Confirmed live 2026-08-11: the Schedule page has two distinct views sharing
@@ -836,18 +850,20 @@ def open_schedule_appointments_view(page: Page) -> None:
     (re)assert this tab is selected before scraping a day; see go_to_schedule_date
     for the same defensive re-check during a multi-day walk.
     """
+    config = config or ScheduleScrapeConfig()
     page.goto(f"{EHR_BASE_URL}#/PF/schedule", wait_until="domcontentloaded")
     click_sel_any(
         page,
-        ["[data-element='scheduler-tab-0']", "text='Appointments'"],
+        [config.scheduler_tab_selector, "text='Appointments'"],
         DEFAULT_TIMEOUT,
         label="Appointments (list) tab",
     )
     time.sleep(0.6)
 
 
-def _appointments_tab_active(page: Page) -> bool:
-    tab = page.query_selector("[data-element='scheduler-tab-0']")
+def _appointments_tab_active(page: Page, config: Optional[ScheduleScrapeConfig] = None) -> bool:
+    config = config or ScheduleScrapeConfig()
+    tab = page.query_selector(config.scheduler_tab_selector)
     if tab is None:
         return False
     try:
@@ -856,16 +872,19 @@ def _appointments_tab_active(page: Page) -> bool:
         return False
 
 
-def _read_schedule_selected_date(page: Page):
+def _read_schedule_selected_date(page: Page, config: Optional[ScheduleScrapeConfig] = None):
     """Parses scheduler-selected-date's text (e.g. 'Tue, Aug 11, 2026') into a date."""
-    txt = safe_text_by_data(page, "scheduler-selected-date")
+    config = config or ScheduleScrapeConfig()
+    txt = safe_text_by_data(page, config.scheduler_selected_date_data_element)
     try:
         return datetime.strptime(clean(txt), "%a, %b %d, %Y").date()
     except Exception:
         return None
 
 
-def go_to_schedule_date(page: Page, target_date, max_steps: int = 400) -> bool:
+def go_to_schedule_date(
+    page: Page, target_date, max_steps: int = 400, config: Optional[ScheduleScrapeConfig] = None
+) -> bool:
     """Steps the Schedule view to target_date via btn-date-next/btn-date-previous,
     reading scheduler-selected-date after each click to know when to stop (no
     URL-based date navigation exists on this page -- confirmed live, both
@@ -883,9 +902,10 @@ def go_to_schedule_date(page: Page, target_date, max_steps: int = 400) -> bool:
     itself. One re-read after a short settle catches that without slowing down
     the common one-click-per-day case in the surrounding range loop.
     """
-    if not _appointments_tab_active(page):
-        open_schedule_appointments_view(page)
-    current = _read_schedule_selected_date(page)
+    config = config or ScheduleScrapeConfig()
+    if not _appointments_tab_active(page, config):
+        open_schedule_appointments_view(page, config)
+    current = _read_schedule_selected_date(page, config)
     if current is None:
         return False
     steps = 0
@@ -893,14 +913,14 @@ def go_to_schedule_date(page: Page, target_date, max_steps: int = 400) -> bool:
         forward = target_date > current
         click_sel(
             page,
-            "[data-element='btn-date-next']" if forward else "[data-element='btn-date-previous']",
+            config.date_next_selector if forward else config.date_previous_selector,
             SHORT_TIMEOUT,
         )
         time.sleep(0.9)
-        new_current = _read_schedule_selected_date(page)
+        new_current = _read_schedule_selected_date(page, config)
         if new_current is None or new_current == current:
             time.sleep(0.6)
-            new_current = _read_schedule_selected_date(page)
+            new_current = _read_schedule_selected_date(page, config)
         current = new_current
         steps += 1
         if current is None:
@@ -912,12 +932,12 @@ def go_to_schedule_date(page: Page, target_date, max_steps: int = 400) -> bool:
     # early. If the label has since moved on, resume stepping from wherever it
     # actually is instead of returning a false positive.
     time.sleep(0.5)
-    confirmed = _read_schedule_selected_date(page)
+    confirmed = _read_schedule_selected_date(page, config)
     if confirmed == target_date:
         return True
     if confirmed is None:
         return False
-    return go_to_schedule_date(page, target_date, max_steps=max_steps - steps)
+    return go_to_schedule_date(page, target_date, max_steps=max_steps - steps, config=config)
 
 
 def _read_header_appointment_count(page: Page) -> Optional[int]:
@@ -934,7 +954,9 @@ def _read_header_appointment_count(page: Page) -> Optional[int]:
     return int(m.group(1)) if m else None
 
 
-def _wait_for_schedule_rows(page: Page, expected_count: int, timeout_ms: int = 10_000) -> int:
+def _wait_for_schedule_rows(
+    page: Page, expected_count: int, timeout_ms: int = 10_000, config: Optional[ScheduleScrapeConfig] = None
+) -> int:
     """Waits until the cell-patient-N row count catches up with the header's own
     appointment count for the currently displayed date.
 
@@ -947,21 +969,97 @@ def _wait_for_schedule_rows(page: Page, expected_count: int, timeout_ms: int = 1
     (header genuinely says no appointments), returns immediately -- no rows will
     ever appear for that day.
     """
+    config = config or ScheduleScrapeConfig()
     if expected_count <= 0:
         return 0
     deadline = time.time() + timeout_ms / 1000.0
     while time.time() < deadline:
-        count = len(page.query_selector_all("[data-element^='cell-patient-']"))
+        count = len(page.query_selector_all(config.cell_patient_prefix))
         if count >= expected_count:
             return count
         time.sleep(0.3)
-    return len(page.query_selector_all("[data-element^='cell-patient-']"))
+    return len(page.query_selector_all(config.cell_patient_prefix))
 
 
-def scrape_schedule_day(page: Page) -> List[ReportPatient]:
-    """Scrapes name/DOB/phone/chart-GUID from every appointment row on the
-    currently displayed Schedule day, assuming open_schedule_appointments_view()
-    already selected the 'Appointments' tab and the target date is showing.
+def _schedule_row_scope(cell: ElementHandle) -> ElementHandle:
+    """Widens from one cell-patient-N <td> to its enclosing <tr> so sibling
+    columns (provider, appointment type, status) can be read too. Falls back to
+    the cell itself if no <tr> ancestor is found -- keeps name/dob/phone
+    extraction (already scoped to `cell`) unaffected either way. This is a plain
+    DOM-structure walk (nearest <tr>), not a selector, so it has nothing to read
+    from ScheduleScrapeConfig."""
+    try:
+        row = cell.query_selector("xpath=ancestor::tr[1]")
+        return row if row is not None else cell
+    except PWError:
+        return cell
+
+
+def _schedule_row_provider(row: ElementHandle, config: ScheduleScrapeConfig) -> str:
+    """cell-provider-name-N: the trailing N is an Ember element id, not a row
+    index -- confirmed live 2026-08-21 it does not line up with cell-patient-N's
+    own N on the same row, so this matches on the stable prefix only (from
+    config.provider_name_prefix), scoped to the row, never the exact
+    data-element string."""
+    try:
+        el = row.query_selector(config.provider_name_prefix)
+        return el_text(el) if el is not None else ""
+    except PWError:
+        return ""
+
+
+def _schedule_row_appointment_type(row: ElementHandle, config: ScheduleScrapeConfig) -> str:
+    """cell-appointment-type-N: same trailing-id caveat as provider above. The
+    title attribute holds the clean label (e.g. 'Lab Results - New') without the
+    hidden video-camera icon's markup that inner_text would otherwise pick up,
+    so it's read first and inner_text is only a fallback."""
+    try:
+        el = row.query_selector(config.appointment_type_prefix)
+        if el is None:
+            return ""
+        title = clean(el.get_attribute("title") or "")
+        return title or el_text(el)
+    except PWError:
+        return ""
+
+
+def _schedule_row_status(row: ElementHandle, config: ScheduleScrapeConfig) -> str:
+    """intake-status-select-N-dropdown: the visible status text ('Seen',
+    'Confirmed', ...) sits on a nested div's title attribute, not as its own
+    data-element -- confirmed live 2026-08-21. Deliberately does NOT select by
+    that div's class name (something like 'item--TBn'), which reads as an
+    Ember-generated hash that can change between builds/deploys; the [title]
+    attribute is the stable part. The sibling badge div in the same button
+    (a two-letter provider-initials badge) carries no title, so a plain [title]
+    search inside the button resolves to the status div without ambiguity."""
+    try:
+        button = row.query_selector(config.intake_status_button_prefix)
+        if button is None:
+            return ""
+        titled = button.query_selector("[title]")
+        return clean(titled.get_attribute("title") or "") if titled is not None else ""
+    except PWError:
+        return ""
+
+
+def _schedule_row_start_time(row: ElementHandle, config: ScheduleScrapeConfig) -> str:
+    """start-time carried no numeric suffix as scraped live 2026-08-21, but
+    config.start_time_prefix_fallback is tried too in case PF adds one later the
+    same way the other three fields already have."""
+    try:
+        el = row.query_selector(config.start_time_selector) or row.query_selector(
+            config.start_time_prefix_fallback
+        )
+        return el_text(el) if el is not None else ""
+    except PWError:
+        return ""
+
+
+def scrape_schedule_day(page: Page, config: Optional[ScheduleScrapeConfig] = None) -> List[ReportPatient]:
+    """Scrapes name/DOB/phone/chart-GUID/appointment-status/start-time/type/
+    provider from every appointment row on the currently displayed Schedule
+    day, assuming open_schedule_appointments_view() already selected the
+    'Appointments' tab and the target date is showing.
 
     cell-preferred-phone's text is e.g. 'M. (805) 704-2338' -- confirmed live
     2026-08-11 that the leading letter is a PHONE-TYPE label (Mobile/Home/Work),
@@ -975,18 +1073,28 @@ def scrape_schedule_day(page: Page) -> List[ReportPatient]:
     PHONE_HEADER_ALIASES already treats a "preferred_contact"/"preferred contact"
     column as a phone-number source for the tiebreak scoring -- so this rides the
     existing alias rather than needing a matching.py change.
+
+    Status/start-time/appointment-type/provider (added 2026-08-21) live in
+    SIBLING columns of the same <tr>, not inside the cell-patient-N <td> itself,
+    and none of their data-element attributes' numeric suffixes line up with
+    cell-patient-N's own N -- see _schedule_row_scope and the per-field helpers
+    above for why each is matched by stable prefix/attribute within the row,
+    never by an exact suffixed data-element string. Each of the four is wrapped
+    so a selector miss on any one of them degrades to "" instead of losing the
+    row's name/dob/phone/guid, which is the part matching actually depends on.
     """
+    config = config or ScheduleScrapeConfig()
     rows: List[ReportPatient] = []
-    for cell in page.query_selector_all("[data-element^='cell-patient-']"):
+    for cell in page.query_selector_all(config.cell_patient_prefix):
         try:
-            name_link = cell.query_selector("a[data-element='cell-name']")
+            name_link = cell.query_selector(config.cell_name_selector)
             if name_link is None:
                 continue
             href = name_link.get_attribute("href") or ""
             guid = parse_guid_from_href(href)
             full_name = el_text(name_link)
-            dob = safe_text_by_data(cell, "cell-dob")
-            phone_raw = safe_text_by_data(cell, "cell-preferred-phone")
+            dob = safe_text_by_data(cell, config.cell_dob_data_element)
+            phone_raw = safe_text_by_data(cell, config.cell_preferred_phone_data_element)
             # Strip a leading "<Letter>. " phone-type label (Mobile/Home/Work) if
             # present; keep the raw text as-is otherwise rather than guess wrong.
             phone_match = re.match(r"^[A-Za-z]\.\s*(.*)$", phone_raw)
@@ -994,6 +1102,13 @@ def scrape_schedule_day(page: Page) -> List[ReportPatient]:
             parts = full_name.split(" ", 1)
             first_name = parts[0] if parts else ""
             last_name = parts[1] if len(parts) > 1 else ""
+
+            row_scope = _schedule_row_scope(cell)
+            appointment_status = _schedule_row_status(row_scope, config)
+            appointment_start_time = _schedule_row_start_time(row_scope, config)
+            appointment_type = _schedule_row_appointment_type(row_scope, config)
+            provider_name = _schedule_row_provider(row_scope, config)
+
             rows.append(
                 ReportPatient(
                     first_name=first_name,
@@ -1002,6 +1117,10 @@ def scrape_schedule_day(page: Page) -> List[ReportPatient]:
                     preferred_contact=phone,
                     ehr_patient_guid=guid,
                     ehr_patient_url=f"{EHR_BASE_URL}#/PF/charts/patients/{guid}" if guid else href,
+                    appointment_status=appointment_status,
+                    appointment_start_time=appointment_start_time,
+                    appointment_type=appointment_type,
+                    provider_name=provider_name,
                 )
             )
         except PWError:
@@ -1009,7 +1128,163 @@ def scrape_schedule_day(page: Page) -> List[ReportPatient]:
     return rows
 
 
-def discover_via_schedule_range(page: Page, start_date, end_date, on_day=None) -> Dict[str, ReportPatient]:
+def _schedule_row_key(row: ReportPatient) -> str:
+    """Identity for dedupe across scroll steps in scroll_schedule_day_and_collect:
+    guid + start time, so two distinct same-day appointments for the same
+    patient (a lab draw and a follow-up, say) are NOT collapsed into one --
+    only the SAME row reappearing as it scrolls back into view gets deduped.
+    Falls back to guid alone if start time didn't scrape (still correct for
+    the overwhelmingly common one-appointment-per-day-per-patient case)."""
+    guid = row.ehr_patient_guid
+    return f"{guid}|{row.appointment_start_time}" if row.appointment_start_time else guid
+
+
+def scroll_schedule_day_and_collect(
+    page: Page,
+    config: Optional[ScheduleScrapeConfig] = None,
+    expected: Optional[int] = None,
+    max_scrolls: int = 150,
+) -> List[ReportPatient]:
+    """scrape_schedule_day, but scrolling config.schedule_table_scroller_selector
+    first -- same reasoning as scroll_report_and_collect's docstring (the
+    Patient List Report / Appointment Report tables render only ~half their
+    rows into the DOM at a time, the rest lazily as an inner scroller
+    container is scrolled; scraping without scrolling silently returns a
+    fraction of a busy page). The Schedule Appointments row DOM uses that same
+    data-table__cell/appointments-table__col--sm PF component family, so a day
+    with more appointments than fit in one viewport needs the same fix, not
+    just a passive wait for the row count to catch up.
+
+    Collects at EVERY scroll step, not just once at the end: if the container
+    is truly virtualized, rows already scraped can unmount as you scroll
+    further, so scraping only after reaching the bottom would lose whatever
+    scrolled out along the way. Deduped via _schedule_row_key (guid+start
+    time) so the same row staying in view across consecutive steps doesn't
+    get counted twice.
+
+    If no scroller element is found (this day's table isn't virtualized, or
+    PF's markup doesn't match), falls back to a single plain
+    scrape_schedule_day call -- unchanged behavior from before this existed.
+    """
+    config = config or ScheduleScrapeConfig()
+    scroller = page.query_selector(config.schedule_table_scroller_selector)
+    if scroller is None:
+        return scrape_schedule_day(page, config)
+
+    try:
+        scroller.evaluate("el => { el.scrollTop = 0; }")
+        time.sleep(0.2)
+    except Exception:
+        pass
+
+    collected: Dict[str, ReportPatient] = {}
+    last_seen_size = -1
+    stuck = 0
+
+    for _ in range(max_scrolls):
+        for row in scrape_schedule_day(page, config):
+            key = _schedule_row_key(row)
+            if key.strip("|"):
+                collected[key] = row
+
+        size = len(collected)
+        if expected is not None and size >= expected:
+            break
+        if size == last_seen_size:
+            stuck += 1
+        else:
+            stuck = 0
+            last_seen_size = size
+
+        try:
+            old_top = scroller.evaluate("el => el.scrollTop")
+            scroller.evaluate("el => { el.scrollTop = el.scrollTop + Math.max(200, el.clientHeight * 0.6); }")
+            time.sleep(0.25)
+            new_top = scroller.evaluate("el => el.scrollTop")
+            max_top = scroller.evaluate("el => el.scrollHeight - el.clientHeight")
+        except Exception:
+            break
+
+        at_bottom = int(new_top) >= int(max_top) - 5 or int(new_top) == int(old_top)
+        if at_bottom and stuck >= 2:
+            break
+
+    return list(collected.values())
+
+
+@dataclass
+class ScheduledAppointment:
+    """One row scraped off ONE Schedule day, tagged with the date it actually came
+    from. discover_via_schedule_range (below) collapses repeat patients down to a
+    single Dict[guid, ReportPatient] entry -- fine for registry-merge, which only
+    wants one current name/DOB/phone snapshot per patient, but it silently drops
+    every appointment except whichever day was scraped last for that patient. Use
+    discover_appointments_via_schedule_range when a patient's second (third, ...)
+    visit inside the requested range must not be lost -- e.g. injecting one
+    synthetic queue record per visit, not per patient."""
+
+    appointment_date: date
+    patient: ReportPatient
+
+
+def discover_appointments_via_schedule_range(
+    page: Page,
+    start_date,
+    end_date,
+    on_day=None,
+    config: Optional[ScheduleScrapeConfig] = None,
+) -> List[ScheduledAppointment]:
+    """Walks the Schedule 'Appointments' view for every date in [start_date,
+    end_date] and returns EVERY row scraped on EVERY day, each tagged with its
+    own date -- no per-GUID dedupe, so a patient with two visits in the range
+    keeps both. discover_via_schedule_range (below) is a thin GUID-deduped view
+    over this same walk; see its docstring for when that's the one you want
+    instead. `on_day(date, count, running_total)` is an optional progress
+    callback -- running_total counts rows scraped so far, not unique patients.
+
+    config: ScheduleScrapeConfig -- every selector this walk and scrape_schedule_day
+    use comes from here, defaulting to ScheduleScrapeConfig()'s built-in confirmed
+    values when not passed. Load from a JSON file (ScheduleScrapeConfig.load) to
+    override without touching code if Practice Fusion's Schedule markup changes.
+    """
+    config = config or ScheduleScrapeConfig()
+    results: List[ScheduledAppointment] = []
+    open_schedule_appointments_view(page, config)
+    day_count = (end_date - start_date).days + 1
+    for i in range(day_count):
+        target = start_date + timedelta(days=i)
+        if not go_to_schedule_date(page, target, config=config):
+            print(f"  [schedule {target.isoformat()}] WARNING: could not navigate here, skipping", flush=True)
+            continue
+        expected = _read_header_appointment_count(page)
+        if expected:
+            _wait_for_schedule_rows(page, expected, config=config)
+        # scroll_and_paginate_schedule_day (not a plain scrape_schedule_day call):
+        # a busy day's row count can exceed what the virtualized table renders
+        # into the DOM at once (handled by scrolling) AND/OR exceed what fits on
+        # one page at all (handled by clicking through a "Next" pager if one is
+        # found) -- see that function's docstring for both. Falls back to one
+        # plain scrape internally if neither applies to this day.
+        day_rows = scroll_and_paginate_schedule_day(page, config, expected=expected)
+        if expected is not None and len(day_rows) < expected:
+            print(
+                f"  [schedule {target.isoformat()}] WARNING: header says {expected} appointments, "
+                f"only scraped {len(day_rows)} -- table may not have finished rendering",
+                flush=True,
+            )
+        for r in day_rows:
+            if r.ehr_patient_guid:
+                results.append(ScheduledAppointment(appointment_date=target, patient=r))
+        if on_day is not None:
+            on_day(target, len(day_rows), len(results))
+        else:
+            print(f"  [schedule {target.isoformat()}] {len(day_rows)} appointments, running total {len(results)}", flush=True)
+    return results
+
+
+def discover_via_schedule_range(
+    page: Page, start_date, end_date, on_day=None, config: Optional[ScheduleScrapeConfig] = None
+) -> Dict[str, ReportPatient]:
     """Walks the Schedule 'Appointments' view for every date in
     [start_date, end_date] and returns unique patients (keyed by GUID) found
     across that range -- name/DOB/phone/GUID, no chart visits.
@@ -1025,32 +1300,17 @@ def discover_via_schedule_range(page: Page, start_date, end_date, on_day=None) -
     a fast source of GUIDs for a known date window. `on_day(date, count,
     running_total)` is an optional progress callback (see pull_patients.py's
     CLI for how discover-mode prints per-bucket progress the same way).
+
+    Deliberately GUID-deduped -- a patient with two visits in the range collapses
+    to whichever day was scraped LAST, which is fine for this function's only
+    real consumer (registry merge: one current name/DOB/phone snapshot per
+    patient is all it needs). Anything that must keep every visit -- e.g. the
+    seen-but-not-in-report catch-up flow -- needs
+    discover_appointments_via_schedule_range instead, not this.
     """
     collected: Dict[str, ReportPatient] = {}
-    open_schedule_appointments_view(page)
-    day_count = (end_date - start_date).days + 1
-    for i in range(day_count):
-        target = start_date + timedelta(days=i)
-        if not go_to_schedule_date(page, target):
-            print(f"  [schedule {target.isoformat()}] WARNING: could not navigate here, skipping", flush=True)
-            continue
-        expected = _read_header_appointment_count(page)
-        if expected:
-            _wait_for_schedule_rows(page, expected)
-        day_rows = scrape_schedule_day(page)
-        if expected is not None and len(day_rows) < expected:
-            print(
-                f"  [schedule {target.isoformat()}] WARNING: header says {expected} appointments, "
-                f"only scraped {len(day_rows)} -- table may not have finished rendering",
-                flush=True,
-            )
-        for r in day_rows:
-            if r.ehr_patient_guid:
-                collected[r.ehr_patient_guid] = r
-        if on_day is not None:
-            on_day(target, len(day_rows), len(collected))
-        else:
-            print(f"  [schedule {target.isoformat()}] {len(day_rows)} appointments, running total {len(collected)}", flush=True)
+    for appt in discover_appointments_via_schedule_range(page, start_date, end_date, on_day=on_day, config=config):
+        collected[appt.patient.ehr_patient_guid] = appt.patient
     return collected
 
 
@@ -1318,6 +1578,72 @@ def click_next_report_page(page: Page) -> bool:
                 continue
 
     return False
+
+
+def scroll_and_paginate_schedule_day(
+    page: Page,
+    config: Optional[ScheduleScrapeConfig] = None,
+    expected: Optional[int] = None,
+) -> List[ReportPatient]:
+    """scroll_schedule_day_and_collect, but also clicks through NUMBERED pages
+    if Practice Fusion shows one for this day's Schedule list.
+
+    This is a SEPARATE concern from the virtualized-scroll fix in
+    scroll_schedule_day_and_collect: that one handles "more rows than render
+    into the DOM at once on ONE page"; this one handles "more rows than fit on
+    one page at all, with a Next control to click through". A busy day could
+    hit either, or both.
+
+    Reuses get_pager_range/click_next_report_page AS-IS -- the same generic
+    'pager-label'/'pager-btn-next' widget already confirmed live for the
+    Patient List Report and Appointment Report pages, not a new selector
+    guess. This is NOT independently confirmed against the Schedule
+    Appointments view specifically, though: if no pager-label element is found
+    at all, this assumes the day genuinely has just one page (a single
+    virtualized list, which is what's been observed for normal daily
+    appointment volumes) and behaves exactly like calling
+    scroll_schedule_day_and_collect alone -- zero behavior change for that
+    case, including on every day scraped so far. If Schedule ever turns out to
+    use a DIFFERENTLY-named pager control, this silently won't catch it --
+    discover_appointments_via_schedule_range's own "header says N, only
+    scraped M" warning is the signal that something is still being missed
+    beyond what scrolling alone fixed.
+    """
+    config = config or ScheduleScrapeConfig()
+    collected: Dict[str, ReportPatient] = {}
+
+    def merge(rows: List[ReportPatient]) -> None:
+        for r in rows:
+            key = _schedule_row_key(r)
+            if key.strip("|"):
+                collected[key] = r
+
+    start, end, total = get_pager_range(page)
+    if start is None:
+        # No pager label found at all -- treat as a single page, no separate
+        # "Next" control to click through.
+        return scroll_schedule_day_and_collect(page, config, expected=expected)
+
+    expected_page = (end - start + 1) if (start is not None and end is not None) else None
+    merge(scroll_schedule_day_and_collect(page, config, expected=expected_page))
+
+    guard = 0
+    while end is not None and total is not None and end < total and guard < 300:
+        guard += 1
+        prev_start = start
+        if not click_next_report_page(page):
+            break
+        for _ in range(20):
+            start, end, total = get_pager_range(page)
+            if start is not None and start != prev_start:
+                break
+            time.sleep(0.25)
+        if start is None or start == prev_start:
+            break  # no progress -> stop
+        expected_page = (end - start + 1) if (start is not None and end is not None) else None
+        merge(scroll_schedule_day_and_collect(page, config, expected=expected_page))
+
+    return list(collected.values())
 
 
 def load_checkpoint(path: str) -> dict:

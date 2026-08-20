@@ -4,8 +4,9 @@ import argparse
 import json
 import os
 import sys
+import uuid
 from dataclasses import asdict, replace
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 from typing import Any, Dict, Tuple
 
@@ -315,6 +316,37 @@ def build_parser() -> argparse.ArgumentParser:
     add_report_dates(facesheet_pull_by_date)
     add_browser_arguments(facesheet_pull_by_date)
 
+    sync_schedules_by_date = sub.add_parser(
+        "sync-schedules-by-date",
+        help=(
+            "Standalone catch-up pass, independent of the Eligibility Report pull/ingest/"
+            "match pipeline: walks the Schedule for the given date range, keeps every "
+            "appointment marked Seen there, diffs against the queue's existing "
+            "(patient, date) pairs, and injects + processes a synthetic record straight "
+            "from the patient chart for whatever PF's report hasn't caught up on yet. "
+            "With no explicit date given, defaults to today plus --lookback-days back, so "
+            "a status that flips to Seen a few days late still gets picked up next call "
+            "without having to remember which past date to re-check."
+        ),
+    )
+    sync_schedules_by_date.add_argument("--queue-json", required=True)
+    sync_schedules_by_date.add_argument("--config-json", required=True)
+    sync_schedules_by_date.add_argument("--schedule-config-json", default="")
+    sync_schedules_by_date.add_argument("--downloads-dir", required=True)
+    sync_schedules_by_date.add_argument("--practice", required=True)
+    sync_schedules_by_date.add_argument("--limit", type=int, default=0)
+    sync_schedules_by_date.add_argument("--dry-run", action="store_true")
+    sync_schedules_by_date.add_argument("--include-failed", action="store_true")
+    sync_schedules_by_date.add_argument(
+        "--lookback-days", type=int, default=3,
+        help="Only applied when --report-date/--start-date/--end-date are all omitted: "
+             "scans [today - lookback_days, today] instead of just today, so a patient "
+             "missed on a prior day still gets caught on a later call. Explicit dates "
+             "always win over this default.",
+    )
+    add_report_dates(sync_schedules_by_date)
+    add_browser_arguments(sync_schedules_by_date)
+
     status = sub.add_parser("status", help="Show queue counts and unresolved/review rows.")
     status.add_argument("--queue-json", required=True)
     status.add_argument("--show-limit", type=int, default=20)
@@ -346,6 +378,11 @@ def build_parser() -> argparse.ArgumentParser:
     write_config.add_argument("--config-json", required=True)
     write_report_config = sub.add_parser("write-report-config", help="Write the report config.")
     write_report_config.add_argument("--report-config-json", required=True)
+    write_schedule_config = sub.add_parser(
+        "write-schedule-config",
+        help="Write the Schedule-view scrape config (sync-schedules-by-date's --schedule-config-json).",
+    )
+    write_schedule_config.add_argument("--schedule-config-json", required=True)
 
     return parser
 
@@ -757,7 +794,7 @@ def run_full_sync_by_date(
             stages["process"] = process_records_on_page(
                 page, args.queue_json, config, args.downloads_dir,
                 candidates, rows, store, args.limit, args.dry_run, False,
-                manifest_run_id,
+                manifest_run_id, use_timeline_fallback=True,
             )
         except Exception as exc:
             stages["process"] = {"error": f"{type(exc).__name__}: {exc}"}
@@ -772,6 +809,203 @@ def run_full_sync_by_date(
             # today's records -- otherwise a failed upload is orphaned forever,
             # since build_and_upload_zip below only ever looks at this run's own
             # manifest. See retry_orphaned_zips' docstring.
+            try:
+                stages["rcm_upload_retry"] = retry_orphaned_zips(args.downloads_dir)
+            except Exception as exc:
+                stages["rcm_upload_retry"] = {"error": f"{type(exc).__name__}: {exc}"}
+
+            manifest_path = ""
+            process_result = stages.get("process")
+            if isinstance(process_result, dict):
+                manifest_path = process_result.get("metadata_manifest_path", "")
+            try:
+                stages["rcm_upload"] = build_and_upload_zip(
+                    manifest_path, args.downloads_dir, args.practice,
+                )
+            except Exception as exc:
+                stages["rcm_upload"] = {"error": f"{type(exc).__name__}: {exc}"}
+
+        return stages
+
+    return browser_command_wrapper(args, callback)
+
+
+def resolve_sync_schedules_dates(args: argparse.Namespace) -> Tuple[date, date]:
+    """Same as resolve_report_dates, except with no explicit date at all (no
+    --report-date/--start-date/--end-date), it defaults to a LOOKBACK WINDOW
+    [today - lookback_days, today] instead of just today.
+
+    Why: this command's whole purpose is catching a patient who was Confirmed
+    (not yet Seen, correctly skipped) on a prior call and only shows Seen a few
+    days later -- if every un-dated call only ever looked at "today", that
+    patient's earlier visit date would never get re-checked once today moves
+    past it. An explicit date/range always wins over this default -- it only
+    fires when the caller passed nothing at all.
+    """
+    if getattr(args, "report_date", "") or getattr(args, "start_date", "") or getattr(args, "end_date", ""):
+        return resolve_report_dates(args)
+    today = practice_today()
+    lookback = max(0, getattr(args, "lookback_days", 0) or 0)
+    return today - timedelta(days=lookback), today
+
+
+def run_sync_schedules_by_date(
+    args: argparse.Namespace,
+    config: "SyncConfig | None" = None,
+) -> dict:
+    """Standalone catch-up pass, deliberately independent of full-sync-by-date's
+    report pull/ingest/match pipeline: walks the Schedule for [start_date,
+    end_date] via discover_appointments_via_schedule_range (one entry per VISIT,
+    not per patient -- see that function's docstring for why
+    discover_via_schedule_range itself can't be reused here), keeps only the
+    appointments actually marked Seen there, diffs those against the queue's
+    existing (ehr_patient_guid, appointment_date) pairs, and injects + processes
+    a synthetic QueueRecord straight from the patient chart for whatever's
+    missing -- Practice Fusion's own Eligibility Report never enters into it.
+
+    Exists as its own command/endpoint (not folded into full-sync-by-date as an
+    extra stage) so it can be re-run on its own rolling window -- see
+    resolve_sync_schedules_dates's docstring for why the default date range IS
+    that rolling window, not just "today" -- to catch a status that flips from
+    Confirmed to Seen a few days late, without re-pulling/re-ingesting/re-matching
+    the whole Eligibility Report every time just to check.
+
+    A patient with two Seen visits in the requested range gets TWO synthetic
+    records, one per visit date -- discover_appointments_via_schedule_range keeps
+    every row scraped, and the (guid, date) key below treats each date
+    independently, so neither visit shadows the other.
+
+    Every Schedule-view selector this uses comes from ScheduleScrapeConfig
+    (args.schedule_config_json), not a hardcoded literal -- see that dataclass's
+    docstring in models.py.
+    """
+    from pf_sync_pkg import patient_scraper as ps
+    from pf_sync_pkg.models import QueueRecord, ScheduleScrapeConfig
+    from pf_sync_pkg.utils import is_seen_status
+
+    start_date, end_date = resolve_sync_schedules_dates(args)
+    schedule_config = ScheduleScrapeConfig.load(getattr(args, "schedule_config_json", ""))
+    stages: dict = {}
+
+    def callback(page: Page):
+        nonlocal config
+        config = config or build_full_sync_by_date_config(args)
+
+        try:
+            appointments = ps.discover_appointments_via_schedule_range(
+                page, start_date, end_date, config=schedule_config
+            )
+            stages["discover"] = {
+                "method": "schedule_range_per_visit",
+                "date_range": f"{start_date.isoformat()}_to_{end_date.isoformat()}",
+                "rows_scraped": len(appointments),
+            }
+        except Exception as exc:
+            stages["discover"] = {"error": f"{type(exc).__name__}: {exc}"}
+            return stages
+
+        try:
+            store = load_store(args.queue_json)
+            rows_for_inject = store_rows(store)
+            # rows_for_inject is a List[QueueRecord] (dataclass instances, no
+            # .get()) -- attribute access, not dict-style .get(). Keyed on
+            # (guid, appointment_date), NOT guid alone: ingest_appointments' own
+            # record_key() dedupes per-appointment (practice+name+dob+date+
+            # provider), so a repeat patient legitimately gets one row per visit
+            # date -- a guid-only check here would see ANY prior row for that
+            # patient, from a completely different date, and wrongly treat
+            # today's visit as already covered.
+            ingested_guid_dates = {
+                (row.ehr_patient_guid, parse_date(row.appointment_date))
+                for row in rows_for_inject
+                if row.ehr_patient_guid
+            }
+
+            to_inject = []
+            not_seen_skipped = []
+            for appt in appointments:
+                guid = appt.patient.ehr_patient_guid
+                if not guid or (guid, appt.appointment_date) in ingested_guid_dates:
+                    continue
+                if is_seen_status(appt.patient.appointment_status, config):
+                    to_inject.append(appt)
+                else:
+                    # Discovered + missing from the report but not Seen yet is
+                    # expected, not a bug -- the report just hasn't run for a
+                    # still-upcoming visit. Visible, not silently dropped.
+                    not_seen_skipped.append(appt)
+
+            synthetic_rows = []
+            for appt in to_inject:
+                rp = appt.patient
+                appt_date = appt.appointment_date.isoformat()
+                if rp.appointment_start_time:
+                    # Same combined date+time shape ingest.COLUMN_ALIASES documents
+                    # for the report's own AppointmentTime column; parse_date
+                    # tolerates the trailing time token fine.
+                    appt_date = f"{appt_date} {rp.appointment_start_time}"
+                synthetic_rows.append(
+                    QueueRecord(
+                        row_id=str(uuid.uuid4()),
+                        practice=args.practice,
+                        ehr_patient_guid=guid,
+                        patient_name=f"{rp.first_name} {rp.last_name}".strip(),
+                        appointment_date=appt_date,
+                        appointment_status=rp.appointment_status or "seen",
+                        appointment_type=rp.appointment_type,
+                        provider=rp.provider_name,
+                        service_location="",
+                        patient_id=rp.patient_id,
+                        patient_match_status="matched",  # Already matched by GUID
+                        patient_match_method="discovered_from_schedule",
+                        status="ready",
+                        status_reason="discovered_from_schedule_not_in_report",
+                    )
+                )
+
+            if synthetic_rows:
+                rows_for_inject.extend(synthetic_rows)
+                save_store(args.queue_json, store, rows_for_inject)
+
+            stages["inject_discovered"] = {
+                "synthetic_records_created": len(synthetic_rows),
+                "discovered_visits_not_in_report": [
+                    f"{appt.patient.first_name} {appt.patient.last_name} "
+                    f"on {appt.appointment_date.isoformat()} (GUID: {appt.patient.ehr_patient_guid[:8]}...)"
+                    for appt in to_inject
+                ],
+                "not_seen_skipped": [
+                    f"{appt.patient.first_name} {appt.patient.last_name} "
+                    f"on {appt.appointment_date.isoformat()} "
+                    f"({appt.patient.appointment_status or 'no status read'})"
+                    for appt in not_seen_skipped
+                ],
+            }
+        except Exception as exc:
+            stages["inject_discovered"] = {"error": f"{type(exc).__name__}: {exc}"}
+            return stages
+
+        try:
+            store = load_store(args.queue_json)
+            rows = store_rows(store)
+            candidates = default_process_candidates(rows, args.include_failed)
+            manifest_run_id = (
+                f"{Path(args.queue_json).stem}_sync_schedules_"
+                f"{start_date.isoformat()}_to_{end_date.isoformat()}"
+            )
+            stages["process"] = process_records_on_page(
+                page, args.queue_json, config, args.downloads_dir,
+                candidates, rows, store, args.limit, args.dry_run, False,
+                manifest_run_id, use_timeline_fallback=True,
+            )
+        except Exception as exc:
+            stages["process"] = {"error": f"{type(exc).__name__}: {exc}"}
+
+        if args.dry_run:
+            stages["rcm_upload"] = {"skipped": True, "reason": "dry_run=True -- no PDFs were generated"}
+        else:
+            from pf_sync_pkg.rcm_upload import build_and_upload_zip, retry_orphaned_zips
+
             try:
                 stages["rcm_upload_retry"] = retry_orphaned_zips(args.downloads_dir)
             except Exception as exc:
@@ -951,6 +1185,13 @@ def main() -> int:
             print(f"Appointment report config written to {args.report_config_json}")
             return 0
 
+        if args.command == "write-schedule-config":
+            from pf_sync_pkg.models import ScheduleScrapeConfig
+
+            atomic_write_json(args.schedule_config_json, asdict(ScheduleScrapeConfig()))
+            print(f"Schedule scrape config written to {args.schedule_config_json}")
+            return 0
+
         if args.command == "ingest":
             counts = ingest_appointments(
                 args.appointments_file,
@@ -1104,6 +1345,11 @@ def main() -> int:
 
         if args.command == "facesheet-pull-by-date":
             result = run_facesheet_pull_by_date(args)
+            print(json.dumps(result, indent=2))
+            return 0
+
+        if args.command == "sync-schedules-by-date":
+            result = run_sync_schedules_by_date(args)
             print(json.dumps(result, indent=2))
             return 0
 
