@@ -924,8 +924,26 @@ def run_sync_schedules_by_date(
             to_inject = []
             not_seen_skipped = []
             for appt in appointments:
-                guid = appt.patient.ehr_patient_guid
-                if not guid or (guid, appt.appointment_date) in ingested_guid_dates:
+                # Scoped to THIS filtering pass only -- deliberately not named
+                # `guid` (a prior version did, and that name leaking into the
+                # unrelated loop below that builds synthetic_rows was exactly
+                # the incident this comment is warning against).
+                #
+                # Dedup here is GUID-only, on purpose: this GUID comes straight
+                # off Practice Fusion's own href on the Schedule page -- it's
+                # authoritative, not fuzzy-derived, which is this whole
+                # endpoint's reason to exist (see SYNC_SCHEDULES_BY_DATE.md).
+                # A fuzzy name-based duplicate check was tried and reverted the
+                # same day: it re-introduces exactly the identity fragility
+                # this endpoint is built to avoid, and risks the opposite
+                # failure -- wrongly treating a patient's genuinely separate
+                # visit, or a different patient with a similar name, as
+                # "already covered". The real 2026-08-21 incident was a plain
+                # stale-loop-variable bug (see ehr_patient_guid=rp.... below),
+                # not a GUID reliability problem, and needed a code fix, not a
+                # name-matching safety net.
+                candidate_guid = appt.patient.ehr_patient_guid
+                if not candidate_guid or (candidate_guid, appt.appointment_date) in ingested_guid_dates:
                     continue
                 if is_seen_status(appt.patient.appointment_status, config):
                     to_inject.append(appt)
@@ -948,12 +966,27 @@ def run_sync_schedules_by_date(
                     QueueRecord(
                         row_id=str(uuid.uuid4()),
                         practice=args.practice,
-                        ehr_patient_guid=guid,
+                        # rp.ehr_patient_guid, NOT the outer filtering loop's `guid` --
+                        # that variable belongs to the loop above (building
+                        # to_inject/not_seen_skipped) and holds whatever appt was
+                        # last iterated there, not this appt. Referencing it here
+                        # stamped EVERY synthetic record in a batch with the SAME
+                        # stale guid -- confirmed live 2026-08-21: ~40 different
+                        # patients' rows all got one patient's real GUID, so every
+                        # one of them opened THAT patient's chart and pulled THEIR
+                        # SOAP note under a different name. See
+                        # SYNC_SCHEDULES_BY_DATE.md's incident writeup.
+                        ehr_patient_guid=rp.ehr_patient_guid,
                         patient_name=f"{rp.first_name} {rp.last_name}".strip(),
+                        patient_dob=rp.dob,
                         appointment_date=appt_date,
                         appointment_status=rp.appointment_status or "seen",
                         appointment_type=rp.appointment_type,
                         provider=rp.provider_name,
+                        # Deliberately blank, not a bug: unlike DOB, the Schedule
+                        # page's row DOM never exposes facility/location at all --
+                        # only the Eligibility Report's "Facility" column has it,
+                        # and this whole flow exists to bypass that report.
                         service_location="",
                         patient_id=rp.patient_id,
                         patient_match_status="matched",  # Already matched by GUID

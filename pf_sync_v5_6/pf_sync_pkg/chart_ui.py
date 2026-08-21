@@ -148,17 +148,32 @@ def locator_text(locator: Locator) -> str:
             return ""
 
 
-def read_encounters(
+def _scrape_visible_encounters(
     page: Page,
     config: SyncConfig,
     patient_guid: str,
     item_selector: str,
     source: str,
 ) -> List[DetectedEncounter]:
-    try:
-        page.locator(item_selector).first.wait_for(state="attached", timeout=10_000)
-    except Exception:
-        pass
+    """One-shot pass over whatever encounter items are CURRENTLY in the DOM --
+    read_encounters (below) is the one that also scrolls to reveal more.
+
+    Summary and Timeline use two DIFFERENT DOM shapes for an encounter row
+    (confirmed live 2026-08-21 -- see the Timeline selectors' own comments in
+    models.py), so which selector set to read date/type/code/complaint from
+    is picked by `source` here rather than always using the Summary ones.
+    """
+    if source == "timeline":
+        date_selector = config.encounter_timeline_date_selector
+        type_selector = config.encounter_timeline_type_selector
+        code_selector = config.encounter_timeline_code_selector
+        complaint_selector = config.encounter_timeline_chief_complaint_selector
+    else:
+        date_selector = config.encounter_date_selector
+        type_selector = config.encounter_type_selector
+        code_selector = config.encounter_code_selector
+        complaint_selector = config.encounter_chief_complaint_selector
+
     items = page.locator(item_selector)
     output: List[DetectedEncounter] = []
     for index in range(items.count()):
@@ -171,15 +186,15 @@ def read_encounters(
         soap_marker = clean(config.encounter_soap_title_text).lower()
         if soap_marker and soap_marker not in f"{title} {display}".lower():
             continue
-        encounter_date_text = locator_text(item.locator(config.encounter_date_selector).first)
+        encounter_date_text = locator_text(item.locator(date_selector).first)
         encounter_date = parse_date(encounter_date_text)
         if encounter_date is None:
             continue
-        encounter_type = locator_text(item.locator(config.encounter_type_selector).first)
-        encounter_code = locator_text(item.locator(config.encounter_code_selector).first)
-        complaint = locator_text(
-            item.locator(config.encounter_chief_complaint_selector).first
+        encounter_type = locator_text(item.locator(type_selector).first)
+        encounter_code = (
+            locator_text(item.locator(code_selector).first) if code_selector else ""
         )
+        complaint = locator_text(item.locator(complaint_selector).first)
         key_source = "|".join(
             [
                 patient_guid.lower(),
@@ -201,6 +216,80 @@ def read_encounters(
             )
         )
     return output
+
+
+def read_encounters(
+    page: Page,
+    config: SyncConfig,
+    patient_guid: str,
+    item_selector: str,
+    source: str,
+) -> List[DetectedEncounter]:
+    """Reads every encounter item, scrolling config.encounter_list_scroller_selector
+    first (if it turns out to be scrollable) so a patient with enough visit
+    history isn't silently under-enumerated the same way the Schedule table
+    and the notes dropdown were confirmed to be before their own fixes -- see
+    ScheduleScrapeConfig's docstring and for_each_note_checkbox_scrolled.
+    NOT independently confirmed live for this specific list either way --
+    added defensively after a real live report of an encounter that exists
+    in the chart but was not found despite checking both Summary and Timeline
+    (see find_encounter_for_appointment_with_timeline_fallback's caller).
+
+    Falls straight through to a single _scrape_visible_encounters pass if no
+    scrollable container is found -- zero behavior change for that case.
+    Dedup across scroll steps is by encounter_key (already a hash of
+    patient_guid+date+type+code+complaint), so the same encounter staying in
+    view across steps is never double-counted, and this never needs its own
+    separate identity check the way the Schedule-row/note-checkbox scrolls did.
+    """
+    try:
+        page.locator(item_selector).first.wait_for(state="attached", timeout=10_000)
+    except Exception:
+        pass
+
+    collected: Dict[str, DetectedEncounter] = {}
+
+    def collect_current() -> None:
+        for encounter in _scrape_visible_encounters(page, config, patient_guid, item_selector, source):
+            collected[encounter.encounter_key] = encounter
+
+    collect_current()
+
+    scroller = page.query_selector(config.encounter_list_scroller_selector)
+    if scroller is None:
+        return list(collected.values())
+    try:
+        scroll_height = scroller.evaluate("el => el.scrollHeight")
+        client_height = scroller.evaluate("el => el.clientHeight")
+    except Exception:
+        return list(collected.values())
+    if not scroll_height or not client_height or scroll_height <= client_height + 5:
+        return list(collected.values())  # Not actually scrollable.
+
+    try:
+        scroller.evaluate("el => { el.scrollTop = 0; }")
+        time.sleep(0.15)
+    except Exception:
+        return list(collected.values())
+
+    stuck = 0
+    for _ in range(60):
+        try:
+            old_top = scroller.evaluate("el => el.scrollTop")
+            scroller.evaluate(
+                "el => { el.scrollTop = el.scrollTop + Math.max(150, el.clientHeight * 0.6); }"
+            )
+            time.sleep(0.2)
+            new_top = scroller.evaluate("el => el.scrollTop")
+            max_top = scroller.evaluate("el => el.scrollHeight - el.clientHeight")
+        except Exception:
+            break
+        collect_current()
+        stuck = stuck + 1 if new_top == old_top else 0
+        if stuck >= 2 or int(new_top) >= int(max_top) - 5:
+            break
+
+    return list(collected.values())
 
 
 def read_summary_encounters(page: Page, config: SyncConfig, patient_guid: str) -> List[DetectedEncounter]:
@@ -334,8 +423,42 @@ def find_encounter_for_appointment_with_timeline_fallback(
     )
 
 
+def dismiss_stray_print_preview_modal(page: Page, config: SyncConfig) -> None:
+    """Dismiss Practice Fusion's NATIVE print-preview overlay if a prior
+    record's generate_pdf left it behind.
+
+    Confirmed live 2026-08-21: PF is a hash-routed SPA, and navigating to a
+    different chart's Summary page (page.goto to a new hash route) does not
+    necessarily force a full document reload -- so this overlay (holding the
+    print-encounter-modal-frame iframe) can still be sitting on top of the page
+    for the NEXT record. Its iframe then intercepts pointer events, which is
+    why the NEXT record's own Print Chart button click can time out even
+    though that button itself reports visible/enabled -- the click lands on
+    the stray iframe instead. Best-effort, like close_print_chart: Escape
+    closes PF's own print dialogs; if it's somehow still there afterward, the
+    caller's own click/timeout is the backstop, same as everywhere else in
+    this file that dismisses leftover UI best-effort rather than hard-failing
+    on it.
+    """
+    try:
+        modal = page.query_selector(config.native_print_preview_modal_selector)
+        if modal is None or not modal.is_visible():
+            return
+    except Exception:
+        return
+    try:
+        page.keyboard.press("Escape")
+        page.wait_for_timeout(300)
+    except Exception:
+        pass
+
+
 def open_print_chart(page: Page, config: SyncConfig) -> Locator:
     """Click Print Chart and return the visible modal container."""
+    # A prior record's native print-preview overlay can still be sitting on
+    # top of the page -- see dismiss_stray_print_preview_modal's docstring --
+    # and would otherwise intercept this exact click.
+    dismiss_stray_print_preview_modal(page, config)
     button = page.locator(config.print_chart_button_selector).first
     button.wait_for(state="visible", timeout=DEFAULT_TIMEOUT)
     button.click()
@@ -774,6 +897,88 @@ def note_option_checkboxes(page: Page, config: SyncConfig) -> List[Locator]:
     return found
 
 
+def _note_dropdown_panel(page: Page, config: SyncConfig) -> Optional[Locator]:
+    """The tethered notes dropdown panel element, if one of
+    config.note_dropdown_menu_selectors currently matches -- same lookup
+    note_option_checkboxes does, kept in sync with it deliberately (not
+    reused directly since that function returns checkboxes, not the panel
+    itself)."""
+    for selector in config.note_dropdown_menu_selectors:
+        panel = visible_match(page, selector)
+        if panel is not None:
+            return panel
+    return None
+
+
+def for_each_note_checkbox_scrolled(
+    page: Page,
+    config: SyncConfig,
+    visit,
+    max_scrolls: int = 60,
+) -> None:
+    """Calls visit(checkbox, text) for every note checkbox reachable in the
+    tethered notes dropdown, scrolling that panel first if it turns out to be
+    scrollable -- a patient with a long note history could in principle have
+    this panel virtualized the same way the Schedule/Report tables were
+    confirmed to be (see scroll_schedule_day_and_collect / scroll_report_and_
+    collect), silently under-enumerating note_option_checkboxes' one-shot
+    count() the same way those were under-scraping before their own fixes.
+
+    NOT independently confirmed live either way for this specific dropdown --
+    added defensively rather than after catching a real miss, unlike the
+    other two. Skips scrolling entirely (falls straight through to a single
+    visit_current() pass, zero behavior change) if the panel isn't found or
+    its scrollHeight doesn't actually exceed its clientHeight.
+
+    Re-queries note_option_checkboxes() fresh at every scroll step and acts
+    immediately via `visit`, rather than collecting Locators from an earlier
+    step and using them later -- a Locator for a checkbox that scrolled out of
+    a virtualized panel could go stale/detached, the same reason scroll_report_
+    and_collect extracts plain values per step instead of holding handles.
+    """
+    def visit_current() -> None:
+        for checkbox in note_option_checkboxes(page, config):
+            text = checkbox_display_text(checkbox)
+            if text:
+                visit(checkbox, text)
+
+    visit_current()
+
+    panel = _note_dropdown_panel(page, config)
+    if panel is None:
+        return
+    try:
+        scroll_height = panel.evaluate("el => el.scrollHeight")
+        client_height = panel.evaluate("el => el.clientHeight")
+    except Exception:
+        return
+    if not scroll_height or not client_height or scroll_height <= client_height + 5:
+        return  # Not actually scrollable -- nothing more to reveal.
+
+    try:
+        panel.evaluate("el => { el.scrollTop = 0; }")
+        time.sleep(0.15)
+    except Exception:
+        return
+
+    stuck = 0
+    for _ in range(max_scrolls):
+        try:
+            old_top = panel.evaluate("el => el.scrollTop")
+            panel.evaluate(
+                "el => { el.scrollTop = el.scrollTop + Math.max(150, el.clientHeight * 0.6); }"
+            )
+            time.sleep(0.2)
+            new_top = panel.evaluate("el => el.scrollTop")
+            max_top = panel.evaluate("el => el.scrollHeight - el.clientHeight")
+        except Exception:
+            break
+        visit_current()
+        stuck = stuck + 1 if new_top == old_top else 0
+        if stuck >= 2 or int(new_top) >= int(max_top) - 5:
+            break
+
+
 def select_all_notes(page: Page, config: SyncConfig) -> str:
     """Check every note via the notes row's group checkbox.
 
@@ -794,19 +999,24 @@ def select_all_notes(page: Page, config: SyncConfig) -> str:
     except Exception as exc:
         print(f"  notes group checkbox unavailable ({type(exc).__name__}); enumerating instead", flush=True)
 
-    # Fallback: enumerate the dropdown and check everything in it.
+    # Fallback: enumerate the dropdown (scrolling it if it turns out to be
+    # scrollable -- see for_each_note_checkbox_scrolled) and check everything.
     open_notes_dropdown(page, config)
-    boxes = note_option_checkboxes(page, config)
     labels: List[str] = []
-    for box in boxes:
-        text = checkbox_display_text(box)
-        if not text:
-            continue
+    seen_labels = set()
+
+    def check_one(box: Locator, text: str) -> None:
+        normalized = clean(text)
+        if not normalized or normalized in seen_labels:
+            return
         try:
             ensure_checked(box, f"note option {text[:60]!r}")
-            labels.append(clean(text))
+            labels.append(normalized)
+            seen_labels.add(normalized)
         except Exception:
-            continue
+            pass
+
+    for_each_note_checkbox_scrolled(page, config, check_one)
     if not labels:
         raise SoapNoteNotFoundError(
             "SOAP_NOTE_NOT_FOUND_ANY: the notes dropdown exposed no selectable notes."
@@ -816,33 +1026,71 @@ def select_all_notes(page: Page, config: SyncConfig) -> str:
             "SOAP_NOTE_SELECTION_NOT_APPLIED: notes were clicked but the toggle still "
             f"reads {notes_toggle_label(page, config)!r}."
         )
-    unique: List[str] = []
-    for label in labels:
-        if label not in unique:
-            unique.append(label)
-    return " | ".join(unique)
+    # Already deduped by check_one's seen_labels check above.
+    return " | ".join(labels)
+
+
+def clear_all_notes(page: Page, config: SyncConfig) -> None:
+    """Clears every currently-checked note before selecting this record's own."""
+    open_notes_dropdown(page, config)
+    if notes_selection_is_empty(page, config):
+        return  # Already clear -- nothing to do.
+
+    group = page.locator(config.notes_group_checkbox_selector).first
+    try:
+        if group.count() and group.is_checked():
+            ensure_unchecked(group, "notes group checkbox")
+            time.sleep(0.4)
+            if notes_selection_is_empty(page, config):
+                return
+    except Exception:
+        pass
+
+    # Fallback: the group checkbox can read indeterminate rather than fully
+    # checked -- enumerate and uncheck individually instead, scrolling the
+    # panel (if scrollable) so a long note history isn't under-enumerated the
+    # same way note_option_checkboxes' one-shot count() could be -- see
+    # for_each_note_checkbox_scrolled.
+    def uncheck_if_checked(checkbox: Locator, text: str) -> None:
+        del text
+        try:
+            if checkbox.is_checked():
+                ensure_unchecked(checkbox, "note option")
+        except Exception:
+            pass
+
+    for_each_note_checkbox_scrolled(page, config, uncheck_if_checked)
 
 
 def select_soap_note_for_date(page: Page, config: SyncConfig, appointment_date: str) -> str:
-    open_notes_dropdown(page, config)
+    # clear_all_notes already opens the dropdown itself -- open_notes_dropdown
+    # is a plain toggle-click, so calling it again here would CLOSE what
+    # clear_all_notes just opened instead of opening it.
+    clear_all_notes(page, config)
     tokens = note_date_tokens(appointment_date, config.note_date_formats)
-    matches: List[Tuple[Locator, str]] = []
-    for checkbox in note_option_checkboxes(page, config):
-        text = checkbox_display_text(checkbox)
-        if text and any(token.lower() in text.lower() for token in tokens):
-            matches.append((checkbox, text))
-    if not matches:
-        raise SoapNoteNotFoundError(
-            f"SOAP_NOTE_NOT_FOUND_FOR_DATE: appointment_date={appointment_date}; tried={tokens}"
-        )
-    selected = []
-    seen = set()
-    for checkbox, text in matches:
-        ensure_checked(checkbox, f"note option {text[:60]!r}")
+    selected: List[str] = []
+    seen: set = set()
+
+    def check_if_matches(checkbox: Locator, text: str) -> None:
+        if not any(token.lower() in text.lower() for token in tokens):
+            return
+        try:
+            ensure_checked(checkbox, f"note option {text[:60]!r}")
+        except Exception:
+            return
         normalized = clean(text)
         if normalized and normalized not in seen:
             selected.append(normalized)
             seen.add(normalized)
+
+    # Scrolls the tethered panel (if scrollable) so this record's own date
+    # isn't missed just because it wasn't rendered yet without scrolling --
+    # see for_each_note_checkbox_scrolled.
+    for_each_note_checkbox_scrolled(page, config, check_if_matches)
+    if not selected:
+        raise SoapNoteNotFoundError(
+            f"SOAP_NOTE_NOT_FOUND_FOR_DATE: appointment_date={appointment_date}; tried={tokens}"
+        )
     if notes_selection_is_empty(page, config):
         raise SoapNoteNotFoundError(
             "SOAP_NOTE_SELECTION_NOT_APPLIED: matching notes were clicked but the toggle "

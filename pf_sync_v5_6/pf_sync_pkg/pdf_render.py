@@ -9,7 +9,7 @@ from typing import Any, Dict
 
 from playwright.sync_api import Locator, Page, TimeoutError as PWTimeout
 
-from pf_sync_pkg.chart_ui import format_pdf_name, note_date_tokens
+from pf_sync_pkg.chart_ui import dismiss_stray_print_preview_modal, format_pdf_name, note_date_tokens
 from pf_sync_pkg.constants import DEFAULT_TIMEOUT
 from pf_sync_pkg.dom_utils import first_visible_locator
 from pf_sync_pkg.models import QueueRecord, SyncConfig
@@ -984,3 +984,11 @@ def generate_pdf(
             except Exception:
                 pass
         _cleanup_print_preview_markers(page)
+        # PF's own native print-preview overlay (opened by the click on
+        # generate_pdf_button_selector above) is closed here, proactively,
+        # right where it was opened -- see dismiss_stray_print_preview_modal's
+        # docstring for why leaving it open blocks the NEXT record's own
+        # Print Chart click if this isn't done. open_print_chart calls the
+        # same function defensively too, so a record that skips generate_pdf
+        # entirely (an earlier failure) still gets it cleared before this one.
+        dismiss_stray_print_preview_modal(page, config)

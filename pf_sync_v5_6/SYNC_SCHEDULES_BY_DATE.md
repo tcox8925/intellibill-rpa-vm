@@ -215,6 +215,29 @@ Useful flags (same meaning as the rest of the repo):
 - `--report-date` / `--start-date` / `--end-date` — pin to an exact
   date/range instead of the rolling window.
 
+## Guarantee: exact-date only, never a future or different-date facesheet
+
+This command (and every other command in the repo — this is not special to
+`sync-schedules-by-date`) only ever pulls the facesheet/SOAP note for the
+appointment's OWN exact date. It never substitutes a future or otherwise
+different-date encounter/note if the right one isn't there yet:
+
+- **Encounter lookup** (`chart_ui.find_encounter_for_appointment` and its
+  Timeline-fallback version) only accepts an encounter whose date is an exact
+  match to the appointment date. No match → `EncounterNotFoundError`, the
+  record fails for this run. It does not fall back to any other encounter.
+- **SOAP note selection** (`chart_ui.select_soap_note_for_date`) only checks
+  the boxes whose displayed date text matches the appointment date. No match
+  → `SoapNoteNotFoundError`, same fail-not-substitute behavior.
+- This applies identically to a synthetic record `sync-schedules-by-date`
+  injects — its `appointment_date` is the exact date scraped off the
+  Schedule page for that visit, so the same exact-match checks apply to it
+  the same way they do to a normal report-sourced record.
+
+So: if the exact-date facesheet/SOAP note isn't in the chart yet, that patient
+fails for this run — it is never silently skipped in favor of a future note,
+and never silently substituted with a different date's note.
+
 ## What the output tells you
 
 ```json

@@ -129,6 +129,19 @@ class SyncConfig:
     print_modal_close_selector: str = "[data-element='concent-model-close-btn']"
     print_modal_cancel_selector: str = "[data-element='btn-print-modal-cancel']"
 
+    # Practice Fusion's NATIVE print-preview overlay (holds the
+    # print-encounter-modal-frame iframe) opened by generate_pdf's own click on
+    # generate_pdf_button_selector -- a SEPARATE element from
+    # print_modal_ready_selectors above (the earlier Print Chart OPTIONS
+    # dialog). Confirmed live 2026-08-21: this can still be sitting on top of
+    # the page for the NEXT record -- PF is a hash-routed SPA, and navigating
+    # to a different chart's Summary (page.goto to a new hash route) does not
+    # necessarily force a full document reload -- and its iframe then
+    # intercepts pointer events, timing out the next record's own Print Chart
+    # button click even though that button is visible/enabled. See
+    # chart_ui.dismiss_stray_print_preview_modal.
+    native_print_preview_modal_selector: str = "[data-element='print-modal']"
+
     # "Select: all | none" links inside the modal header.
     print_modal_select_none_selector: str = "[data-element='print-modal-select-none']"
     print_modal_select_all_selector: str = "[data-element='print-modal-select-all']"
@@ -257,17 +270,53 @@ class SyncConfig:
     printable_preview_ready_selector: str = "a.print-link[title='Print']"
     pdf_min_bytes: int = 1024
 
-    # Summary and View All encounters.
+    # Summary "recent encounters" panel -- card-style list.
     encounter_item_selector: str = "[data-element^='encounter-item-']"
     encounter_date_selector: str = ".text-color-link"
     encounter_type_selector: str = "[data-element='encounter-type']"
     encounter_code_selector: str = "[data-element='code-type-and-code-value']"
     encounter_chief_complaint_selector: str = ".chief-complaint"
     encounter_timeline_link_selector: str = "a[href*='/timeline/encounter']"
-    encounter_timeline_item_selector: str = (
-        "[data-element^='encounter-item-'], li[title*='SOAP Note']"
-    )
+
+    # Timeline page -- a REAL <table> (data-table__row/data-table__cell, the
+    # same shared PF component the Appointment Report table uses), a
+    # completely different shape from the Summary panel above, confirmed live
+    # 2026-08-21 from an actual Timeline row:
+    #   <tr data-element="data-table-row-N">
+    #     <td data-element="encounter-type-source"><p data-element="encounter-type" .../><p data-element="encounter-seen-by" .../></td>
+    #     <td data-element="encounter-details"><p data-element="encounter-note-type" .../><p data-element="encounter-cc" .../></td>
+    #     <td data-element="encounter-status"><p data-element="encounter-date" .../></td>
+    #   </tr>
+    # The prior defaults here (`[data-element^='encounter-item-'], li[...]` for
+    # the row, and reusing the Summary panel's .text-color-link/etc. selectors
+    # for date/type/code/complaint) matched NONE of this: encounter_timeline_
+    # item_selector matched zero rows (Timeline lookups always returned
+    # nothing), and .text-color-link actually lands on the encounter TYPE cell
+    # ("Office Visit"), not the date -- so even if the row selector had
+    # matched, parse_date() would have failed on "Office Visit" and every row
+    # would still have been skipped. This is why the Timeline fallback never
+    # found an encounter Summary didn't already have, for anyone.
+    encounter_timeline_item_selector: str = "[data-element^='data-table-row-']"
+    encounter_timeline_date_selector: str = "[data-element='encounter-date']"
+    encounter_timeline_type_selector: str = "[data-element='encounter-type']"
+    # No equivalent code/CPT column observed in a live Timeline row -- left
+    # unset (encounter_code just reads blank for timeline-sourced encounters,
+    # which reflects what's actually on the page rather than a bug).
+    encounter_timeline_code_selector: str = ""
+    encounter_timeline_chief_complaint_selector: str = "[data-element='encounter-cc']"
     encounter_soap_title_text: str = "SOAP Note"
+    # Both the Summary "recent encounters" panel and the Timeline page can, for
+    # a patient with enough visit history, render only a subset of encounter
+    # items into the DOM at once -- the same data-table-scroller-style
+    # virtualization already confirmed live for the Schedule table and the
+    # notes dropdown panel (see patient_scraper.scroll_schedule_day_and_collect
+    # and chart_ui.for_each_note_checkbox_scrolled). NOT independently
+    # confirmed live for this specific list either way -- added defensively,
+    # same posture as the notes dropdown fix, after a real live report of an
+    # encounter that exists but wasn't found despite checking both Summary and
+    # Timeline. read_encounters_scrolled falls straight through to the old
+    # one-shot behavior if no scrollable container matching this is found.
+    encounter_list_scroller_selector: str = "[data-element='data-table-scroller']"
 
     download_filename_template: str = (
         "{patient_id}_{appointment_date}_{encounter_id}.pdf"
