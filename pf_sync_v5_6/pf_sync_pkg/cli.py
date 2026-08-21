@@ -1026,10 +1026,24 @@ def run_sync_schedules_by_date(
                 f"{Path(args.queue_json).stem}_sync_schedules_"
                 f"{start_date.isoformat()}_to_{end_date.isoformat()}"
             )
+            # Neither Summary nor Timeline is checked for encounter existence here:
+            # Summary can lag behind Schedule (that lag is this endpoint's reason
+            # to exist), and Timeline hangs PF (got the automation stuck live on
+            # 2026-08-21, same reason nightly never uses it -- see
+            # find_encounter_for_appointment's docstring). Instead we skip straight
+            # to the Print Chart modal and let its own SOAP-note list answer the
+            # question: found for this date -> print it; not found -> fall back to
+            # the most recent note dated on/before the appointment date (never a
+            # future-dated note -- explicit user decision, 2026-08-21, see
+            # chart_ui.select_soap_note_for_date). Still nothing on/before that
+            # date -> record goes to "review" and is retried on a later poll.
+            # full-sync-by-date (line ~794 above) is untouched and still uses the
+            # Summary/Timeline pre-check with no most-recent fallback.
             stages["process"] = process_records_on_page(
                 page, args.queue_json, config, args.downloads_dir,
                 candidates, rows, store, args.limit, args.dry_run, False,
-                manifest_run_id, use_timeline_fallback=True,
+                manifest_run_id, use_timeline_fallback=False, skip_encounter_lookup=True,
+                allow_most_recent_note_fallback=True,
             )
         except Exception as exc:
             stages["process"] = {"error": f"{type(exc).__name__}: {exc}"}

@@ -31,7 +31,15 @@ from pf_sync_pkg.models import (
 from pf_sync_pkg.pdf_render import generate_pdf
 from pf_sync_pkg.chart_ui import all_patient_encounters
 from pf_sync_pkg.store import save_store
-from pf_sync_pkg.utils import clean, is_ignored_status, is_seen_status, normalize_status, now_iso, parse_date
+from pf_sync_pkg.utils import (
+    clean,
+    is_ignored_status,
+    is_seen_status,
+    normalize_status,
+    now_iso,
+    parse_date,
+    require_date,
+)
 
 
 def appointment_time_text(value: str) -> str:
@@ -91,6 +99,12 @@ def appointment_metadata_row(record: QueueRecord) -> Dict[str, str]:
         "provider_name": clean(record.provider),
         "service_location": clean(record.service_location),
         "patient_id": clean(record.ehr_patient_guid),
+        # "" for a real exact-date SOAP note match (every command except
+        # sync-schedules-by-date always leaves this empty); otherwise
+        # "fallback_most_recent_on_or_before:<date>" -- see
+        # chart_ui.select_soap_note_for_date's docstring. Included so a
+        # manifest reviewer can tell a fallback pick apart from an exact match.
+        "soap_note_match_mode": clean(record.soap_note_match_mode),
     }
 
 
@@ -221,6 +235,8 @@ def process_one_record(
     dry_run: bool,
     all_rows: Sequence[QueueRecord] = (),
     use_timeline_fallback: bool = False,
+    skip_encounter_lookup: bool = False,
+    allow_most_recent_note_fallback: bool = False,
 ) -> None:
     started = time.perf_counter()
     original_status = record.status
@@ -242,21 +258,41 @@ def process_one_record(
     except Exception:
         pass
 
-    # Use Timeline fallback for full-sync-by-date; Summary-only for nightly (avoids PF hangs)
-    if use_timeline_fallback:
-        detected = find_encounter_for_appointment_with_timeline_fallback(
-            page, config, record.ehr_patient_guid, record.appointment_date
-        )
+    if skip_encounter_lookup:
+        # sync-schedules-by-date: this patient came straight off the Schedule
+        # page as "seen" -- the Summary "recent encounters" panel can lag
+        # behind reality (that lag is this whole endpoint's reason to exist),
+        # and Timeline hangs PF (see use_timeline_fallback above). Neither is
+        # a reliable "does the chart have this" check. The Print Chart modal's
+        # own SOAP-note list, opened below via select_notes_for_record, IS
+        # reliable -- it's the actual thing we're about to print. So skip the
+        # Summary/Timeline pre-check entirely and let select_notes_for_record's
+        # date-token match against that list be the one source of truth: found
+        # -> print it, not found -> SoapNoteNotFoundError -> record goes to
+        # "review" and is retried on a later poll (i.e. we just skip it for now).
+        requested_date = require_date(record.appointment_date, "appointment date")
+        record.encounter_key = f"print_chart_notes:{record.ehr_patient_guid}:{requested_date.isoformat()}"
+        record.encounter_date = requested_date.isoformat()
+        record.encounter_type = ""
+        record.encounter_code = ""
+        record.encounter_chief_complaint = ""
+        record.encounter_source = "print_chart_notes"
     else:
-        detected = find_encounter_for_appointment(
-            page, config, record.ehr_patient_guid, record.appointment_date
-        )
-    record.encounter_key = detected.encounter_key
-    record.encounter_date = detected.encounter_date
-    record.encounter_type = detected.encounter_type
-    record.encounter_code = detected.encounter_code
-    record.encounter_chief_complaint = detected.chief_complaint
-    record.encounter_source = detected.source
+        # Use Timeline fallback for full-sync-by-date; Summary-only for nightly (avoids PF hangs)
+        if use_timeline_fallback:
+            detected = find_encounter_for_appointment_with_timeline_fallback(
+                page, config, record.ehr_patient_guid, record.appointment_date
+            )
+        else:
+            detected = find_encounter_for_appointment(
+                page, config, record.ehr_patient_guid, record.appointment_date
+            )
+        record.encounter_key = detected.encounter_key
+        record.encounter_date = detected.encounter_date
+        record.encounter_type = detected.encounter_type
+        record.encounter_code = detected.encounter_code
+        record.encounter_chief_complaint = detected.chief_complaint
+        record.encounter_source = detected.source
 
     if "/summary" not in (page.url or ""):
         page.goto(summary_url, wait_until="domcontentloaded")
@@ -269,7 +305,7 @@ def process_one_record(
         else ""
     )
     notes_mode, record.selected_soap_note_text = select_notes_for_record(
-        page, config, record, all_rows
+        page, config, record, all_rows, allow_most_recent_note_fallback
     )
     record.notes_selection_mode = notes_mode
     record.pdf_path = generate_pdf(page, config, record, downloads_dir, dry_run)
@@ -333,6 +369,8 @@ def process_records_on_page(
     exact_refresh: bool = False,
     manifest_run_id: str = "",
     use_timeline_fallback: bool = False,
+    skip_encounter_lookup: bool = False,
+    allow_most_recent_note_fallback: bool = False,
 ) -> Dict[str, int]:
     """manifest_run_id: pass the same value across multiple process() calls that
     belong to one logical pull (e.g. a date-scoped run that got interrupted and
@@ -379,6 +417,8 @@ def process_records_on_page(
                 dry_run,
                 all_rows,
                 use_timeline_fallback,
+                skip_encounter_lookup,
+                allow_most_recent_note_fallback,
             )
             if dry_run:
                 counts["validated"] += 1

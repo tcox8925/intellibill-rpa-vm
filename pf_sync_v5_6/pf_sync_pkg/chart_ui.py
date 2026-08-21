@@ -3,7 +3,7 @@
 import hashlib
 import re
 import time
-from datetime import date
+from datetime import date, datetime
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 from playwright.sync_api import Locator, Page
@@ -1062,7 +1062,36 @@ def clear_all_notes(page: Page, config: SyncConfig) -> None:
     for_each_note_checkbox_scrolled(page, config, uncheck_if_checked)
 
 
-def select_soap_note_for_date(page: Page, config: SyncConfig, appointment_date: str) -> str:
+def parse_note_label_date(text: str, formats: Iterable[str]) -> Optional[date]:
+    """Best-effort date extraction from a note checkbox's display text, e.g.
+    '07/08/26 (SOAP Note)' -> date(2026, 7, 8). Used only by the most-recent
+    fallback below to rank candidate notes -- note_date_tokens (above) does the
+    reverse job (date -> text tokens to search for) for the normal exact-match
+    path and is not reused here since it builds search tokens, not a parseable
+    single date string."""
+    candidates = re.findall(
+        r"\d{1,2}/\d{1,2}/\d{2,4}|\d{4}-\d{2}-\d{2}|[A-Za-z]{3,9}\.?\s+\d{1,2},?\s+\d{4}",
+        text,
+    )
+    for candidate in candidates:
+        for fmt in formats:
+            try:
+                return datetime.strptime(clean(candidate).rstrip(","), fmt).date()
+            except ValueError:
+                continue
+    return None
+
+
+def select_soap_note_for_date(
+    page: Page,
+    config: SyncConfig,
+    appointment_date: str,
+    allow_most_recent_fallback: bool = False,
+) -> Tuple[str, str]:
+    """Returns (selected_note_text, match_mode). match_mode is "exact" for a
+    real appointment-date match, or "fallback_most_recent_on_or_before:<date>"
+    when allow_most_recent_fallback picked a substitute -- see that param's
+    docstring below."""
     # clear_all_notes already opens the dropdown itself -- open_notes_dropdown
     # is a plain toggle-click, so calling it again here would CLOSE what
     # clear_all_notes just opened instead of opening it.
@@ -1087,16 +1116,51 @@ def select_soap_note_for_date(page: Page, config: SyncConfig, appointment_date: 
     # isn't missed just because it wasn't rendered yet without scrolling --
     # see for_each_note_checkbox_scrolled.
     for_each_note_checkbox_scrolled(page, config, check_if_matches)
-    if not selected:
+    if selected:
+        if notes_selection_is_empty(page, config):
+            raise SoapNoteNotFoundError(
+                "SOAP_NOTE_SELECTION_NOT_APPLIED: matching notes were clicked but the "
+                f"toggle still reads {notes_toggle_label(page, config)!r}."
+            )
+        return " | ".join(selected), "exact"
+
+    if not allow_most_recent_fallback:
         raise SoapNoteNotFoundError(
             f"SOAP_NOTE_NOT_FOUND_FOR_DATE: appointment_date={appointment_date}; tried={tokens}"
         )
+
+    # No exact-date note exists. sync-schedules-by-date opts into this fallback
+    # (2026-08-21, explicit user decision) so a patient who was actually seen
+    # per the Schedule but whose SOAP note landed under an earlier date (e.g.
+    # documented late, or dated to a prior encounter) still gets a facesheet
+    # instead of sitting in review forever. NEVER picks a note dated after the
+    # appointment -- that would attach a future encounter to this visit, which
+    # is exactly the "different-date facesheet" mistake this endpoint's exact-
+    # date guarantee exists to prevent. Only reaches here after the exact-match
+    # pass above found nothing.
+    requested_date = require_date(appointment_date, "appointment date")
+    candidates: List[Tuple[date, str, Locator]] = []
+
+    def collect_candidate(checkbox: Locator, text: str) -> None:
+        note_date = parse_note_label_date(text, config.note_date_formats)
+        if note_date is not None and note_date <= requested_date:
+            candidates.append((note_date, clean(text), checkbox))
+
+    for_each_note_checkbox_scrolled(page, config, collect_candidate)
+    if not candidates:
+        raise SoapNoteNotFoundError(
+            "SOAP_NOTE_NOT_FOUND_FOR_DATE_OR_EARLIER: "
+            f"appointment_date={appointment_date}; no note dated on/before it exists"
+        )
+    candidates.sort(key=lambda item: item[0])
+    best_date, best_text, best_checkbox = candidates[-1]
+    ensure_checked(best_checkbox, f"note option {best_text[:60]!r}")
     if notes_selection_is_empty(page, config):
         raise SoapNoteNotFoundError(
-            "SOAP_NOTE_SELECTION_NOT_APPLIED: matching notes were clicked but the toggle "
+            "SOAP_NOTE_SELECTION_NOT_APPLIED: fallback note was clicked but the toggle "
             f"still reads {notes_toggle_label(page, config)!r}."
         )
-    return " | ".join(selected)
+    return best_text, f"fallback_most_recent_on_or_before:{best_date.isoformat()}"
 
 
 def resolve_notes_mode(
@@ -1129,16 +1193,24 @@ def select_notes_for_record(
     config: SyncConfig,
     record: QueueRecord,
     all_rows: Sequence[QueueRecord],
+    allow_most_recent_note_fallback: bool = False,
 ) -> Tuple[str, str]:
     mode = resolve_notes_mode(record, config, all_rows)
     if mode == "all":
         print("  notes: explicit all-notes override enabled", flush=True)
+        record.soap_note_match_mode = ""
         return mode, select_all_notes(page, config)
     print(
         f"  notes: selecting SOAP notes dated {record.appointment_date}",
         flush=True,
     )
-    return mode, select_soap_note_for_date(page, config, record.appointment_date)
+    note_text, match_mode = select_soap_note_for_date(
+        page, config, record.appointment_date, allow_most_recent_note_fallback
+    )
+    record.soap_note_match_mode = match_mode
+    if match_mode != "exact":
+        print(f"  notes: no exact-date note; used fallback -> {match_mode}", flush=True)
+    return mode, note_text
 
 
 def format_pdf_name(record: QueueRecord, config: SyncConfig) -> str:

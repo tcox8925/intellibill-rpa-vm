@@ -65,6 +65,14 @@ class QueueRecord:
     processed_at: str = ""
 
     selected_soap_note_text: str = ""
+    # v5.20 (sync-schedules-by-date only): "exact" when the printed SOAP note was
+    # dated exactly the appointment date, or "fallback_most_recent_on_or_before:<date>"
+    # when no exact-date note existed and select_soap_note_for_date instead picked the
+    # most recent note dated on/before the appointment date (never a future-dated note --
+    # see chart_ui.select_soap_note_for_date's docstring). Empty for every other command,
+    # which never enables this fallback. Kept distinct from selected_soap_note_text so a
+    # manifest reviewer can tell an exact match from a fallback pick at a glance.
+    soap_note_match_mode: str = ""
     # v5.5: record what was actually printed, so a chart PDF can be audited after the
     # fact without re-driving the browser.
     selected_sections: List[str] = field(default_factory=list)

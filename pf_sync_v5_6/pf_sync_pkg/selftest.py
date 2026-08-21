@@ -349,6 +349,7 @@ def run_self_test() -> int:
             "provider_name": "Test Provider M.D",
             "service_location": "Self Test Clinic",
             "patient_id": "11111111-1111-1111-1111-111111111111",
+            "soap_note_match_mode": "",
         }, metadata_row
         # An appointment_id field was tried and removed the same day (2026-08-11) --
         # confirmed live PF never supplies one for this account anywhere reachable.
