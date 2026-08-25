@@ -68,6 +68,31 @@ def _resolve_db_password() -> str:
 
 
 def _connect():
+    """2026-08-25: psycopg2.connect() used to carry no timeout at all -- a
+    network hiccup to Azure Postgres left it hanging indefinitely (confirmed
+    live: a facesheet-pull-by-date dry run sat blocked, 0% CPU, for 5+
+    minutes inside ingest's save_store() call, with no error and no way to
+    tell "hung" apart from "just slow"). connect_timeout bounds how long the
+    TCP+SSL handshake itself can take; statement_timeout (set server-side via
+    `options`, applies for the lifetime of this connection) bounds how long
+    any single query can run once connected, so a slow/locked query on the
+    ~600+ row queue table fails loudly instead of hanging the whole pipeline.
+    Every caller (load_store/save_store/save_row/append_run/finish_run)
+    already wraps its DB work in try/except, so a timeout here surfaces as a
+    normal, visible error -- not a new failure mode, just a bounded one.
+
+    idle_in_transaction_session_timeout added the same day after confirming
+    the SAME kind of stuck connection twice in a row -- once from a process
+    this session itself killed mid-transaction, and once from something else
+    entirely (this DB is shared with other integrations, e.g. the EDI_Tebra
+    schema's own traffic) that left a connection idle-in-transaction on
+    ehr_pf_queue_rows with no code on this side involved at all. Clearing
+    that manually via pg_terminate_backend is a one-off fix, not a real one --
+    this makes Postgres itself kill ANY connection (ours or anyone else's on
+    this shared DB) that goes idle-in-transaction for more than 20s, so a
+    stuck lock on this table self-heals instead of silently blocking every
+    write behind it until someone notices and intervenes by hand.
+    """
     host = os.environ.get("RCM_DB_HOST", "").strip()
     dbname = os.environ.get("RCM_DB_NAME", "").strip()
     user = os.environ.get("RCM_DB_USER", "").strip()
@@ -77,7 +102,9 @@ def _connect():
             "store. Set them in .env."
         )
     return psycopg2.connect(
-        host=host, dbname=dbname, user=user, password=_resolve_db_password(), sslmode="require"
+        host=host, dbname=dbname, user=user, password=_resolve_db_password(), sslmode="require",
+        connect_timeout=10,
+        options="-c statement_timeout=20000 -c idle_in_transaction_session_timeout=20000",
     )
 
 
@@ -122,6 +149,109 @@ _UPSERT_ROW_SQL = f"""
         {_UPDATE_ASSIGNMENTS},
         db_updated_at = now()
 """
+
+
+def save_row(path: str, record: "QueueRecord") -> None:
+    """Persist ONE row without touching the rest of the queue -- the cheap
+    per-record counterpart to save_store's full-queue reconciliation.
+
+    save_store's own docstring explains why the full version exists (mirrors
+    the old JSON file's whole-file-overwrite semantics, including dropping
+    rows no longer present). That reconciliation is only actually needed when
+    the ROW SET changes (ingest, reset_existing, etc.) -- not after every
+    single record process_records_on_page finishes, where the row set never
+    changes mid-run, only that one record's own fields do. Calling the full
+    save_store there meant re-upserting the ENTIRE queue (hundreds of rows,
+    one at a time, over a freshly opened Postgres connection) after every
+    single PDF generated -- confirmed as the dominant "stuck after printing"
+    cost in the 2026-08-25 perf investigation. This upserts just the one row.
+
+    Callers that need the full-queue reconciliation (ingest, queue_admin,
+    etc. -- anywhere the ROW SET itself changes) should keep calling
+    save_store, not this. process_records_on_page's end-of-batch call does
+    NOT need it (see save_meta_and_runs below) -- every row it touched was
+    already persisted individually via this function during the loop.
+    """
+    queue_key = _queue_key(path)
+    conn = _connect()
+    try:
+        cur = conn.cursor()
+        cur.execute(_UPSERT_ROW_SQL, _row_to_params(queue_key, asdict(record)))
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+def save_meta_and_runs(path: str, store: Dict[str, Any]) -> None:
+    """Persist just the meta (schema_version/patient_mappings) and run-history
+    tables -- deliberately NOT the rows table at all.
+
+    2026-08-25: process_records_on_page used to call the full save_store()
+    once after its batch loop, to catch up meta/counts/runs once every row
+    had already been persisted individually via save_row() during the loop
+    itself. That "just meta/runs" intent still re-upserted the ENTIRE queue
+    (confirmed live: 700+ rows, one INSERT per row in one transaction) since
+    save_store doesn't know to skip the rows table -- and on a busy run, one
+    single row's INSERT inside that redundant re-upsert took long enough to
+    hit statement_timeout and fail the whole batch's reconciliation, even
+    though every row was already correctly saved. This does only the two
+    cheap things that call actually needed.
+    """
+    queue_key = _queue_key(path)
+    conn = _connect()
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            f"""
+            INSERT INTO {META_TABLE} (queue_key, schema_version, patient_mappings, updated_at)
+            VALUES (%s, %s, %s, now())
+            ON CONFLICT (queue_key) DO UPDATE SET
+                schema_version = EXCLUDED.schema_version,
+                patient_mappings = EXCLUDED.patient_mappings,
+                updated_at = now()
+            """,
+            (
+                queue_key,
+                store.get("schema_version", 3),
+                psycopg2.extras.Json(store.get("patient_mappings", [])),
+            ),
+        )
+        for run in list(store.get("runs", []))[-100:]:
+            details = {
+                k: v
+                for k, v in run.items()
+                if k not in {"run_id", "command", "status", "started_at", "finished_at"}
+            }
+            cur.execute(
+                f"""
+                INSERT INTO {RUNS_TABLE} (run_id, queue_key, command, status, started_at, finished_at, details)
+                VALUES (%s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (run_id) DO UPDATE SET
+                    command = EXCLUDED.command,
+                    status = EXCLUDED.status,
+                    started_at = EXCLUDED.started_at,
+                    finished_at = EXCLUDED.finished_at,
+                    details = EXCLUDED.details
+                """,
+                (
+                    run.get("run_id"),
+                    queue_key,
+                    run.get("command"),
+                    run.get("status"),
+                    run.get("started_at") or None,
+                    run.get("finished_at") or None,
+                    psycopg2.extras.Json(details),
+                ),
+            )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
 
 
 def atomic_write_json(path: str, payload: Any) -> None:

@@ -30,7 +30,12 @@ from pf_sync_pkg.matching import (
     select_queue_rows,
 )
 from pf_sync_pkg.models import AppointmentReportConfig, SyncConfig
-from pf_sync_pkg.pdf_pipeline import default_process_candidates, full_sync_on_page, process_records_on_page
+from pf_sync_pkg.pdf_pipeline import (
+    default_process_candidates,
+    full_sync_on_page,
+    process_records_concurrently,
+    process_records_on_page,
+)
 from pf_sync_pkg.queue_admin import queue_status, reset_rows
 from pf_sync_pkg.refresh import refresh_patient_latest_on_page
 from pf_sync_pkg.report_pull import pull_appointment_report_on_page
@@ -125,6 +130,25 @@ def browser_command_wrapper(args: argparse.Namespace, callback):
         playwright, context, page = build_browser(args)
         page = wait_for_pf_login(context, page, args)
         return callback(page)
+    finally:
+        if playwright is not None and context is not None and page is not None:
+            close_browser(args, playwright, context, page)
+
+
+def browser_command_wrapper_with_context(args: argparse.Namespace, callback):
+    """Same as browser_command_wrapper, but also hands the callback the
+    BrowserContext -- only needed by callers that open extra tabs of their
+    own (context.new_page()) for concurrent processing, e.g.
+    run_facesheet_pull_by_date's retry pass. Left as a separate function
+    rather than changing browser_command_wrapper's signature so the other six
+    single-tab commands (process/nightly/refresh/full-sync/full-sync-by-date/
+    sync-schedules-by-date) are untouched."""
+    require_browser_args(args)
+    playwright = context = page = None
+    try:
+        playwright, context, page = build_browser(args)
+        page = wait_for_pf_login(context, page, args)
+        return callback(page, context)
     finally:
         if playwright is not None and context is not None and page is not None:
             close_browser(args, playwright, context, page)
@@ -313,6 +337,14 @@ def build_parser() -> argparse.ArgumentParser:
     facesheet_pull_by_date.add_argument("--include-failed", action="store_true")
     facesheet_pull_by_date.add_argument("--fuzzy-threshold", type=float, default=0.82)
     facesheet_pull_by_date.add_argument("--dob-match-threshold", type=float, default=0.85)
+    facesheet_pull_by_date.add_argument(
+        "--retry-concurrency", type=int, default=3,
+        help=(
+            "Extra Chrome tabs (same logged-in session) to run the failed/review retry pass "
+            "across concurrently. 1 = today's single-tab behavior. Not yet validated against "
+            "PF's own tolerance for simultaneous tabs -- keep this small (2-3) until proven out."
+        ),
+    )
     add_report_dates(facesheet_pull_by_date)
     add_browser_arguments(facesheet_pull_by_date)
 
@@ -343,6 +375,14 @@ def build_parser() -> argparse.ArgumentParser:
              "scans [today - lookback_days, today] instead of just today, so a patient "
              "missed on a prior day still gets caught on a later call. Explicit dates "
              "always win over this default.",
+    )
+    sync_schedules_by_date.add_argument(
+        "--retry-concurrency", type=int, default=3,
+        help=(
+            "Extra Chrome tabs (same logged-in session) to run the failed/review retry pass "
+            "across concurrently. 1 = single-tab behavior. Not yet validated against PF's own "
+            "tolerance for simultaneous tabs -- keep this small (2-3) until proven out."
+        ),
     )
     add_report_dates(sync_schedules_by_date)
     add_browser_arguments(sync_schedules_by_date)
@@ -887,7 +927,7 @@ def run_sync_schedules_by_date(
     schedule_config = ScheduleScrapeConfig.load(getattr(args, "schedule_config_json", ""))
     stages: dict = {}
 
-    def callback(page: Page):
+    def callback(page: Page, context):
         nonlocal config
         config = config or build_full_sync_by_date_config(args)
 
@@ -1048,6 +1088,34 @@ def run_sync_schedules_by_date(
         except Exception as exc:
             stages["process"] = {"error": f"{type(exc).__name__}: {exc}"}
 
+        # Retry failed/review rows from THIS run immediately, same run, before
+        # the zip goes out -- otherwise a row that failed here just sits until
+        # someone happens to trigger a whole new run. Run across a few extra
+        # tabs (context.new_page(), same logged-in session) concurrently --
+        # see process_records_concurrently's docstring for why this is safe.
+        # Bounded to one retry pass: a row that fails again goes out as
+        # failed/review in the response same as today, to be picked up by the
+        # next scheduled run rather than looping here indefinitely.
+        try:
+            store = load_store(args.queue_json)
+            rows = store_rows(store)
+            retry_candidates = [r for r in rows if r.status in {"failed", "review"}]
+            if retry_candidates:
+                print(
+                    f"Retrying {len(retry_candidates)} failed/review row(s) from this run "
+                    f"across up to {args.retry_concurrency} tab(s) before upload...",
+                    flush=True,
+                )
+                stages["process_retry"] = process_records_concurrently(
+                    context, args.queue_json, config, args.downloads_dir,
+                    retry_candidates, rows, store, manifest_run_id,
+                    use_timeline_fallback=False, skip_encounter_lookup=True,
+                    allow_most_recent_note_fallback=True, dry_run=args.dry_run,
+                    concurrency=args.retry_concurrency,
+                )
+        except Exception as exc:
+            stages["process_retry"] = {"error": f"{type(exc).__name__}: {exc}"}
+
         if args.dry_run:
             stages["rcm_upload"] = {"skipped": True, "reason": "dry_run=True -- no PDFs were generated"}
         else:
@@ -1071,7 +1139,7 @@ def run_sync_schedules_by_date(
 
         return stages
 
-    return browser_command_wrapper(args, callback)
+    return browser_command_wrapper_with_context(args, callback)
 
 
 def _registry_row_from_report_patient(rp) -> Dict[str, Any]:
@@ -1140,7 +1208,7 @@ def run_facesheet_pull_by_date(args: argparse.Namespace) -> dict:
     manifest_run_id = f"{Path(args.queue_json).stem}_{start_date.isoformat()}_to_{end_date.isoformat()}"
     stages: dict = {}
 
-    def callback(page: Page):
+    def callback(page: Page, context):
         discovered = ps.discover_via_schedule_range(page, start_date, end_date)
         stages["discover"] = {"method": "schedule_range", "unique_patients": len(discovered)}
         registry = [
@@ -1194,17 +1262,55 @@ def run_facesheet_pull_by_date(args: argparse.Namespace) -> dict:
             store = load_store(args.queue_json)
             rows = store_rows(store)
             candidates = default_process_candidates(rows, args.include_failed)
+            # skip_encounter_lookup=True: same reasoning as sync-schedules-by-date
+            # above -- Summary's "recent encounters" panel can lag behind a
+            # patient who was genuinely just seen, and when it does, the old
+            # Summary/Timeline pre-check raised EncounterNotFoundError before
+            # Print Chart was ever opened, dropping the facesheet entirely for
+            # a visit that WAS in Print Chart's own note list all along
+            # (2026-08-25 fix). allow_most_recent_note_fallback is left at its
+            # default False -- exact date or skip, never a substitute-date note.
             stages["process"] = process_records_on_page(
                 page, args.queue_json, config, args.downloads_dir,
                 candidates, rows, store, args.limit, args.dry_run, False,
-                manifest_run_id,
+                manifest_run_id, use_timeline_fallback=False, skip_encounter_lookup=True,
+                allow_most_recent_note_fallback=True,
             )
         except Exception as exc:
             stages["process"] = {"error": f"{type(exc).__name__}: {exc}"}
 
+        # Retry failed/review rows from THIS run immediately, same run, before
+        # the zip goes out -- otherwise a row that failed here just sits until
+        # someone happens to trigger a whole new run. Run across a few extra
+        # tabs (context.new_page(), same logged-in session) concurrently
+        # rather than one more slow serial pass -- see
+        # process_records_concurrently's docstring for why this is safe.
+        # Bounded to one retry pass: a row that fails again goes out as
+        # failed/review in the response same as today, to be picked up by the
+        # next scheduled run rather than looping here indefinitely.
+        try:
+            store = load_store(args.queue_json)
+            rows = store_rows(store)
+            retry_candidates = [r for r in rows if r.status in {"failed", "review"}]
+            if retry_candidates:
+                print(
+                    f"Retrying {len(retry_candidates)} failed/review row(s) from this run "
+                    f"across up to {args.retry_concurrency} tab(s) before upload...",
+                    flush=True,
+                )
+                stages["process_retry"] = process_records_concurrently(
+                    context, args.queue_json, config, args.downloads_dir,
+                    retry_candidates, rows, store, manifest_run_id,
+                    use_timeline_fallback=False, skip_encounter_lookup=True,
+                    allow_most_recent_note_fallback=True, dry_run=args.dry_run,
+                    concurrency=args.retry_concurrency,
+                )
+        except Exception as exc:
+            stages["process_retry"] = {"error": f"{type(exc).__name__}: {exc}"}
+
         return stages
 
-    return browser_command_wrapper(args, callback)
+    return browser_command_wrapper_with_context(args, callback)
 
 
 def main() -> int:

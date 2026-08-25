@@ -382,12 +382,32 @@ def pull_appointment_report_on_page(
         raise ValueError("start_date cannot be after end_date")
 
     try:
-        reports = page.locator(config.reports_menu_selector).first
-        reports.wait_for(state="visible", timeout=DEFAULT_TIMEOUT)
-        reports.click()
-        report_link = page.locator(config.appointment_report_link_selector).first
-        report_link.wait_for(state="visible", timeout=DEFAULT_TIMEOUT)
-        report_link.click()
+        # 2026-08-25 fix: this used to unconditionally click Reports -> the
+        # Appointment & Eligibility Report link, assuming every call starts
+        # from somewhere else in PF. But the Chrome profile this automation
+        # reuses stays logged in AND on whatever page the last run left it
+        # on -- if a prior call already navigated here, the SPA doesn't
+        # necessarily re-render that link the same way (or the Reports menu
+        # click toggles an already-open state closed instead), and
+        # report_link.wait_for() timed out waiting for a link that was never
+        # going to appear -- confirmed live via a diagnostic HTML/PNG capture
+        # showing the browser already sitting on "Appointment & eligibility
+        # report" with a live rows table when this "timeout" fired. Check
+        # for the page's own real signal (the start-date input, the actual
+        # thing this function needs) FIRST, and only drive the menu/link
+        # click sequence if it's not already there.
+        already_on_report = first_visible_locator(
+            page, [config.report_start_date_selector], timeout_ms=1_500
+        )
+        if already_on_report is None:
+            reports = page.locator(config.reports_menu_selector).first
+            reports.wait_for(state="visible", timeout=DEFAULT_TIMEOUT)
+            reports.click()
+            report_link = page.locator(config.appointment_report_link_selector).first
+            report_link.wait_for(state="visible", timeout=DEFAULT_TIMEOUT)
+            report_link.click()
+        else:
+            print("  Appointment report page already open; skipping Reports menu navigation.", flush=True)
 
         page.locator(config.report_start_date_selector).first.wait_for(
             state="visible", timeout=DEFAULT_TIMEOUT

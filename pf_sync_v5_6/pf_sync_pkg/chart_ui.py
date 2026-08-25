@@ -579,7 +579,17 @@ def select_facesheet_sections(page: Page, config: SyncConfig, modal: Optional[Lo
         checkbox = modal.locator(selector).first
         if checkbox.count() == 0:
             raise RuntimeError(f"Facesheet checkbox not found in the modal: {selector}")
+        # Diagnostic timing added 2026-08-25: set_checkbox_state (called via
+        # ensure_checked below) tries up to 5 fallback tiers, each with its
+        # own SHORT_TIMEOUT=5s budget -- a checkbox that misses the first,
+        # fast tier can silently cost several seconds before printing even
+        # starts. This makes that visible per-checkbox instead of only as a
+        # single opaque total.
+        started = time.perf_counter()
         ensure_checked(checkbox, selector)
+        elapsed = time.perf_counter() - started
+        flag = " <-- SLOW" if elapsed > 1.0 else ""
+        print(f"  [facesheet-checkbox] {selector} checked in {elapsed:.3f}s{flag}", flush=True)
         selected.append(selector)
 
     intended = set()
@@ -942,26 +952,43 @@ def for_each_note_checkbox_scrolled(
             if text:
                 visit(checkbox, text)
 
+    # Diagnostic logging added 2026-08-25: this function's own docstring above
+    # admits the scroll-reveal path was never independently confirmed live --
+    # these print()s turn "is the scroll actually working" from a guess into
+    # something visible in every run's console output. Zero behavior change,
+    # logging only.
+    initial_count = len(note_option_checkboxes(page, config))
+    print(f"  [notes-scroll] initial checkbox count={initial_count}", flush=True)
     visit_current()
 
     panel = _note_dropdown_panel(page, config)
     if panel is None:
+        print("  [notes-scroll] no scrollable panel found (_note_dropdown_panel returned "
+              "None) -- relying on the single un-scrolled pass above only", flush=True)
         return
     try:
         scroll_height = panel.evaluate("el => el.scrollHeight")
         client_height = panel.evaluate("el => el.clientHeight")
-    except Exception:
+    except Exception as exc:
+        print(f"  [notes-scroll] could not read panel scrollHeight/clientHeight: "
+              f"{type(exc).__name__}: {exc}", flush=True)
         return
     if not scroll_height or not client_height or scroll_height <= client_height + 5:
+        print(f"  [notes-scroll] panel not scrollable (scrollHeight={scroll_height}, "
+              f"clientHeight={client_height}) -- nothing more to reveal", flush=True)
         return  # Not actually scrollable -- nothing more to reveal.
 
+    print(f"  [notes-scroll] panel IS scrollable (scrollHeight={scroll_height}, "
+          f"clientHeight={client_height}) -- scrolling to reveal more notes...", flush=True)
     try:
         panel.evaluate("el => { el.scrollTop = 0; }")
         time.sleep(0.15)
-    except Exception:
+    except Exception as exc:
+        print(f"  [notes-scroll] failed to reset scrollTop to 0: {type(exc).__name__}: {exc}", flush=True)
         return
 
     stuck = 0
+    steps = 0
     for _ in range(max_scrolls):
         try:
             old_top = panel.evaluate("el => el.scrollTop")
@@ -971,11 +998,19 @@ def for_each_note_checkbox_scrolled(
             time.sleep(0.2)
             new_top = panel.evaluate("el => el.scrollTop")
             max_top = panel.evaluate("el => el.scrollHeight - el.clientHeight")
-        except Exception:
+        except Exception as exc:
+            print(f"  [notes-scroll] scroll step {steps + 1} failed: {type(exc).__name__}: {exc}", flush=True)
             break
+        steps += 1
+        before = len(note_option_checkboxes(page, config))
         visit_current()
+        after = len(note_option_checkboxes(page, config))
+        print(f"  [notes-scroll] step {steps}: scrollTop {old_top}->{new_top} (max={max_top}), "
+              f"checkbox count {before}->{after}", flush=True)
         stuck = stuck + 1 if new_top == old_top else 0
         if stuck >= 2 or int(new_top) >= int(max_top) - 5:
+            print(f"  [notes-scroll] stopping after {steps} step(s) (stuck={stuck}, "
+                  f"final checkbox count={after})", flush=True)
             break
 
 

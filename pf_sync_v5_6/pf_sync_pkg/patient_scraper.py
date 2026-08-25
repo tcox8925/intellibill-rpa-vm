@@ -1166,10 +1166,31 @@ def scroll_schedule_day_and_collect(
     PF's markup doesn't match), falls back to a single plain
     scrape_schedule_day call -- unchanged behavior from before this existed.
     """
+    # Diagnostic logging added 2026-08-25: schedule_table_scroller_selector
+    # (models.py) was never independently confirmed against the live Schedule
+    # DOM -- "very likely the same component" per its own comment, not proven.
+    # These print()s make that visible in every run's console output instead
+    # of silently under-scraping a busy day. Zero behavior change otherwise.
     config = config or ScheduleScrapeConfig()
     scroller = page.query_selector(config.schedule_table_scroller_selector)
     if scroller is None:
-        return scrape_schedule_day(page, config)
+        fallback = scrape_schedule_day(page, config)
+        print(f"  [schedule-scroll] scroller selector {config.schedule_table_scroller_selector!r} "
+              f"not found on this day's Schedule -- falling back to ONE unscrolled scrape "
+              f"({len(fallback)} row(s)). If the real day has more appointments than that, "
+              f"this selector is stale/wrong and rows below the fold are being silently dropped.",
+              flush=True)
+        return fallback
+
+    try:
+        scroll_height = scroller.evaluate("el => el.scrollHeight")
+        client_height = scroller.evaluate("el => el.clientHeight")
+        print(f"  [schedule-scroll] scroller found (scrollHeight={scroll_height}, "
+              f"clientHeight={client_height}, scrollable={scroll_height > client_height + 5})",
+              flush=True)
+    except Exception as exc:
+        print(f"  [schedule-scroll] found scroller but could not read its dimensions: "
+              f"{type(exc).__name__}: {exc}", flush=True)
 
     try:
         scroller.evaluate("el => { el.scrollTop = 0; }")
@@ -1180,6 +1201,7 @@ def scroll_schedule_day_and_collect(
     collected: Dict[str, ReportPatient] = {}
     last_seen_size = -1
     stuck = 0
+    steps = 0
 
     for _ in range(max_scrolls):
         for row in scrape_schedule_day(page, config):
@@ -1188,7 +1210,11 @@ def scroll_schedule_day_and_collect(
                 collected[key] = row
 
         size = len(collected)
+        steps += 1
+        print(f"  [schedule-scroll] step {steps}: collected={size}"
+              + (f" (expected={expected})" if expected is not None else ""), flush=True)
         if expected is not None and size >= expected:
+            print(f"  [schedule-scroll] reached expected count ({size} >= {expected}), stopping", flush=True)
             break
         if size == last_seen_size:
             stuck += 1
@@ -1202,12 +1228,18 @@ def scroll_schedule_day_and_collect(
             time.sleep(0.25)
             new_top = scroller.evaluate("el => el.scrollTop")
             max_top = scroller.evaluate("el => el.scrollHeight - el.clientHeight")
-        except Exception:
+        except Exception as exc:
+            print(f"  [schedule-scroll] scroll step {steps} failed: {type(exc).__name__}: {exc}", flush=True)
             break
 
         at_bottom = int(new_top) >= int(max_top) - 5 or int(new_top) == int(old_top)
         if at_bottom and stuck >= 2:
+            print(f"  [schedule-scroll] stopping after {steps} step(s): at_bottom={at_bottom}, "
+                  f"stuck={stuck}, final collected={size}", flush=True)
             break
+        if steps >= max_scrolls:
+            print(f"  [schedule-scroll] WARNING: hit max_scrolls={max_scrolls} without settling "
+                  f"-- collected={size} may still be incomplete", flush=True)
 
     return list(collected.values())
 

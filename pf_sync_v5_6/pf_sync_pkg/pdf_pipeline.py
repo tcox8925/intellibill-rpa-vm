@@ -1,8 +1,10 @@
 """Per-record PDF generation pipeline: metadata manifest, one-record processing, batch loops."""
 
 import re
+import threading
 import time
 import uuid
+from dataclasses import asdict
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence
@@ -30,7 +32,7 @@ from pf_sync_pkg.models import (
 )
 from pf_sync_pkg.pdf_render import generate_pdf
 from pf_sync_pkg.chart_ui import all_patient_encounters
-from pf_sync_pkg.store import save_store
+from pf_sync_pkg.store import save_meta_and_runs, save_row, save_store
 from pf_sync_pkg.utils import (
     clean,
     is_ignored_status,
@@ -394,7 +396,7 @@ def process_records_on_page(
             record.status_reason = f"ignored_appointment_status:{normalize_status(record.appointment_status)}"
             record.updated_at = now_iso()
             counts["ignored"] += 1
-            save_store(queue_json, store, all_rows)
+            save_row(queue_json, record)
             print("  ignored", flush=True)
             continue
         if record.patient_match_status != "matched" or not record.ehr_patient_guid:
@@ -403,7 +405,7 @@ def process_records_on_page(
             record.message = "Patient ID/GUID must be resolved before encounter processing."
             record.updated_at = now_iso()
             counts["needs_attention"] += 1
-            save_store(queue_json, store, all_rows)
+            save_row(queue_json, record)
             print("  needs_attention: patient not resolved", flush=True)
             continue
         try:
@@ -441,7 +443,25 @@ def process_records_on_page(
             # v5.4: always tear the Print Chart modal down so a record that failed inside
             # the modal cannot leave it open over the next patient's chart.
             close_print_chart(page, config)
-            save_store(queue_json, store, all_rows)
+            # save_row, not save_store: this fires after EVERY record, so it
+            # must stay cheap -- one row upserted, not the whole queue
+            # rewritten (2026-08-25 perf fix, see save_row's docstring).
+            save_row(queue_json, record)
+    # save_meta_and_runs, not save_store: every row in this batch was already
+    # persisted individually above via save_row -- re-upserting the entire
+    # queue again here (save_store's normal behavior) is pure waste and, on
+    # a busy DB, risks a single row's re-insert alone hitting
+    # statement_timeout and failing this reconciliation for no reason (both
+    # confirmed live, 2026-08-25). This updates only what actually still
+    # needs it: in-memory counts for this store dict, plus meta/run-history
+    # in the DB.
+    store["rows"] = [asdict(row) for row in all_rows]
+    counts_by_status: Dict[str, int] = {}
+    for row in all_rows:
+        counts_by_status[row.status or "unknown"] = counts_by_status.get(row.status or "unknown", 0) + 1
+    store["counts"] = counts_by_status
+    store["updated_at"] = now_iso()
+    save_meta_and_runs(queue_json, store)
     if metadata_manifest_path:
         print(f"Metadata manifest: {metadata_manifest_path}", flush=True)
     # Exposed so callers (e.g. cli.run_full_sync_by_date's zip/upload stage) can
@@ -449,6 +469,98 @@ def process_records_on_page(
     # previously only printed to stdout, never returned.
     counts["metadata_manifest_path"] = metadata_manifest_path
     return counts
+
+
+def process_records_concurrently(
+    context,
+    queue_json: str,
+    config: SyncConfig,
+    downloads_dir: str,
+    candidates: Sequence[QueueRecord],
+    all_rows: List[QueueRecord],
+    store: Dict[str, Any],
+    manifest_run_id: str = "",
+    use_timeline_fallback: bool = False,
+    skip_encounter_lookup: bool = False,
+    allow_most_recent_note_fallback: bool = False,
+    dry_run: bool = False,
+    concurrency: int = 3,
+) -> Dict[str, int]:
+    """Fan `candidates` out across up to `concurrency` extra Chrome tabs
+    (context.new_page()) in the SAME logged-in session/context, each tab
+    running process_records_on_page's normal serial loop over its own slice.
+
+    Safe to run concurrently because:
+    - Each tab gets its own Playwright Page -- Print Chart modal state, DOM,
+      navigation are all page-scoped, so tabs cannot interfere with each
+      other's chart.
+    - The queue store is Postgres (see store.py), row-scoped UPSERTs -- two
+      tabs saving at once just means two overlapping snapshots of `all_rows`
+      get written; every row is only ever mutated by the ONE tab processing
+      it, so there is no lost-update risk, just some redundant writes.
+    - `all_rows`/`store` are passed identically (not sliced) to every tab's
+      process_records_on_page call -- each save_store call is a full-set
+      overwrite (see save_store's docstring), so a tab must never be handed
+      a partial row list, or it would look like every row outside its slice
+      had been deleted from the queue.
+
+    NOT yet validated against Practice Fusion's own tolerance for multiple
+    simultaneous tabs against one session -- start with a small concurrency
+    (2-3, the default here) and watch for PF session/rate weirdness before
+    raising it.
+    """
+    if concurrency <= 1 or len(candidates) <= 1:
+        # No point opening extra tabs for 0-1 items -- run the normal
+        # single-tab path on whichever tab this context already owns.
+        page = context.pages[0] if context.pages else context.new_page()
+        return process_records_on_page(
+            page, queue_json, config, downloads_dir, candidates, all_rows, store,
+            0, dry_run, False, manifest_run_id, use_timeline_fallback,
+            skip_encounter_lookup, allow_most_recent_note_fallback,
+        )
+
+    tab_count = min(concurrency, len(candidates))
+    pages = [context.pages[0] if context.pages else context.new_page()]
+    for _ in range(tab_count - 1):
+        pages.append(context.new_page())
+
+    # Round-robin split so tabs get roughly even-sized slices.
+    slices: List[List[QueueRecord]] = [[] for _ in range(tab_count)]
+    for i, record in enumerate(candidates):
+        slices[i % tab_count].append(record)
+
+    results: List[Optional[Dict[str, int]]] = [None] * tab_count
+
+    def _run(i: int) -> None:
+        results[i] = process_records_on_page(
+            pages[i], queue_json, config, downloads_dir, slices[i], all_rows, store,
+            0, dry_run, False, manifest_run_id, use_timeline_fallback,
+            skip_encounter_lookup, allow_most_recent_note_fallback,
+        )
+
+    threads = [threading.Thread(target=_run, args=(i,)) for i in range(tab_count) if slices[i]]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    for extra_page in pages[1:]:
+        try:
+            extra_page.close()
+        except Exception:
+            pass
+
+    merged: Dict[str, int] = {}
+    for result in results:
+        if not result:
+            continue
+        for key, value in result.items():
+            if key == "metadata_manifest_path":
+                if value:
+                    merged["metadata_manifest_path"] = value
+                continue
+            merged[key] = merged.get(key, 0) + value
+    return merged
 
 
 def default_process_candidates(rows: Sequence[QueueRecord], include_failed: bool = False) -> List[QueueRecord]:

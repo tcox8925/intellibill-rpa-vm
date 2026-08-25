@@ -508,6 +508,7 @@ class FacesheetPullByDateRequest(BrowserFieldsNoCreds, ReportDateFields):
     include_failed: bool = False
     fuzzy_threshold: float = 0.82
     dob_match_threshold: float = 0.85
+    retry_concurrency: int = 3
     wait_for_completion: bool = True
 
 
@@ -568,6 +569,7 @@ class SyncSchedulesByDateRequest(BrowserFieldsNoCreds, ReportDateFields):
     dry_run: bool = False
     include_failed: bool = False
     lookback_days: int = 3
+    retry_concurrency: int = 3
     wait_for_completion: bool = True
 
 
