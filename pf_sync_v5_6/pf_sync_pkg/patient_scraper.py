@@ -1089,7 +1089,23 @@ def scrape_schedule_day(page: Page, config: Optional[ScheduleScrapeConfig] = Non
         try:
             name_link = cell.query_selector(config.cell_name_selector)
             if name_link is None:
-                continue
+                # Fallback: cell_name_selector requires an <a> tag
+                # (a[data-element='cell-name']), but a No-show appointment has
+                # no chart visit to link to -- PF renders that row's name as
+                # plain text under the SAME data-element, no anchor wrapper.
+                # The strict anchor-only lookup above silently skipped the
+                # whole row before it even reached status/name parsing, which
+                # is why No-show never showed up anywhere, not even as a
+                # blank-status row (2026-08-26 fix). href/guid stay blank
+                # here on purpose -- there genuinely is no chart link for this
+                # row, unlike the require_guid=False case where a link exists
+                # but parse_guid_from_href couldn't read it.
+                name_link = cell.query_selector("[data-element='cell-name']")
+                if name_link is None:
+                    continue
+                print(f"  [schedule-scrape] name cell had no <a> link (likely No-show or "
+                      f"similar no-chart-visit status) -- captured via fallback text lookup",
+                      flush=True)
             href = name_link.get_attribute("href") or ""
             guid = parse_guid_from_href(href)
             full_name = el_text(name_link)
@@ -1265,6 +1281,7 @@ def discover_appointments_via_schedule_range(
     end_date,
     on_day=None,
     config: Optional[ScheduleScrapeConfig] = None,
+    require_guid: bool = True,
 ) -> List[ScheduledAppointment]:
     """Walks the Schedule 'Appointments' view for every date in [start_date,
     end_date] and returns EVERY row scraped on EVERY day, each tagged with its
@@ -1278,6 +1295,18 @@ def discover_appointments_via_schedule_range(
     use comes from here, defaulting to ScheduleScrapeConfig()'s built-in confirmed
     values when not passed. Load from a JSON file (ScheduleScrapeConfig.load) to
     override without touching code if Practice Fusion's Schedule markup changes.
+
+    require_guid: True (default) drops any row scrape_schedule_day couldn't pull
+    a chart GUID for -- callers that inject a synthetic queue record and need to
+    open that patient's chart (sync-schedules-by-date, facesheet-pull-by-date)
+    cannot do anything with a GUID-less row anyway. PF only renders the
+    patient-name cell as a clickable chart link (the href parse_guid_from_href
+    reads) for SOME appointment statuses -- e.g. Confirmed/No-show rows can
+    render as plain text before/without a chart visit, so requiring a GUID
+    silently drops those statuses wholesale. cli.run_appointments_by_date (a
+    read-only listing with no chart/queue interaction at all) passes
+    require_guid=False so a status like Confirmed or No-show still shows up in
+    that listing even with no GUID to attach.
     """
     config = config or ScheduleScrapeConfig()
     results: List[ScheduledAppointment] = []
@@ -1305,8 +1334,11 @@ def discover_appointments_via_schedule_range(
                 flush=True,
             )
         for r in day_rows:
-            if r.ehr_patient_guid:
+            if r.ehr_patient_guid or not require_guid:
                 results.append(ScheduledAppointment(appointment_date=target, patient=r))
+            else:
+                print(f"  [schedule {target.isoformat()}] dropped (no chart GUID -- likely status "
+                      f"{r.appointment_status!r}): {r.first_name} {r.last_name}", flush=True)
         if on_day is not None:
             on_day(target, len(day_rows), len(results))
         else:
