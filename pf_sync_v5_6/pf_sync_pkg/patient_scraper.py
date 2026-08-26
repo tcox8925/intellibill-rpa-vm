@@ -861,6 +861,22 @@ def open_schedule_appointments_view(page: Page, config: Optional[ScheduleScrapeC
     time.sleep(0.6)
 
 
+def read_schedule_facility(page: Page, config: Optional[ScheduleScrapeConfig] = None) -> str:
+    """Reads the Schedule toolbar's facility selector (e.g. 'NWARK Internal
+    Medicine') -- the only facility/location signal that lives on the
+    Schedule screen itself, confirmed live 2026-08-26. Never navigates
+    anywhere; just reads whatever's already on the currently-open Schedule
+    page. Returns "" (never raises) if the selector doesn't match -- callers
+    should treat a blank service_location the same as any other best-effort
+    field, not fail the whole scrape over it."""
+    config = config or ScheduleScrapeConfig()
+    try:
+        el = page.query_selector(config.schedule_facility_selector)
+        return clean(el.inner_text()) if el is not None else ""
+    except PWError:
+        return ""
+
+
 def _appointments_tab_active(page: Page, config: Optional[ScheduleScrapeConfig] = None) -> bool:
     config = config or ScheduleScrapeConfig()
     tab = page.query_selector(config.scheduler_tab_selector)
@@ -1282,6 +1298,7 @@ def discover_appointments_via_schedule_range(
     on_day=None,
     config: Optional[ScheduleScrapeConfig] = None,
     require_guid: bool = True,
+    on_day_diagnostic=None,
 ) -> List[ScheduledAppointment]:
     """Walks the Schedule 'Appointments' view for every date in [start_date,
     end_date] and returns EVERY row scraped on EVERY day, each tagged with its
@@ -1290,6 +1307,14 @@ def discover_appointments_via_schedule_range(
     over this same walk; see its docstring for when that's the one you want
     instead. `on_day(date, count, running_total)` is an optional progress
     callback -- running_total counts rows scraped so far, not unique patients.
+
+    on_day_diagnostic(date, dict): optional, fires for EVERY date in range
+    (including navigation failures, which `continue` past `on_day` entirely).
+    dict carries {"navigated": bool, "header_count": Optional[int],
+    "scraped_count": int} -- lets a caller like cli.run_appointments_by_date
+    surface WHY a day came back empty (couldn't navigate there at all vs. PF's
+    own header genuinely says 0 appointments vs. navigated fine and scraped
+    fine) instead of a bare empty list that looks identical for all three.
 
     config: ScheduleScrapeConfig -- every selector this walk and scrape_schedule_day
     use comes from here, defaulting to ScheduleScrapeConfig()'s built-in confirmed
@@ -1316,6 +1341,8 @@ def discover_appointments_via_schedule_range(
         target = start_date + timedelta(days=i)
         if not go_to_schedule_date(page, target, config=config):
             print(f"  [schedule {target.isoformat()}] WARNING: could not navigate here, skipping", flush=True)
+            if on_day_diagnostic is not None:
+                on_day_diagnostic(target, {"navigated": False, "header_count": None, "scraped_count": 0})
             continue
         expected = _read_header_appointment_count(page)
         if expected:
@@ -1343,6 +1370,8 @@ def discover_appointments_via_schedule_range(
             on_day(target, len(day_rows), len(results))
         else:
             print(f"  [schedule {target.isoformat()}] {len(day_rows)} appointments, running total {len(results)}", flush=True)
+        if on_day_diagnostic is not None:
+            on_day_diagnostic(target, {"navigated": True, "header_count": expected, "scraped_count": len(day_rows)})
     return results
 
 
