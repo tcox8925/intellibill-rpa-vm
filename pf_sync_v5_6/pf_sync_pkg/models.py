@@ -604,6 +604,26 @@ class ScheduleScrapeConfig:
     # viewport isn't silently under-scraped.
     schedule_table_scroller_selector: str = "[data-element='data-table-scroller']"
 
+    # The Schedule screen's own toolbar facility selector -- confirmed live
+    # 2026-08-26 (a real captured DOM snippet, not a guess like some other
+    # selectors in this file): a composable-select toggle whose visible label
+    # (e.g. "NWARK Internal Medicine") IS the facility every appointment on
+    # this Schedule view belongs to. This is the ONLY facility/location signal
+    # that lives on the Schedule screen itself -- per-row facility is NOT in
+    # the row DOM (only the separate Appointment & Eligibility Report has
+    # that, which appointments-by-date deliberately never navigates to, see
+    # cli.run_appointments_by_date's docstring). read_schedule_facility
+    # (patient_scraper.py) reads this once per call and stamps it onto every
+    # scraped row as service_location.
+    # scheduler-toolbar__select-facilities is a CSS CLASS on the wrapper div in
+    # the real captured markup (not a data-element attribute -- that was a
+    # translation mistake in the first version of this selector, confirmed
+    # broken live 2026-08-26 when service_location kept coming back blank
+    # despite appointments themselves scraping fine that same run).
+    schedule_facility_selector: str = (
+        ".scheduler-toolbar__select-facilities .composable-select__selection"
+    )
+
     @classmethod
     def load(cls, path: str) -> "ScheduleScrapeConfig":
         if not path or not os.path.exists(path):

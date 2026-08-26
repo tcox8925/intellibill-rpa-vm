@@ -8,7 +8,7 @@ import uuid
 from dataclasses import asdict, replace
 from datetime import date, timedelta
 from pathlib import Path
-from typing import Any, Dict, Tuple
+from typing import Any, Dict, List, Tuple
 
 from playwright.sync_api import Page
 
@@ -398,6 +398,14 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     appointments_by_date.add_argument("--schedule-config-json", default="")
+    appointments_by_date.add_argument(
+        "--output-json", default="",
+        help=(
+            "Write the result to this JSON file too (not just the return value/HTTP "
+            "response). Defaults to appointments_by_date_<start>_to_<end>.json in the "
+            "current directory when left blank."
+        ),
+    )
     add_report_dates(appointments_by_date)
     add_browser_arguments(appointments_by_date)
 
@@ -1165,7 +1173,18 @@ def run_appointments_by_date(args: argparse.Namespace) -> dict:
     Deliberately appointments-only: unlike sync-schedules-by-date, this never
     reads or writes the queue, never opens a patient's chart, never pulls a
     facesheet/SOAP note, and never uploads anything -- just what the Schedule
-    page shows for that date range.
+    page shows for that date range. Stays on the Schedule screen only -- no
+    other PF screen (e.g. the Appointment & Eligibility Report) is ever
+    navigated to here.
+
+    service_location comes from the Schedule screen's OWN toolbar facility
+    selector (patient_scraper.read_schedule_facility, confirmed live
+    2026-08-26 -- a composable-select toggle reading e.g. "NWARK Internal
+    Medicine"), read once per call and stamped onto every appointment. This is
+    the one facility/location signal that actually lives on the Schedule
+    screen -- per-row facility does not (only the separate Report has that,
+    and pulling that report in here was tried and reverted the same day
+    specifically because it navigated off the Schedule screen).
     """
     from pf_sync_pkg import patient_scraper as ps
     from pf_sync_pkg.models import ScheduleScrapeConfig
@@ -1174,18 +1193,64 @@ def run_appointments_by_date(args: argparse.Namespace) -> dict:
     schedule_config = ScheduleScrapeConfig.load(getattr(args, "schedule_config_json", ""))
 
     def callback(page: Page):
+        # Every date in range gets a diagnostic entry (navigated?, PF's own
+        # header count, what actually got scraped) -- see
+        # discover_appointments_via_schedule_range's on_day_diagnostic
+        # docstring. Surfaced in the JSON result below (day_diagnostics) so
+        # "0 appointments" is never a dead end: it's either "couldn't
+        # navigate here at all" (navigated=false -- a real bug worth
+        # reporting), "PF's own header says 0" (header_count=0 -- genuinely
+        # nothing that day), or "header said N, scraped fewer" (a scrape gap).
+        day_diagnostics: List[Dict[str, Any]] = []
+
+        def _record_day(target_date, info: Dict[str, Any]) -> None:
+            day_diagnostics.append({"date": target_date.isoformat(), **info})
+
+        # require_guid=False: this is a read-only listing, no chart/queue
+        # interaction -- unlike sync-schedules-by-date, it has no reason to
+        # drop a row just because PF didn't render a clickable chart link for
+        # its status (Confirmed/No-show rows commonly don't). See
+        # discover_appointments_via_schedule_range's require_guid docstring.
         appointments = ps.discover_appointments_via_schedule_range(
-            page, start_date, end_date, config=schedule_config
+            page, start_date, end_date, config=schedule_config, require_guid=False,
+            on_day_diagnostic=_record_day,
         )
-        return {
+        # Read AFTER the walk above (not before): discover_appointments_via_
+        # schedule_range calls open_schedule_appointments_view internally,
+        # which is what puts the toolbar/facility selector on screen in the
+        # first place -- reading it first could race an unrendered toolbar.
+        service_location = ps.read_schedule_facility(page, schedule_config)
+        result = {
             "start_date": start_date.isoformat(),
             "end_date": end_date.isoformat(),
             "count": len(appointments),
+            "service_location": service_location,
+            "day_diagnostics": day_diagnostics,
             "appointments": [
-                {"appointment_date": appt.appointment_date.isoformat(), **asdict(appt.patient)}
+                {
+                    "appointment_date": appt.appointment_date.isoformat(),
+                    "service_location": service_location,
+                    **asdict(appt.patient),
+                }
                 for appt in appointments
             ],
         }
+
+        output_json = getattr(args, "output_json", "") or (
+            f"appointments_by_date_{start_date.isoformat()}_to_{end_date.isoformat()}.json"
+        )
+        try:
+            atomic_write_json(output_json, result)
+            result["output_json_path"] = str(Path(output_json).resolve())
+            print(f"Wrote {result['count']} appointment(s) to {result['output_json_path']}", flush=True)
+        except Exception as exc:
+            # Never let a write failure erase the already-scraped, already-returned
+            # result -- same "surface, don't swallow the real work" pattern as
+            # build_and_upload_zip's own docstring.
+            result["output_json_error"] = f"{type(exc).__name__}: {exc}"
+            print(f"  WARNING: could not write {output_json}: {exc}", flush=True)
+
+        return result
 
     return browser_command_wrapper(args, callback)
 
