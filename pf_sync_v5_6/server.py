@@ -44,6 +44,7 @@ from pydantic import BaseModel, Field
 from pf_sync_pkg.cli import (
     browser_command_wrapper,
     resolve_report_dates,
+    run_appointments_by_date,
     run_doctor,
     run_facesheet_pull_by_date,
     run_full_sync_by_date,
@@ -601,6 +602,33 @@ class SyncSchedulesByDateRequestSlim(BaseModel):
     wait_for_completion: bool = True
 
 
+class AppointmentsByDateRequest(BrowserFieldsNoCreds, ReportDateFields):
+    """Read-only Schedule lookup across [start_date, end_date] -- today for
+    either side left blank, same resolve_report_dates default every other
+    *-by-date endpoint uses. Appointments only -- no facesheet/SOAP pull, no
+    queue read/write, no Azure upload.
+
+    Anchored via _pf_path() for the same sub-app-mounting reason as
+    FullSyncByDateRequest above."""
+
+    schedule_config_json: str = Field(
+        default_factory=lambda: _pf_path("config/pf_schedule_scrape_config.json"),
+        examples=[_pf_path("config/pf_schedule_scrape_config.json")],
+    )
+    wait_for_completion: bool = True
+
+
+class AppointmentsByDateRequestSlim(BaseModel):
+    """The only fields that matter day-to-day for /appointments-by-date -- see
+    FacesheetPullByDateRequestSlim's docstring above for why the browser/config
+    fields aren't exposed here at all."""
+
+    report_date: str = ""
+    start_date: str = ""
+    end_date: str = ""
+    wait_for_completion: bool = True
+
+
 # ---------------------------------------------------------------------------
 # Endpoints
 # ---------------------------------------------------------------------------
@@ -909,3 +937,26 @@ def sync_schedules_by_date_endpoint(request: SyncSchedulesByDateRequestSlim):
         return run_sync_schedules_by_date(args)
 
     return _dispatch_browser_job(request.wait_for_completion, "sync-schedules-by-date", job)
+
+
+@app.post("/appointments-by-date")
+def appointments_by_date_endpoint(request: AppointmentsByDateRequestSlim):
+    # Expand the slim request into the full model so every other field keeps
+    # AppointmentsByDateRequest's own real, anchored defaults instead of a
+    # caller-supplied Swagger placeholder -- see AppointmentsByDateRequestSlim's
+    # docstring for why those fields aren't exposed here at all.
+    full_request = AppointmentsByDateRequest(
+        report_date=request.report_date,
+        start_date=request.start_date,
+        end_date=request.end_date,
+        wait_for_completion=request.wait_for_completion,
+    )
+    args = _namespace_with_env_creds(full_request)
+
+    def job():
+        # Read-only Schedule scrape across [start_date, end_date] -- no chart,
+        # no facesheet, no queue writes -- reused via
+        # cli.run_appointments_by_date, not reimplemented here.
+        return run_appointments_by_date(args)
+
+    return _dispatch_browser_job(request.wait_for_completion, "appointments-by-date", job)

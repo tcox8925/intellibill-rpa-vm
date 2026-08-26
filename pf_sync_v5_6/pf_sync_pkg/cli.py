@@ -387,6 +387,20 @@ def build_parser() -> argparse.ArgumentParser:
     add_report_dates(sync_schedules_by_date)
     add_browser_arguments(sync_schedules_by_date)
 
+    appointments_by_date = sub.add_parser(
+        "appointments-by-date",
+        help=(
+            "Read-only Schedule lookup: returns every appointment scraped off the "
+            "Schedule 'Appointments' view for [--start-date, --end-date] (today for "
+            "either side left blank -- see resolve_report_dates). Appointments only "
+            "-- never opens a patient's chart, never pulls a facesheet/SOAP note, "
+            "never touches the queue."
+        ),
+    )
+    appointments_by_date.add_argument("--schedule-config-json", default="")
+    add_report_dates(appointments_by_date)
+    add_browser_arguments(appointments_by_date)
+
     status = sub.add_parser("status", help="Show queue counts and unresolved/review rows.")
     status.add_argument("--queue-json", required=True)
     status.add_argument("--show-limit", type=int, default=20)
@@ -1142,6 +1156,40 @@ def run_sync_schedules_by_date(
     return browser_command_wrapper_with_context(args, callback)
 
 
+def run_appointments_by_date(args: argparse.Namespace) -> dict:
+    """Read-only Schedule lookup across [start_date, end_date] -- today for
+    either side left blank, see resolve_report_dates. Reuses
+    discover_appointments_via_schedule_range (same scroll/paginate/row-count
+    handling sync-schedules-by-date relies on) across that range.
+
+    Deliberately appointments-only: unlike sync-schedules-by-date, this never
+    reads or writes the queue, never opens a patient's chart, never pulls a
+    facesheet/SOAP note, and never uploads anything -- just what the Schedule
+    page shows for that date range.
+    """
+    from pf_sync_pkg import patient_scraper as ps
+    from pf_sync_pkg.models import ScheduleScrapeConfig
+
+    start_date, end_date = resolve_report_dates(args)
+    schedule_config = ScheduleScrapeConfig.load(getattr(args, "schedule_config_json", ""))
+
+    def callback(page: Page):
+        appointments = ps.discover_appointments_via_schedule_range(
+            page, start_date, end_date, config=schedule_config
+        )
+        return {
+            "start_date": start_date.isoformat(),
+            "end_date": end_date.isoformat(),
+            "count": len(appointments),
+            "appointments": [
+                {"appointment_date": appt.appointment_date.isoformat(), **asdict(appt.patient)}
+                for appt in appointments
+            ],
+        }
+
+    return browser_command_wrapper(args, callback)
+
+
 def _registry_row_from_report_patient(rp) -> Dict[str, Any]:
     """Convert a patient_scraper.ReportPatient (live Schedule scrape) into the same
     dict shape matching.map_patient_registry_row produces from a registry file, so
@@ -1503,6 +1551,11 @@ def main() -> int:
 
         if args.command == "sync-schedules-by-date":
             result = run_sync_schedules_by_date(args)
+            print(json.dumps(result, indent=2))
+            return 0
+
+        if args.command == "appointments-by-date":
+            result = run_appointments_by_date(args)
             print(json.dumps(result, indent=2))
             return 0
 
