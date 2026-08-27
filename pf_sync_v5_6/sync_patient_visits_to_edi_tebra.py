@@ -120,6 +120,10 @@ class PracticeIds:
     practice_name: str
 
 
+def _normalize_no_spaces(value: str) -> str:
+    return _clean(value).lower().replace(" ", "")
+
+
 def resolve_practice_ids(cur, name_hint: str) -> PracticeIds:
     def _lookup(pattern: str):
         cur.execute(
@@ -136,6 +140,24 @@ def resolve_practice_ids(cur, name_hint: str) -> PracticeIds:
     rows = _lookup(f"%{name_hint}%")
     if not rows:
         rows = _lookup("%NWARK%")
+    if not rows:
+        # Fallback: lowercase/trim/space-stripped comparison on BOTH sides,
+        # in case the DB's prct_name spacing doesn't line up with a plain
+        # ILIKE substring match (e.g. "North West Arkansas" vs "Northwest
+        # Arkansas", or extra internal whitespace either side).
+        cur.execute(
+            f"""
+            SELECT p.id, p.group_id, g.client_id, p.prct_name
+            FROM "{SCHEMA}".practice p
+            JOIN "{SCHEMA}"."group" g ON g.id = p.group_id
+            """
+        )
+        all_rows = cur.fetchall()
+        targets = (_normalize_no_spaces(name_hint), _normalize_no_spaces("NWARK"))
+        rows = [
+            r for r in all_rows
+            if any(target in _normalize_no_spaces(r[3]) for target in targets)
+        ]
     if not rows:
         raise RuntimeError(
             f'No "{SCHEMA}".practice row matched {name_hint!r} (or "NWARK") -- '
