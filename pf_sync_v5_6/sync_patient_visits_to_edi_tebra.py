@@ -13,7 +13,9 @@ For each appointment row:
      run finds it directly) -- see create_patient_header's docstring for why
      this is a best-effort mirror of the "facesheets pull" patient-create
      flow rather than an exact copy of it.
-  2. Look up EDI_Tebra.lookup_providers by provider full name -- best-effort,
+  2. Look up EDI_Tebra.lookup_providers by provider full name, scoped to
+     group_id=PROVIDER_GROUP_ID -- lower+trim match first, then a
+     whitespace-stripped comparison on both sides as a fallback. Best-effort:
      leaves provider_id NULL on no match rather than failing the row.
   3. Maps appointment_status -> 'cancelled' (cancelled/no-show) or
      'confirmed' (everything else).
@@ -54,6 +56,7 @@ load_dotenv(find_dotenv(usecwd=False))
 SCHEMA = "EDI_Tebra"
 PRACTICE_NAME_HINT = "Northwest Arkansas"
 DEFAULT_RCM_SYSTEM_EMAIL = os.environ.get("RCM_SYSTEM_EMAIL", "rcmsystem@834labs.com")
+PROVIDER_GROUP_ID = 12  # lookup_providers.group_id -- constant for now, per 2026-08-27 direction.
 
 _DOB_FORMATS = ("%m/%d/%Y", "%Y-%m-%d", "%m-%d-%Y")
 
@@ -210,18 +213,37 @@ def create_patient_header(cur, appt: dict, dob: date, practice: PracticeIds) -> 
     return cur.fetchone()[0]
 
 
-def find_provider_id(cur, provider_name: str, practice: PracticeIds) -> Optional[str]:
+def find_provider_id(cur, provider_name: str) -> Optional[str]:
+    """Matches lookup_providers.full_name against the PF provider_name text.
+    Tries an exact lower+trim match first, then falls back to comparing both
+    sides with ALL whitespace stripped -- covers spacing differences (extra/
+    missing internal spaces, e.g. "Ruben  Tejada" vs "RubenTejada") that a
+    plain lower+trim equality would otherwise miss."""
     provider_name = _clean(provider_name)
     if not provider_name:
         return None
+    normalized = provider_name.lower()
+
     cur.execute(
         f"""
         SELECT id FROM "{SCHEMA}".lookup_providers
-        WHERE lower(trim(full_name)) = %s AND (practice_id = %s OR practice_id IS NULL)
-        ORDER BY practice_id NULLS LAST
+        WHERE group_id = %s AND lower(trim(full_name)) = %s
         LIMIT 1
         """,
-        (provider_name.lower(), practice.practice_id),
+        (PROVIDER_GROUP_ID, normalized),
+    )
+    row = cur.fetchone()
+    if row:
+        return row[0]
+
+    stripped = normalized.replace(" ", "")
+    cur.execute(
+        f"""
+        SELECT id FROM "{SCHEMA}".lookup_providers
+        WHERE group_id = %s AND lower(replace(trim(full_name), ' ', '')) = %s
+        LIMIT 1
+        """,
+        (PROVIDER_GROUP_ID, stripped),
     )
     row = cur.fetchone()
     return row[0] if row else None
@@ -285,7 +307,7 @@ def process_appointment(cur, appt: dict, practice: PracticeIds, created_by: str,
         counts["visits_skipped_existing"] += 1
         return
 
-    provider_id = find_provider_id(cur, appt.get("provider_name", ""), practice)
+    provider_id = find_provider_id(cur, appt.get("provider_name", ""))
     insert_patient_visit(cur, appt, dos, patient_header_id, provider_id, practice, created_by)
     counts["visits_inserted"] += 1
 
