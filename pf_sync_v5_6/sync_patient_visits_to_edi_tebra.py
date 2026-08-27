@@ -7,7 +7,7 @@ Usage:
 
 For each appointment row:
   1. Look up EDI_Tebra.patient_header first by source_id = the PF chart GUID
-     (ehr_patient_guid, scoped to source='practise_fusion') -- exact match,
+     (ehr_patient_guid, scoped to source='practice_fusion') -- exact match,
      cheap, and unambiguous for a patient this script already linked on a
      prior run. Falls back to (first name, last name, dob) --
      case/whitespace-insensitive exact match, dob compared as a parsed date
@@ -167,12 +167,12 @@ def find_patient_header_by_source_id(cur, ehr_patient_guid: str) -> Optional[str
     """Exact match on the PF chart GUID this script itself stamps into
     source_id on create (see create_patient_header) -- cheap and unambiguous
     for a patient this pipeline has already linked on a prior run. Scoped to
-    source='practise_fusion' so it never collides with an unrelated source's
+    source='practice_fusion' so it never collides with an unrelated source's
     own source_id space (e.g. a real EDI 837 patient)."""
     cur.execute(
         f"""
         SELECT patient_header_id FROM "{SCHEMA}".patient_header
-        WHERE source = 'practise_fusion' AND source_id = %s
+        WHERE source = 'practice_fusion' AND source_id = %s
         """,
         (ehr_patient_guid,),
     )
@@ -218,7 +218,7 @@ def create_patient_header(cur, appt: dict, dob: date, practice: PracticeIds) -> 
         RETURNING patient_header_id
         """,
         (
-            "practise_fusion",
+            "practice_fusion",
             guid,
             guid,
             practice.client_id,
