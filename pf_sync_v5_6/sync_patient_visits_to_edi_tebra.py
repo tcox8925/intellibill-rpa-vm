@@ -6,17 +6,13 @@ Usage:
     python3 sync_patient_visits_to_edi_tebra.py --appointments-json <path> --dry-run
 
 For each appointment row:
-  1. Look up EDI_Tebra.patient_header first by source_id = the PF chart GUID
-     (ehr_patient_guid, scoped to source='practice_fusion') -- exact match,
-     cheap, and unambiguous for a patient this script already linked on a
-     prior run. Falls back to (first name, last name, dob) --
-     case/whitespace-insensitive exact match, dob compared as a parsed date
-     (not a raw string) since pat_dob is a free-form varchar and existing
-     rows may not all use the same format this script writes. If still no
-     match, insert a new patient_header row (stamping source_id with the PF
-     GUID so the next run finds it directly) -- see create_patient_header's
-     docstring for why this is a best-effort mirror of the "facesheets pull"
-     patient-create flow rather than an exact copy of it.
+  1. Look up EDI_Tebra.patient_header by source_id = the PF chart GUID
+     (ehr_patient_guid, scoped to source='practice_fusion') -- exact match
+     only, no name/dob fallback. If no match, insert a new patient_header
+     row (fname/lname/dob, source_id stamped with the PF GUID so the next
+     run finds it directly) -- see create_patient_header's docstring for why
+     this is a best-effort mirror of the "facesheets pull" patient-create
+     flow rather than an exact copy of it.
   2. Look up EDI_Tebra.lookup_providers by provider full name -- best-effort,
      leaves provider_id NULL on no match rather than failing the row.
   3. Maps appointment_status -> 'cancelled' (cancelled/no-show) or
@@ -180,26 +176,6 @@ def find_patient_header_by_source_id(cur, ehr_patient_guid: str) -> Optional[str
     return row[0] if row else None
 
 
-def find_patient_header(cur, first_name: str, last_name: str, dob: date) -> Optional[str]:
-    cur.execute(
-        f"""
-        SELECT patient_header_id, pat_dob FROM "{SCHEMA}".patient_header
-        WHERE lower(trim(pat_fnam)) = %s AND lower(trim(sub_lnam)) = %s
-        """,
-        (_clean(first_name).lower(), _clean(last_name).lower()),
-    )
-    matches = [r for r in cur.fetchall() if _parse_dob(r[1]) == dob]
-    if not matches:
-        return None
-    if len(matches) > 1:
-        print(
-            f"  WARNING: {len(matches)} patient_header rows matched "
-            f"{first_name} {last_name} ({dob.isoformat()}) -- using the first one.",
-            flush=True,
-        )
-    return matches[0][0]
-
-
 def create_patient_header(cur, appt: dict, dob: date, practice: PracticeIds) -> str:
     """Best-effort mirror of the existing facesheets-pull patient-create flow.
 
@@ -299,8 +275,6 @@ def process_appointment(cur, appt: dict, practice: PracticeIds, created_by: str,
     dos = date.fromisoformat(appt["appointment_date"])
 
     patient_header_id = find_patient_header_by_source_id(cur, appt["ehr_patient_guid"])
-    if patient_header_id is None:
-        patient_header_id = find_patient_header(cur, appt["first_name"], appt["last_name"], dob)
     if patient_header_id is None:
         patient_header_id = create_patient_header(cur, appt, dob, practice)
         counts["patients_created"] += 1
