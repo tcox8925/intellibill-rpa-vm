@@ -6,11 +6,15 @@ Usage:
     python3 sync_patient_visits_to_edi_tebra.py --appointments-json <path> --dry-run
 
 For each appointment row:
-  1. Look up EDI_Tebra.patient_header by (first name, last name, dob) --
+  1. Look up EDI_Tebra.patient_header first by source_id = the PF chart GUID
+     (ehr_patient_guid, scoped to source='practise_fusion') -- exact match,
+     cheap, and unambiguous for a patient this script already linked on a
+     prior run. Falls back to (first name, last name, dob) --
      case/whitespace-insensitive exact match, dob compared as a parsed date
      (not a raw string) since pat_dob is a free-form varchar and existing
-     rows may not all use the same format this script writes. If no match,
-     insert a new patient_header row -- see create_patient_header's
+     rows may not all use the same format this script writes. If still no
+     match, insert a new patient_header row (stamping source_id with the PF
+     GUID so the next run finds it directly) -- see create_patient_header's
      docstring for why this is a best-effort mirror of the "facesheets pull"
      patient-create flow rather than an exact copy of it.
   2. Look up EDI_Tebra.lookup_providers by provider full name -- best-effort,
@@ -159,6 +163,23 @@ def resolve_created_by(cur, email: str) -> str:
     return row[0]
 
 
+def find_patient_header_by_source_id(cur, ehr_patient_guid: str) -> Optional[str]:
+    """Exact match on the PF chart GUID this script itself stamps into
+    source_id on create (see create_patient_header) -- cheap and unambiguous
+    for a patient this pipeline has already linked on a prior run. Scoped to
+    source='practise_fusion' so it never collides with an unrelated source's
+    own source_id space (e.g. a real EDI 837 patient)."""
+    cur.execute(
+        f"""
+        SELECT patient_header_id FROM "{SCHEMA}".patient_header
+        WHERE source = 'practise_fusion' AND source_id = %s
+        """,
+        (ehr_patient_guid,),
+    )
+    row = cur.fetchone()
+    return row[0] if row else None
+
+
 def find_patient_header(cur, first_name: str, last_name: str, dob: date) -> Optional[str]:
     cur.execute(
         f"""
@@ -197,7 +218,7 @@ def create_patient_header(cur, appt: dict, dob: date, practice: PracticeIds) -> 
         RETURNING patient_header_id
         """,
         (
-            "PracticeFusion",
+            "practise_fusion",
             guid,
             guid,
             practice.client_id,
@@ -277,7 +298,9 @@ def process_appointment(cur, appt: dict, practice: PracticeIds, created_by: str,
 
     dos = date.fromisoformat(appt["appointment_date"])
 
-    patient_header_id = find_patient_header(cur, appt["first_name"], appt["last_name"], dob)
+    patient_header_id = find_patient_header_by_source_id(cur, appt["ehr_patient_guid"])
+    if patient_header_id is None:
+        patient_header_id = find_patient_header(cur, appt["first_name"], appt["last_name"], dob)
     if patient_header_id is None:
         patient_header_id = create_patient_header(cur, appt, dob, practice)
         counts["patients_created"] += 1
