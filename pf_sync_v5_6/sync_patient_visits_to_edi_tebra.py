@@ -58,6 +58,7 @@ from dotenv import find_dotenv, load_dotenv
 load_dotenv(find_dotenv(usecwd=False))
 
 SCHEMA = "EDI_Tebra"
+RCM_SCHEMA = "rcm"  # rcm.users -- see rcm_schema/schema.ts's `users` table.
 DEFAULT_RCM_SYSTEM_EMAIL = os.environ.get("RCM_SYSTEM_EMAIL", "rcmsystem@834labs.com")
 
 # Northwest Arkansas Internal Medicine -- the only practice this pipeline
@@ -121,12 +122,12 @@ def _map_status(appointment_status: str) -> str:
 
 
 def resolve_created_by(cur, email: str) -> str:
-    cur.execute("SELECT id FROM users WHERE email = %s", (email,))
+    cur.execute(f'SELECT id FROM "{RCM_SCHEMA}".users WHERE email = %s', (email,))
     row = cur.fetchone()
     if not row:
         raise RuntimeError(
-            f"No users row found for email={email!r} -- created_by cannot be resolved. "
-            "Confirm the rcm_system service account exists (and that 'users' is the right table)."
+            f'No "{RCM_SCHEMA}".users row found for email={email!r} -- created_by cannot be resolved. '
+            "Confirm the rcm_system service account exists."
         )
     return row[0]
 
