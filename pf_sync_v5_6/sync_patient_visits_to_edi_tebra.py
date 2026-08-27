@@ -14,9 +14,9 @@ For each appointment row:
      this is a best-effort mirror of the "facesheets pull" patient-create
      flow rather than an exact copy of it.
   2. Look up EDI_Tebra.lookup_providers by provider full name, scoped to
-     group_id=PROVIDER_GROUP_ID -- lower+trim match first, then a
-     whitespace-stripped comparison on both sides as a fallback. Best-effort:
-     leaves provider_id NULL on no match rather than failing the row.
+     GROUP_ID -- lower+trim match first, then a whitespace-stripped
+     comparison on both sides as a fallback. Best-effort: leaves
+     provider_id NULL on no match rather than failing the row.
   3. Maps appointment_status -> 'cancelled' (cancelled/no-show) or
      'confirmed' (everything else).
   4. Skips (does not duplicate) any appointment that already has a
@@ -25,14 +25,19 @@ For each appointment row:
      script enforces idempotency itself via a SELECT-before-INSERT, so it's
      safe to re-run against the same JSON.
 
-client_id/group_id/practice_id are resolved ONCE per run by looking up the
-EDI_Tebra.practice row matching --practice-name-hint ("Northwest Arkansas",
-falling back to "NWARK" -- Practice Fusion's own name for this practice is
-"NWARK Internal Medicine", NWARK = NW-ARK = Northwest Arkansas). Kept as a
-one-time-per-run lookup rather than a literal hardcoded id (2026-08-26
-direction: "constant for now") since this repo has no confirmed numeric
-client_id/group_id/practice_id to hardcode -- swap to a real per-practice
-resolver if/when this pipeline serves more than one practice.
+CLIENT_ID/GROUP_ID/PRACTICE_ID below are hardcoded, not resolved at runtime --
+per 2026-08-27 direction, this pipeline only serves one practice for now.
+Fetched once via:
+    SELECT p.id, p.group_id, g.client_id, p.prct_name, g.grp_name, c.client_name
+    FROM "EDI_Tebra".practice p
+    JOIN "EDI_Tebra"."group" g ON g.id = p.group_id
+    JOIN "EDI_Tebra".client c ON c.client_id = g.client_id
+    WHERE p.prct_name ILIKE '%NWARK%'
+-- resolved to practice_id=8 ("NWARK Internal Medicine"), group_id=12
+("Northwest Arkansas Internal Medicine"), client_id=9 ("Northwest Arkansas
+Internal Medicine"). NWARK = NW-ARK = Northwest Arkansas. Revisit this (a
+real per-practice resolver) if/when this pipeline serves more than one
+practice.
 
 Each appointment is processed inside its own SAVEPOINT so one bad row
 (unparseable data, an unexpected DB constraint) doesn't roll back the whole
@@ -43,7 +48,6 @@ import argparse
 import json
 import os
 import sys
-from dataclasses import dataclass
 from datetime import date, datetime, time as dt_time
 from pathlib import Path
 from typing import Optional
@@ -54,9 +58,13 @@ from dotenv import find_dotenv, load_dotenv
 load_dotenv(find_dotenv(usecwd=False))
 
 SCHEMA = "EDI_Tebra"
-PRACTICE_NAME_HINT = "Northwest Arkansas"
 DEFAULT_RCM_SYSTEM_EMAIL = os.environ.get("RCM_SYSTEM_EMAIL", "rcmsystem@834labs.com")
-PROVIDER_GROUP_ID = 12  # lookup_providers.group_id -- constant for now, per 2026-08-27 direction.
+
+# Northwest Arkansas Internal Medicine -- the only practice this pipeline
+# serves for now. See module docstring above for how these were resolved.
+CLIENT_ID = 9
+GROUP_ID = 12
+PRACTICE_ID = 8
 
 _DOB_FORMATS = ("%m/%d/%Y", "%Y-%m-%d", "%m-%d-%Y")
 
@@ -112,67 +120,6 @@ def _map_status(appointment_status: str) -> str:
     return "confirmed"
 
 
-@dataclass
-class PracticeIds:
-    client_id: int
-    group_id: int
-    practice_id: int
-    practice_name: str
-
-
-def _normalize_no_spaces(value: str) -> str:
-    return _clean(value).lower().replace(" ", "")
-
-
-def resolve_practice_ids(cur, name_hint: str) -> PracticeIds:
-    def _lookup(pattern: str):
-        cur.execute(
-            f"""
-            SELECT p.id, p.group_id, g.client_id, p.prct_name
-            FROM "{SCHEMA}".practice p
-            JOIN "{SCHEMA}"."group" g ON g.id = p.group_id
-            WHERE p.prct_name ILIKE %s
-            """,
-            (pattern,),
-        )
-        return cur.fetchall()
-
-    rows = _lookup(f"%{name_hint}%")
-    if not rows:
-        rows = _lookup("%NWARK%")
-    if not rows:
-        # Fallback: lowercase/trim/space-stripped comparison on BOTH sides,
-        # in case the DB's prct_name spacing doesn't line up with a plain
-        # ILIKE substring match (e.g. "North West Arkansas" vs "Northwest
-        # Arkansas", or extra internal whitespace either side).
-        cur.execute(
-            f"""
-            SELECT p.id, p.group_id, g.client_id, p.prct_name
-            FROM "{SCHEMA}".practice p
-            JOIN "{SCHEMA}"."group" g ON g.id = p.group_id
-            """
-        )
-        all_rows = cur.fetchall()
-        targets = (_normalize_no_spaces(name_hint), _normalize_no_spaces("NWARK"))
-        rows = [
-            r for r in all_rows
-            if any(target in _normalize_no_spaces(r[3]) for target in targets)
-        ]
-    if not rows:
-        raise RuntimeError(
-            f'No "{SCHEMA}".practice row matched {name_hint!r} (or "NWARK") -- '
-            "pass --practice-name-hint with the correct practice name."
-        )
-    if len(rows) > 1:
-        names = ", ".join(r[3] for r in rows)
-        raise RuntimeError(
-            f"Multiple {SCHEMA}.practice rows matched {name_hint!r}: {names} -- "
-            "narrow --practice-name-hint so exactly one practice resolves."
-        )
-    practice_id, group_id, client_id, practice_name = rows[0]
-    return PracticeIds(client_id=client_id, group_id=group_id, practice_id=practice_id, practice_name=practice_name)
-
-
 def resolve_created_by(cur, email: str) -> str:
     cur.execute("SELECT id FROM users WHERE email = %s", (email,))
     row = cur.fetchone()
@@ -201,7 +148,7 @@ def find_patient_header_by_source_id(cur, ehr_patient_guid: str) -> Optional[str
     return row[0] if row else None
 
 
-def create_patient_header(cur, appt: dict, dob: date, practice: PracticeIds) -> str:
+def create_patient_header(cur, appt: dict, dob: date) -> str:
     """Best-effort mirror of the existing facesheets-pull patient-create flow.
 
     That flow lives in a different (Node/Drizzle) codebase this repo doesn't
@@ -222,9 +169,9 @@ def create_patient_header(cur, appt: dict, dob: date, practice: PracticeIds) -> 
             "practice_fusion",
             guid,
             guid,
-            practice.client_id,
-            practice.group_id,
-            practice.practice_id,
+            CLIENT_ID,
+            GROUP_ID,
+            PRACTICE_ID,
             appt["last_name"],
             appt["first_name"],
             dob.isoformat(),
@@ -252,7 +199,7 @@ def find_provider_id(cur, provider_name: str) -> Optional[str]:
         WHERE group_id = %s AND lower(trim(full_name)) = %s
         LIMIT 1
         """,
-        (PROVIDER_GROUP_ID, normalized),
+        (GROUP_ID, normalized),
     )
     row = cur.fetchone()
     if row:
@@ -265,7 +212,7 @@ def find_provider_id(cur, provider_name: str) -> Optional[str]:
         WHERE group_id = %s AND lower(replace(trim(full_name), ' ', '')) = %s
         LIMIT 1
         """,
-        (PROVIDER_GROUP_ID, stripped),
+        (GROUP_ID, stripped),
     )
     row = cur.fetchone()
     return row[0] if row else None
@@ -280,7 +227,7 @@ def visit_already_exists(cur, patient_header_id: str, dos: date) -> bool:
 
 
 def insert_patient_visit(cur, appt: dict, dos: date, patient_header_id: str,
-                          provider_id: Optional[str], practice: PracticeIds, created_by: str) -> None:
+                          provider_id: Optional[str], created_by: str) -> None:
     visit_time = _parse_time(appt.get("appointment_start_time", ""))
     status = _map_status(appt.get("appointment_status", ""))
     cur.execute(
@@ -291,9 +238,9 @@ def insert_patient_visit(cur, appt: dict, dos: date, patient_header_id: str,
         VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         """,
         (
-            practice.client_id,
-            practice.group_id,
-            practice.practice_id,
+            CLIENT_ID,
+            GROUP_ID,
+            PRACTICE_ID,
             patient_header_id,
             dos,
             created_by,
@@ -305,7 +252,7 @@ def insert_patient_visit(cur, appt: dict, dos: date, patient_header_id: str,
     )
 
 
-def process_appointment(cur, appt: dict, practice: PracticeIds, created_by: str, counts: dict) -> None:
+def process_appointment(cur, appt: dict, created_by: str, counts: dict) -> None:
     dob = _parse_dob(appt.get("dob", ""))
     if dob is None:
         counts["skipped_bad_dob"] += 1
@@ -320,7 +267,7 @@ def process_appointment(cur, appt: dict, practice: PracticeIds, created_by: str,
 
     patient_header_id = find_patient_header_by_source_id(cur, appt["ehr_patient_guid"])
     if patient_header_id is None:
-        patient_header_id = create_patient_header(cur, appt, dob, practice)
+        patient_header_id = create_patient_header(cur, appt, dob)
         counts["patients_created"] += 1
     else:
         counts["patients_matched"] += 1
@@ -330,14 +277,13 @@ def process_appointment(cur, appt: dict, practice: PracticeIds, created_by: str,
         return
 
     provider_id = find_provider_id(cur, appt.get("provider_name", ""))
-    insert_patient_visit(cur, appt, dos, patient_header_id, provider_id, practice, created_by)
+    insert_patient_visit(cur, appt, dos, patient_header_id, provider_id, created_by)
     counts["visits_inserted"] += 1
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--appointments-json", required=True)
-    parser.add_argument("--practice-name-hint", default=PRACTICE_NAME_HINT)
     parser.add_argument("--rcm-system-email", default=DEFAULT_RCM_SYSTEM_EMAIL)
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
@@ -358,19 +304,17 @@ def main() -> int:
     }
     try:
         with conn.cursor() as cur:
-            practice = resolve_practice_ids(cur, args.practice_name_hint)
             created_by = resolve_created_by(cur, args.rcm_system_email)
             print(
-                f"Resolved practice={practice.practice_name!r} "
-                f"(client_id={practice.client_id}, group_id={practice.group_id}, "
-                f"practice_id={practice.practice_id}), created_by={created_by}",
+                f"Using client_id={CLIENT_ID}, group_id={GROUP_ID}, practice_id={PRACTICE_ID}, "
+                f"created_by={created_by}",
                 flush=True,
             )
 
             for i, appt in enumerate(appointments):
                 cur.execute("SAVEPOINT row_sp")
                 try:
-                    process_appointment(cur, appt, practice, created_by, counts)
+                    process_appointment(cur, appt, created_by, counts)
                     cur.execute("RELEASE SAVEPOINT row_sp")
                 except Exception as exc:
                     cur.execute("ROLLBACK TO SAVEPOINT row_sp")
