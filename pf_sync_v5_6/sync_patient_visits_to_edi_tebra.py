@@ -60,6 +60,7 @@ load_dotenv(find_dotenv(usecwd=False))
 SCHEMA = "EDI_Tebra"
 RCM_SCHEMA = "rcm"  # rcm.users -- see rcm_schema/schema.ts's `users` table.
 DEFAULT_RCM_SYSTEM_EMAIL = os.environ.get("RCM_SYSTEM_EMAIL", "rcmsystem@834labs.com")
+LOG_DIR = Path(__file__).resolve().parent / "logs"
 
 # Northwest Arkansas Internal Medicine -- the only practice this pipeline
 # serves for now. See module docstring above for how these were resolved.
@@ -68,6 +69,36 @@ GROUP_ID = 12
 PRACTICE_ID = 8
 
 _DOB_FORMATS = ("%m/%d/%Y", "%Y-%m-%d", "%m-%d-%Y")
+
+
+class _Tee:
+    """Writes to every given stream -- used to mirror stdout/stderr into a
+    per-run log file while still printing live to the terminal, without
+    touching any of the existing print(...) call sites."""
+
+    def __init__(self, *streams):
+        self._streams = streams
+
+    def write(self, data):
+        for stream in self._streams:
+            stream.write(data)
+
+    def flush(self):
+        for stream in self._streams:
+            stream.flush()
+
+
+def _setup_logging() -> Path:
+    """Every run writes its full output (terminal print()s AND any traceback
+    on stderr) to its own timestamped file under LOG_DIR, in addition to the
+    terminal -- so a run's output is never lost once the terminal scrolls."""
+    LOG_DIR.mkdir(exist_ok=True)
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    log_path = LOG_DIR / f"sync_patient_visits_{timestamp}.log"
+    log_file = open(log_path, "w", encoding="utf-8")
+    sys.stdout = _Tee(sys.__stdout__, log_file)
+    sys.stderr = _Tee(sys.__stderr__, log_file)
+    return log_path
 
 
 def _connect():
@@ -253,15 +284,13 @@ def insert_patient_visit(cur, appt: dict, dos: date, patient_header_id: str,
     )
 
 
-def process_appointment(cur, appt: dict, created_by: str, counts: dict) -> None:
+def process_appointment(cur, appt: dict, created_by: str, counts: dict, index: int, total: int) -> None:
+    label = f"[{index}/{total}] {appt.get('first_name')} {appt.get('last_name')} on {appt.get('appointment_date')}"
+
     dob = _parse_dob(appt.get("dob", ""))
     if dob is None:
         counts["skipped_bad_dob"] += 1
-        print(
-            f"  SKIP (unparseable dob {appt.get('dob')!r}): "
-            f"{appt.get('first_name')} {appt.get('last_name')} on {appt.get('appointment_date')}",
-            flush=True,
-        )
+        print(f"{label}: SKIP -- unparseable dob {appt.get('dob')!r}", flush=True)
         return
 
     dos = date.fromisoformat(appt["appointment_date"])
@@ -270,19 +299,27 @@ def process_appointment(cur, appt: dict, created_by: str, counts: dict) -> None:
     if patient_header_id is None:
         patient_header_id = create_patient_header(cur, appt, dob)
         counts["patients_created"] += 1
+        patient_outcome = "patient=created"
     else:
         counts["patients_matched"] += 1
+        patient_outcome = "patient=matched"
 
     if visit_already_exists(cur, patient_header_id, dos):
         counts["visits_skipped_existing"] += 1
+        print(f"{label}: {patient_outcome}, visit=SKIPPED (already exists)", flush=True)
         return
 
     provider_id = find_provider_id(cur, appt.get("provider_name", ""))
+    provider_outcome = "provider=found" if provider_id else "provider=NOT FOUND"
     insert_patient_visit(cur, appt, dos, patient_header_id, provider_id, created_by)
     counts["visits_inserted"] += 1
+    print(f"{label}: {patient_outcome}, {provider_outcome}, visit=inserted", flush=True)
 
 
 def main() -> int:
+    log_path = _setup_logging()
+    print(f"Logging this run to {log_path}", flush=True)
+
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--appointments-json", required=True)
     parser.add_argument("--rcm-system-email", default=DEFAULT_RCM_SYSTEM_EMAIL)
@@ -315,18 +352,16 @@ def main() -> int:
             for i, appt in enumerate(appointments):
                 cur.execute("SAVEPOINT row_sp")
                 try:
-                    process_appointment(cur, appt, created_by, counts)
+                    process_appointment(cur, appt, created_by, counts, i + 1, len(appointments))
                     cur.execute("RELEASE SAVEPOINT row_sp")
                 except Exception as exc:
                     cur.execute("ROLLBACK TO SAVEPOINT row_sp")
                     counts["row_errors"] += 1
                     print(
-                        f"  ERROR on {appt.get('first_name')} {appt.get('last_name')} "
-                        f"on {appt.get('appointment_date')}: {type(exc).__name__}: {exc}",
+                        f"[{i + 1}/{len(appointments)}] {appt.get('first_name')} {appt.get('last_name')} "
+                        f"on {appt.get('appointment_date')}: ERROR -- {type(exc).__name__}: {exc}",
                         flush=True,
                     )
-                if (i + 1) % 100 == 0:
-                    print(f"  ...{i + 1}/{len(appointments)} processed", flush=True)
 
             print(json.dumps({"total_appointments": len(appointments), **counts}, indent=2), flush=True)
 
