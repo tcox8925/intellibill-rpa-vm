@@ -628,13 +628,24 @@ class AppointmentsByDateRequestSlim(BaseModel):
     insert_into_db: defaults to False (fetch-only) -- only when explicitly
     passed true does this endpoint also feed the Schedule scrape result
     straight into sync_appointments_to_edi_tebra (patient match/create +
-    patient_visit_header insert, see that module's docstring)."""
+    patient_visit_header insert, see that module's docstring).
+
+    update_appointments / clean_and_insert: both destructive, both no-ops
+    unless insert_into_db is also true -- see their warnings in
+    sync_patient_visits_to_edi_tebra.py's module docstring before setting
+    either to true. update_appointments DELETEs+re-INSERTs a matching
+    existing visit instead of skipping it (CASCADE-deletes anything that
+    referenced its old row id). clean_and_insert DELETEs every visit for
+    this practice in [start_date, end_date] -- not just PF-sourced ones --
+    before inserting anything."""
 
     report_date: str = ""
     start_date: str = ""
     end_date: str = ""
     wait_for_completion: bool = True
     insert_into_db: bool = False
+    update_appointments: bool = False
+    clean_and_insert: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -972,7 +983,11 @@ def appointments_by_date_endpoint(request: AppointmentsByDateRequestSlim):
         fetch_result = run_appointments_by_date(args)
         if request.insert_into_db:
             fetch_result["edi_tebra_sync"] = sync_appointments_to_edi_tebra(
-                fetch_result.get("appointments", [])
+                fetch_result.get("appointments", []),
+                update_appointments=request.update_appointments,
+                clean_and_insert=request.clean_and_insert,
+                start_date=fetch_result.get("start_date", ""),
+                end_date=fetch_result.get("end_date", ""),
             )
         return fetch_result
 

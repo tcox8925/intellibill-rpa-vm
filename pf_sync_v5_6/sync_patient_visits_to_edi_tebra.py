@@ -26,6 +26,26 @@ For each appointment row:
      script enforces idempotency itself via a SELECT-before-INSERT, so it's
      safe to re-run against the same JSON.
 
+Two opt-in flags change that default (skip-if-exists) behavior -- BOTH are
+destructive, read their warnings before passing either:
+
+  update_appointments=True: a matching existing visit is DELETEd and the
+    fresh row INSERTed in its place, instead of being skipped. WARNING: this
+    deletes and replaces the row's own patient_visit_header.id, so anything
+    that has come to reference the OLD id -- e.g.
+    patient_visit_procedure_selection, which ON DELETE CASCADEs -- is
+    destroyed with it. Only safe for a visit nothing downstream has touched
+    yet.
+
+  clean_and_insert=True: BEFORE processing anything, deletes EVERY
+    patient_visit_header row for CLIENT_ID/GROUP_ID/PRACTICE_ID whose `dos`
+    falls in [start_date, end_date] -- not just rows this script created.
+    patient_visit_header has no column identifying which system inserted a
+    given row, so this cannot distinguish a PF-sourced row from one any
+    other integration wrote for the same practice/date range -- it deletes
+    all of them. Same CASCADE-delete risk as update_appointments, at the
+    scale of the whole date range. Requires start_date/end_date.
+
 CLIENT_ID/GROUP_ID/PRACTICE_ID below are hardcoded, not resolved at runtime --
 per 2026-08-27 direction, this pipeline only serves one practice for now.
 Fetched once via:
@@ -262,6 +282,44 @@ def visit_already_exists(cur, patient_header_id: str, dos: date) -> bool:
     return cur.fetchone() is not None
 
 
+def delete_visit(cur, patient_header_id: str, dos: date) -> None:
+    """CASCADE deletes any patient_visit_procedure_selection (etc.) rows tied
+    to the deleted patient_visit_header.id -- see update_appointments'
+    warning in the module docstring."""
+    cur.execute(
+        f'DELETE FROM "{SCHEMA}".patient_visit_header WHERE patient_header_id = %s AND dos = %s',
+        (patient_header_id, dos),
+    )
+
+
+def clean_visits_for_range(start_date: date, end_date: date) -> int:
+    """Deletes EVERY patient_visit_header row for CLIENT_ID/GROUP_ID/
+    PRACTICE_ID with `dos` in [start_date, end_date], on its own short-lived
+    connection/transaction -- see clean_and_insert's warning in the module
+    docstring for why this is NOT scoped to PF-sourced rows only. Returns the
+    number of rows deleted."""
+    conn = _connect()
+    conn.autocommit = False
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"""
+                DELETE FROM "{SCHEMA}".patient_visit_header
+                WHERE client_id = %s AND group_id = %s AND practice_id = %s
+                  AND dos BETWEEN %s AND %s
+                """,
+                (CLIENT_ID, GROUP_ID, PRACTICE_ID, start_date, end_date),
+            )
+            deleted = cur.rowcount
+        conn.commit()
+        return deleted
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
 def insert_patient_visit(cur, appt: dict, dos: date, patient_header_id: str,
                           provider_id: Optional[str], created_by: str) -> None:
     visit_time = _parse_time(appt.get("appointment_start_time", ""))
@@ -288,7 +346,7 @@ def insert_patient_visit(cur, appt: dict, dos: date, patient_header_id: str,
     )
 
 
-def process_appointment(cur, appt: dict, created_by: str) -> dict:
+def process_appointment(cur, appt: dict, created_by: str, update_appointments: bool = False) -> dict:
     """Does the actual match/create + insert work for ONE appointment and
     returns an outcome dict for the caller to log/tally -- no shared state
     touched here, so this is safe to call from any thread as long as `cur`
@@ -296,7 +354,11 @@ def process_appointment(cur, appt: dict, created_by: str) -> dict:
 
     Returns {"visit": "skipped_bad_dob"}, or
             {"patient": "created"|"matched", "visit": "skipped_existing"}, or
-            {"patient": "created"|"matched", "visit": "inserted", "provider": "found"|"not_found"}.
+            {"patient": "created"|"matched", "visit": "inserted"|"updated", "provider": "found"|"not_found"}.
+
+    update_appointments: see its warning in the module docstring -- DELETEs
+    the existing visit row (CASCADE) before inserting the fresh one, instead
+    of skipping.
     """
     dob = _parse_dob(appt.get("dob", ""))
     if dob is None:
@@ -311,14 +373,18 @@ def process_appointment(cur, appt: dict, created_by: str) -> dict:
     else:
         patient_kind = "matched"
 
+    visit_kind = "inserted"
     if visit_already_exists(cur, patient_header_id, dos):
-        return {"patient": patient_kind, "visit": "skipped_existing"}
+        if not update_appointments:
+            return {"patient": patient_kind, "visit": "skipped_existing"}
+        delete_visit(cur, patient_header_id, dos)
+        visit_kind = "updated"
 
     provider_id = find_provider_id(cur, appt.get("provider_name", ""))
     insert_patient_visit(cur, appt, dos, patient_header_id, provider_id, created_by)
     return {
         "patient": patient_kind,
-        "visit": "inserted",
+        "visit": visit_kind,
         "provider": "found" if provider_id else "not_found",
     }
 
@@ -333,10 +399,11 @@ def _outcome_message(outcome: dict) -> str:
     if outcome["visit"] == "skipped_existing":
         return f"patient={outcome['patient']}, visit=SKIPPED (already exists)"
     provider_text = "found" if outcome["provider"] == "found" else "NOT FOUND"
-    return f"patient={outcome['patient']}, provider={provider_text}, visit=inserted"
+    return f"patient={outcome['patient']}, provider={provider_text}, visit={outcome['visit']}"
 
 
-def _sync_patient_group(appts_with_indices: list, created_by: str, total: int, print_lock: threading.Lock) -> list:
+def _sync_patient_group(appts_with_indices: list, created_by: str, total: int, print_lock: threading.Lock,
+                         update_appointments: bool = False) -> list:
     """Processes every appointment for ONE patient (same ehr_patient_guid)
     sequentially, on its own connection, committing after each appointment --
     a group's own appointments stay serialized against each other so the
@@ -359,7 +426,7 @@ def _sync_patient_group(appts_with_indices: list, created_by: str, total: int, p
             for appt, index in appts_with_indices:
                 label = _appointment_label(appt, index, total)
                 try:
-                    outcome = process_appointment(cur, appt, created_by)
+                    outcome = process_appointment(cur, appt, created_by, update_appointments)
                     conn.commit()
                     with print_lock:
                         print(f"{label}: {_outcome_message(outcome)}", flush=True)
@@ -375,10 +442,18 @@ def _sync_patient_group(appts_with_indices: list, created_by: str, total: int, p
 
 
 def sync_appointments_to_edi_tebra(appointments: list, rcm_system_email: str = DEFAULT_RCM_SYSTEM_EMAIL,
-                                    concurrency: int = DEFAULT_SYNC_CONCURRENCY) -> dict:
+                                    concurrency: int = DEFAULT_SYNC_CONCURRENCY,
+                                    update_appointments: bool = False, clean_and_insert: bool = False,
+                                    start_date: str = "", end_date: str = "") -> dict:
     """Core sync entry point -- takes an in-memory appointments list (the same
     shape appointments-by-date's JSON `appointments` field uses), processes
     it concurrently (see module docstring), and returns the summary dict.
+
+    update_appointments / clean_and_insert: both destructive, see their
+    warnings in the module docstring. clean_and_insert requires start_date
+    and end_date (YYYY-MM-DD) and runs before anything else, on its own
+    connection -- fully committed before any group starts inserting, so
+    there's no race between the wipe and the fresh inserts.
 
     Reusable from both the CLI (main, below, which loads the list from a
     file) and the /appointments-by-date HTTP endpoint (server.py, which
@@ -392,12 +467,24 @@ def sync_appointments_to_edi_tebra(appointments: list, rcm_system_email: str = D
         "patients_matched": 0,
         "patients_created": 0,
         "visits_inserted": 0,
+        "visits_updated": 0,
         "visits_skipped_existing": 0,
         "skipped_bad_dob": 0,
         "row_errors": 0,
     }
     if total == 0:
         return {"total_appointments": 0, **counts}
+
+    if clean_and_insert:
+        if not (start_date and end_date):
+            raise ValueError("clean_and_insert requires start_date and end_date.")
+        deleted = clean_visits_for_range(date.fromisoformat(start_date), date.fromisoformat(end_date))
+        print(
+            f"clean_and_insert: deleted {deleted} existing patient_visit_header row(s) "
+            f"for client_id={CLIENT_ID}, group_id={GROUP_ID}, practice_id={PRACTICE_ID} "
+            f"in [{start_date}, {end_date}]",
+            flush=True,
+        )
 
     conn = _connect()
     try:
@@ -407,7 +494,7 @@ def sync_appointments_to_edi_tebra(appointments: list, rcm_system_email: str = D
         conn.close()
     print(
         f"Using client_id={CLIENT_ID}, group_id={GROUP_ID}, practice_id={PRACTICE_ID}, "
-        f"created_by={created_by}, concurrency={concurrency}",
+        f"created_by={created_by}, concurrency={concurrency}, update_appointments={update_appointments}",
         flush=True,
     )
 
@@ -419,7 +506,7 @@ def sync_appointments_to_edi_tebra(appointments: list, rcm_system_email: str = D
     print_lock = threading.Lock()
     with ThreadPoolExecutor(max_workers=concurrency) as pool:
         futures = [
-            pool.submit(_sync_patient_group, appts_with_indices, created_by, total, print_lock)
+            pool.submit(_sync_patient_group, appts_with_indices, created_by, total, print_lock, update_appointments)
             for appts_with_indices in groups.values()
         ]
         for future in as_completed(futures):
@@ -433,6 +520,8 @@ def sync_appointments_to_edi_tebra(appointments: list, rcm_system_email: str = D
                 counts["patients_created" if outcome["patient"] == "created" else "patients_matched"] += 1
                 if outcome["visit"] == "inserted":
                     counts["visits_inserted"] += 1
+                elif outcome["visit"] == "updated":
+                    counts["visits_updated"] += 1
                 else:
                     counts["visits_skipped_existing"] += 1
 
@@ -450,13 +539,26 @@ def main() -> int:
     parser.add_argument("--appointments-json", required=True)
     parser.add_argument("--rcm-system-email", default=DEFAULT_RCM_SYSTEM_EMAIL)
     parser.add_argument("--concurrency", type=int, default=DEFAULT_SYNC_CONCURRENCY)
+    parser.add_argument("--update-appointments", action="store_true",
+                         help="DELETE+re-INSERT a matching existing visit instead of skipping it. "
+                              "See update_appointments' warning in the module docstring.")
+    parser.add_argument("--clean-and-insert", action="store_true",
+                         help="DELETE every existing visit in the JSON's own [start_date, end_date] "
+                              "for this practice before inserting -- NOT scoped to PF-sourced rows "
+                              "only. See clean_and_insert's warning in the module docstring.")
     args = parser.parse_args()
 
     payload = json.loads(Path(args.appointments_json).read_text())
     appointments = payload.get("appointments", [])
     print(f"Loaded {len(appointments)} appointment(s) from {args.appointments_json}", flush=True)
 
-    sync_appointments_to_edi_tebra(appointments, args.rcm_system_email, args.concurrency)
+    sync_appointments_to_edi_tebra(
+        appointments, args.rcm_system_email, args.concurrency,
+        update_appointments=args.update_appointments,
+        clean_and_insert=args.clean_and_insert,
+        start_date=payload.get("start_date", ""),
+        end_date=payload.get("end_date", ""),
+    )
     return 0
 
 
