@@ -1,295 +1,898 @@
 # MyOps FastAPI Deployment Guide
 
-Since the merge of Tebra + Practice Fusion sync into one process, this doc covers
-two paths:
-- **[Fresh deployment](#fresh-deployment-brand-new-vm)** -- nothing set up yet, starting from a bare VM.
-- **[Update an existing deployment](#update-an-existing-deployment)** -- the VM
-  is already running the old Tebra-only `myops` service and needs to move over
-  to the combined `server.py` entrypoint, or is already on it and just needs a
-  routine code update.
+## Purpose
 
-The systemd unit is checked into the repo at [`myops/myops.service`](myops.service)
--- copy it to `/etc/systemd/system/myops.service` rather than hand-typing it.
+This guide covers deployment and the one-time Practice Fusion (PF) browser/OTP setup for the combined Tebra + Practice Fusion service.
+
+There are two deployment paths:
+
+1. **Fresh deployment** — brand-new VM.
+2. **Update an existing deployment** — existing VM already running the service.
+
+The important browser rule is:
+
+- Tebra can run headless.
+- Practice Fusion's **first login must be headed** so a human can complete the OTP/security challenge.
+- Use the persistent Chrome profile `~/pf_rpa_chrome` for that first login.
+- After the first successful login/device verification, `PF_PLAYWRIGHT_HEADLESS=true` can be used for unattended PF runs.
+- If PF later asks for OTP again, temporarily set it back to `false` and repeat the headed login.
 
 ---
 
-## Fresh deployment (brand-new VM)
+# 1. Fresh Deployment — Brand-New VM
 
-### 1) Clone the repo
+## 1.1 SSH into the VM
+
+From your local computer:
 
 ```bash
 ssh ibrcmadmin@20.46.228.47
-git clone <repo-url> ~/intellibill-rpa-vm
-cd ~/intellibill-rpa-vm
-git checkout prod
 ```
 
-### 2) Create the shared venv (repo root -- not `myops/.venv` or `pf_sync_v5_6/.venv`)
+## 1.2 Clone the repository
+
+```bash
+git clone <repo-url> ~/intellibill-rpa-vm
+cd ~/intellibill-rpa-vm
+git checkout dev
+```
+
+## 1.3 Create the shared virtual environment
+
+The virtual environment belongs at the **repository root**:
+
+```text
+~/intellibill-rpa-vm/venv
+```
+
+Create and activate it:
 
 ```bash
 python3.12 -m venv venv
 source venv/bin/activate
-pip install -r requirements.txt
-python -m playwright install chromium
-python -m playwright install-deps chromium   # Linux only -- system libs Chromium needs
 ```
 
-`requirements.txt` at the repo root just points at `myops/requirements.txt`,
-which already covers everything `pf_sync_v5_6` needs too -- one venv, one
-install command, for both apps.
+Install dependencies:
 
-### 3) Configure secrets -- `.env`
+```bash
+pip install -r requirements.txt
+python -m playwright install chromium
+python -m playwright install-deps chromium
+```
+
+`requirements.txt` at the repository root covers the dependencies needed by both MyOps and PF sync.
+
+## 1.4 Configure `.env`
 
 ```bash
 cp .env.example .env
 ```
 
-Fill in, at minimum, everything the combined server touches on startup/first
-use:
-- `MYOPS_API_ENV=production`, `PF_SYNC_API_ENV=production`
-- `TEBRA_EMAIL`, `TEBRA_PASSWORD`, `TEBRA_MAILBOX_UPN`, `TEBRA_STORAGE_ACCOUNT_*`
-- `PF_USERNAME`, `PF_PASSWORD`, `PF_PRACTICE_TIMEZONE`
-- `MYOPS_DB_*` (and any of `PCH_DB_*` / `RCM_DB_*` your entity actually uses)
-- Azure/Graph vars for the OTP mailbox (`AZURE_CLIENT_ID`, `AZURE_CLIENT_SECRET`,
-  `AZURE_TENANT_ID`, `MYOPS_AZURE_CLIENT_ID`/`_SECRET`) -- see
-  `myops/README.md` §4a for what these do and how to obtain them.
+Set the required production values, including:
 
-### 4) One-time RPA/browser setup (do this before starting the service)
+```dotenv
+MYOPS_API_ENV=production
+PF_SYNC_API_ENV=production
 
-Both Tebra and Practice Fusion sync drive a **real Chrome browser**, but they
-differ in what that actually requires on a headless Linux VM (no monitor, no
-X server by default):
+EHR_PLAYWRIGHT_HEADLESS=true
+PF_PLAYWRIGHT_HEADLESS=false
+```
 
-- **Tebra can run fully headless.** `myops/ehr/pipeline.py` calls
-  `playwright.chromium.launch(headless=...)` directly, and its OTP step is
-  automated by reading the code from an email mailbox via Microsoft Graph
-  (`otp_info.py`/`email_read.py`) -- no human ever needs to see the browser.
-  Set `EHR_PLAYWRIGHT_HEADLESS=true` in `.env` explicitly (don't leave it
-  blank -- see the Xvfb note below for why) and follow `myops/README.md`
-  (§4a) once to wire up the Graph OTP-mailbox app.
-- **Practice Fusion sync can run headless too, but only *after* its first
-  login.** `pf_sync_pkg/browser.py`'s `_pf_headless()` reads
-  `PF_PLAYWRIGHT_HEADLESS` from `.env` (same true/false parsing as
-  `EHR_PLAYWRIGHT_HEADLESS`) and adds real Chrome's own `--headless=new` flag
-  when it's true -- same profile, same binary, just off-screen. Its OTP/
-  security-check step still has **no automated reader**, though -- a human
-  has to see and solve it -- so:
-  - **Leave `PF_PLAYWRIGHT_HEADLESS=false` (the default) until the first
-    login below has already succeeded** in this exact
-    `chrome_user_data_dir` (`~/pf_rpa_chrome`).
-  - **Only flip it to `true` afterward**, for ongoing unattended runs. PF's
-    "remember this device" session persists in that Chrome profile across
-    runs, so headless calls shouldn't hit the OTP screen again -- but if PF
-    ever does re-challenge it, a headless run has no way for anyone to see or
-    solve it and will just time out after `login_timeout_seconds`. Set it
-    back to `false` and re-run the login step below (via VNC) to recover.
-  - Either way, on this display-less VM the **first login itself always
-    needs**:
-    1. A **virtual display (Xvfb)** so headed Chrome has somewhere to render
-       into at all -- without this it crashes immediately with
-       `Missing X server or $DISPLAY`.
-    2. A **VNC session** into that virtual display, to actually see and solve
-       Practice Fusion's OTP challenge.
+Also configure the required Tebra, Practice Fusion, database, Azure/Graph, and storage variables described by the application.
 
-**Set up Xvfb (once, before anything else in this section):**
+**Important:** Keep `PF_PLAYWRIGHT_HEADLESS=false` until the first PF login has successfully completed in `~/pf_rpa_chrome`.
+
+---
+
+# 2. One-Time Practice Fusion Browser Setup
+
+This section is the same for a fresh VM or an existing VM that does not yet have the PF browser session.
+
+## 2.1 Install the virtual display and VNC packages
+
+Run on the **VM**:
 
 ```bash
 sudo apt update
-sudo apt install -y xvfb x11vnc
+sudo apt install -y xvfb x11vnc openbox
+```
+
+Install the Xvfb systemd service from the repository:
+
+```bash
 sudo cp ~/intellibill-rpa-vm/myops/xvfb.service /etc/systemd/system/xvfb.service
 sudo systemctl daemon-reload
 sudo systemctl enable --now xvfb
 ```
 
-`myops.service` (see step 5 below) already depends on `xvfb.service` and sets
-`DISPLAY=:99` for the app -- **important side effect**: this also makes
-`DISPLAY` visible to Tebra's own auto-headless-detection in
-`myops/ehr/config.py`, which otherwise defaults to headless *because* no
-`DISPLAY` was set. With Xvfb's `DISPLAY=:99` now present, that auto-detection
-would flip Tebra to headed too unless `EHR_PLAYWRIGHT_HEADLESS=true` is set
-explicitly in `.env` -- which is why that's called out above as required, not
-optional, once Xvfb is in the picture.
-
-**Log into Practice Fusion once, via VNC on the virtual display:**
+Verify:
 
 ```bash
-# On the VM: start a temporary VNC server pointed at the Xvfb display
-x11vnc -display :99 -nopw -listen localhost -xkb &
-
-# On your laptop: tunnel that port over SSH, then connect a VNC client to localhost:5900
-ssh -L 5900:localhost:5900 ibrcmadmin@20.46.228.47
-# (in a VNC client) connect to localhost:5900
-
-# Now, ALSO on the VM, run pf_sync's login flow with DISPLAY=:99 so Chrome
-# renders into the display you're VNC'd into -- follow pf_sync_v5_6/README.md
-# §1's login steps, e.g.:
-cd ~/intellibill-rpa-vm/pf_sync_v5_6
-DISPLAY=:99 ../venv/bin/python pf_soap_sync_v5_16.py doctor \
-  --config-json config/pf_pdf_sync_config.json \
-  --report-config-json config/pf_appointment_report_config.json
-# watch the VNC window, solve the OTP challenge when it appears, then close
-# the temporary x11vnc process (kill %1) once login succeeds
+systemctl status xvfb --no-pager
 ```
 
-Skip this and the first real API call will either hang waiting for a login
-prompt no one can see, or crash immediately with a `Missing X server`
-error -- see whichever applies based on whether Xvfb is installed yet.
+You should see:
 
-### 5) Install the systemd unit
+```text
+Active: active (running)
+```
+
+Verify that display `:99` is accessible:
 
 ```bash
-sudo cp ~/intellibill-rpa-vm/myops/myops.service /etc/systemd/system/myops.service
-sudo systemctl daemon-reload
-sudo systemctl enable myops
-sudo systemctl start myops
+DISPLAY=:99 xdpyinfo >/dev/null && echo "DISPLAY OK"
 ```
 
-Double-check the `User=`, `WorkingDirectory=`, and `ExecStart=` paths in the
-copied unit file actually match this VM's username and clone path before
-starting it -- `myops/myops.service`'s checked-in values
-(`/home/ibrcmadmin/intellibill-rpa-vm`, user `ibrcmadmin`) are examples, not
-guaranteed to match every environment.
+Expected:
 
-### 6) Verify
+```text
+DISPLAY OK
+```
 
-See [Verify locally on VM](#8-verify-locally-on-vm) below -- same checks apply
-to a fresh install as to an update.
+## 2.2 Start Openbox
 
-### 7) Put Nginx in front (recommended)
+Xvfb provides the virtual X display but does not provide a window manager.
 
-See [Production Recommendation](#production-recommendation) below.
+Run on the **VM**:
+
+```bash
+DISPLAY=:99 openbox &
+```
+
+A warning about:
+
+```text
+/var/lib/openbox/debian-menu.xml
+```
+
+is harmless for this setup.
+
+## 2.3 Start x11vnc
+
+Run on the **VM**.
+
+First make sure an older x11vnc process is not already using port 5900:
+
+```bash
+pkill -x x11vnc
+```
+
+Then start exactly one x11vnc process:
+
+```bash
+x11vnc \
+  -display :99 \
+  -nopw \
+  -localhost \
+  -forever \
+  -shared \
+  -noxdamage \
+  -noxfixes \
+  -noxrecord \
+  -nowf \
+  -noscr \
+  -wait 5 \
+  -defer 5 \
+  -rfbport 5900
+```
+
+**Leave this terminal running.**
+
+In another VM terminal, verify:
+
+```bash
+sudo ss -ltnp | grep 5900
+```
+
+Expected:
+
+```text
+127.0.0.1:5900 ... x11vnc
+```
+
+There should be only one x11vnc process listening on port 5900.
+
+### Important
+
+If you see:
+
+```text
+Address already in use
+Error: could not obtain listening port
+```
+
+another x11vnc process is already running. Run:
+
+```bash
+pkill -x x11vnc
+```
+
+and start the command again.
 
 ---
 
-## Update an existing deployment
+# 3. Connect From Your Mac Using SSH + TigerVNC
 
-### Moving from the old Tebra-only unit to the combined one (one-time)
+This section is performed on the **Mac**, not on the VM.
 
-The `myops` systemd service must now run the **repo-root** `server.py`, not
-`myops/server.py` directly. That file loads and mounts both `myops/server.py`'s
-app (Tebra, unprefixed routes) and `pf_sync_v5_6/server.py`'s app (Practice
-Fusion sync, under `/pf-sync`) into one process on one port -- see `server.py`'s
-module docstring for the full rationale. Re-install the unit file from the
-checked-in copy rather than hand-editing the old one:
+## 3.1 Create the SSH tunnel
+
+Open a Mac Terminal:
 
 ```bash
-sudo cp ~/intellibill-rpa-vm/myops/myops.service /etc/systemd/system/myops.service
-sudo systemctl daemon-reload
-sudo systemctl restart myops
+ssh -L 5900:127.0.0.1:5900 ibrcmadmin@20.46.228.47
 ```
 
-(Adjust `User=`/`WorkingDirectory=`/`ExecStart=` in the copied file first if
-this VM's username or clone path differs from the checked-in example.)
+Enter the **VM SSH password** when SSH asks for it.
 
-If a **separate, standalone `pf_sync` systemd unit** exists on the VM from
-before this merge (serving port 8011 on its own), disable and remove it --
-see the port-8011 check in step 8 below.
+Leave this Terminal open.
 
-**If this VM didn't already have a virtual display set up**: the updated
-`myops.service` now sets `Environment=DISPLAY=:99` and depends on
-`xvfb.service` -- if that unit doesn't exist yet on the VM, `myops` will fail
-to start (or Chrome-driving endpoints will crash with `Missing X server or
-$DISPLAY`). Do the [Xvfb + one-time Practice Fusion login setup](#4-one-time-rpabrowser-setup-do-this-before-starting-the-service)
-from the fresh-deployment section above before restarting `myops` -- it
-applies here too, not just to brand-new VMs.
+This creates:
 
-### 1) SSH into the VM
+```text
+Mac localhost:5900
+        |
+        | SSH tunnel
+        v
+VM localhost:5900
+        |
+        v
+x11vnc
+```
+
+## 3.2 Verify the tunnel
+
+Open a **second Mac Terminal**.
+
+Run:
 
 ```bash
-ssh ibrcmadmin@20.46.228.47
+nc -vz localhost 5900
 ```
 
-### 2) Navigate to the project
+Expected:
+
+```text
+Connection to localhost port 5900 [tcp/rfb] succeeded!
+```
+
+If this succeeds, the SSH tunnel is working.
+
+If it says connection refused, check that:
+
+1. x11vnc is still running on the VM.
+2. x11vnc is listening on port 5900.
+3. The SSH tunnel Terminal is still open.
+
+## 3.3 Install TigerVNC on the Mac
+
+Only needed once:
+
+```bash
+brew install --cask tigervnc
+```
+
+## 3.4 Open TigerVNC
+
+On the **Mac**:
+
+```bash
+open -a TigerVNC
+```
+
+In the TigerVNC Server field enter:
+
+```text
+localhost:5900
+```
+
+Then click **Connect**.
+
+### Do not enter a VNC password
+
+x11vnc was started with:
+
+```text
+-nopw
+```
+
+so VNC authentication is disabled for this localhost-only tunnel.
+
+The VM SSH password is used for the SSH tunnel, **not** for VNC.
+
+### Do not run this on the VM
+
+```bash
+open "vnc://localhost:5900"
+```
+
+The VNC viewer runs on your Mac. The VM only hosts x11vnc.
+
+---
+
+# 4. Launch the Real Practice Fusion Chrome Profile
+
+Once TigerVNC is connected, the Chrome window must run on the same X display:
+
+```text
+DISPLAY=:99
+```
+
+The persistent PF profile is:
+
+```text
+/home/ibrcmadmin/pf_rpa_chrome
+```
+
+## 4.1 Make sure PF is headed
+
+On the VM:
+
+```bash
+grep PF_PLAYWRIGHT_HEADLESS .env
+```
+
+For the first login, it must be:
+
+```dotenv
+PF_PLAYWRIGHT_HEADLESS=false
+```
+
+## 4.2 Optional: manually verify Chrome visibility
+
+If you want to verify the browser before running PF automation:
+
+```bash
+cd ~/intellibill-rpa-vm
+
+DISPLAY=:99 google-chrome \
+  --no-sandbox \
+  --disable-gpu \
+  --disable-dev-shm-usage \
+  --user-data-dir="$HOME/pf_rpa_chrome" \
+  --start-maximized
+```
+
+Chrome should appear inside TigerVNC.
+
+**Do not use a temporary profile such as `pf_rpa_chrome_test` for the real PF login.**
+
+---
+
+# 5. Complete the First Practice Fusion Login
+
+Once the real Chrome profile is visible in TigerVNC, run the actual PF login flow.
+
+The shared Python environment is at:
+
+```text
+~/intellibill-rpa-vm/venv
+```
+
+From the repository root:
 
 ```bash
 cd ~/intellibill-rpa-vm
 ```
 
-### 3) Pull latest code
+Run:
 
 ```bash
-git checkout dev
+DISPLAY=:99 ./venv/bin/python pf_sync_v5_6/pf_soap_sync_v5_16.py pull-report \
+  --report-config-json pf_sync_v5_6/config/pf_appointment_report_config.json \
+  --output-csv /tmp/pf_report_test.csv \
+  --chrome-user-data-dir "$HOME/pf_rpa_chrome"
+```
+
+Alternatively, from the PF directory:
+
+```bash
+cd ~/intellibill-rpa-vm/pf_sync_v5_6
+
+DISPLAY=:99 ../venv/bin/python pf_soap_sync_v5_16.py pull-report \
+  --report-config-json config/pf_appointment_report_config.json \
+  --output-csv /tmp/pf_report_test.csv \
+  --chrome-user-data-dir "$HOME/pf_rpa_chrome"
+```
+
+Watch the TigerVNC window.
+
+When Practice Fusion displays its OTP/security challenge:
+
+1. Complete the login in the visible Chrome window.
+2. Enter the OTP directly into Practice Fusion.
+3. Complete any security/remember-device step.
+4. Wait for the login to finish successfully.
+
+Do **not** send the OTP through SSH or into this documentation.
+
+The important part is that the successful login happens in:
+
+```text
+~/pf_rpa_chrome
+```
+
+so the persistent browser profile retains the device/session state.
+
+---
+
+# 6. After the First PF Login
+
+Once the first login has succeeded, stop using the manual VNC workflow for normal unattended runs.
+
+Change `.env`:
+
+```dotenv
+PF_PLAYWRIGHT_HEADLESS=true
+```
+
+Restart the application after changing `.env`:
+
+```bash
+sudo systemctl restart myops
+```
+
+The normal production PF process can then run headless using the same persistent profile.
+
+If Practice Fusion later requires another OTP/security challenge:
+
+1. Set:
+   ```dotenv
+   PF_PLAYWRIGHT_HEADLESS=false
+   ```
+2. Restart the service if it is already running.
+3. Start Xvfb/Openbox/x11vnc.
+4. Connect from the Mac with TigerVNC.
+5. Run the PF login flow on `DISPLAY=:99`.
+6. Complete the OTP.
+7. Set:
+   ```dotenv
+   PF_PLAYWRIGHT_HEADLESS=true
+   ```
+8. Restart the service.
+
+---
+
+# 7. Install the Combined MyOps Systemd Service
+
+Copy the checked-in service file:
+
+```bash
+sudo cp ~/intellibill-rpa-vm/myops/myops.service /etc/systemd/system/myops.service
+```
+
+Before starting it, verify these values in the copied unit:
+
+```text
+User=
+WorkingDirectory=
+ExecStart=
+```
+
+They must match the actual VM username and repository path.
+
+Reload and enable:
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable myops
+sudo systemctl start myops
+```
+
+The combined service should use the repository-root `server.py`, not the old standalone `myops/server.py`.
+
+The service depends on Xvfb and uses:
+
+```text
+DISPLAY=:99
+```
+
+for the application environment.
+
+---
+
+# 8. Update an Existing Deployment
+
+Use this section when the VM already has the application deployed.
+
+## 8.1 SSH into the VM
+
+```bash
+ssh ibrcmadmin@20.46.228.47
+```
+
+## 8.2 Go to the repository
+
+```bash
+cd ~/intellibill-rpa-vm
+```
+
+## 8.3 Pull the production code
+
+```bash
+git checkout prod
 git fetch origin
 git reset --hard origin/prod
 ```
 
-### 4) Activate virtual environment
+## 8.4 Activate the shared venv
 
 ```bash
 source venv/bin/activate
 ```
 
-### 5) Install dependencies (only if requirements changed)
+## 8.5 Install dependencies if needed
 
 ```bash
 pip install -r requirements.txt
 ```
 
-(The repo-root `requirements.txt` just points at `myops/requirements.txt`,
-which already covers every dependency `pf_sync_v5_6` needs too -- one shared
-venv, one install command.)
-
-If Playwright/Chromium isn't already installed in this venv (needed by both
-Tebra and Practice Fusion sync's browser automation):
+If Playwright/Chromium needs to be installed or updated:
 
 ```bash
 python -m playwright install chromium
 ```
 
-### 6) Restart service
+## 8.6 Check PF headless mode
+
+For normal production operation after the first PF login:
 
 ```bash
+grep PF_PLAYWRIGHT_HEADLESS .env
+```
+
+Expected:
+
+```dotenv
+PF_PLAYWRIGHT_HEADLESS=true
+```
+
+For a first login or OTP recovery:
+
+```dotenv
+PF_PLAYWRIGHT_HEADLESS=false
+```
+
+## 8.7 Make sure Xvfb exists
+
+If this VM does not already have Xvfb:
+
+```bash
+sudo apt update
+sudo apt install -y xvfb x11vnc openbox
+sudo cp ~/intellibill-rpa-vm/myops/xvfb.service /etc/systemd/system/xvfb.service
+sudo systemctl daemon-reload
+sudo systemctl enable --now xvfb
+```
+
+For an OTP recovery, follow Sections 2–6 of this guide.
+
+## 8.8 Reinstall the combined systemd unit
+
+```bash
+sudo cp ~/intellibill-rpa-vm/myops/myops.service /etc/systemd/system/myops.service
 sudo systemctl daemon-reload
 sudo systemctl restart myops
 ```
 
-### 7) Verify service
+The combined service serves both:
+
+```text
+Tebra routes
+Practice Fusion routes under /pf-sync
+```
+
+If a separate old PF systemd service is still running on port 8011, it should be retired.
+
+---
+
+# 9. Verify the Running Service
+
+Check the service:
 
 ```bash
 sudo systemctl status myops
+```
+
+Check recent logs:
+
+```bash
 sudo journalctl -u myops -n 50 --no-pager
 ```
 
-### 8) Verify locally on VM
+Check the main health endpoint:
 
 ```bash
 curl -sS http://127.0.0.1:8010/healthz
 ```
 
-Expected response:
+Expected:
 
 ```json
 {"status":"ok"}
 ```
 
-The `myops` service now also serves Practice Fusion sync (`pf_sync_v5_6/server.py`),
-mounted at `/pf-sync` by the combined `server.py` entrypoint -- verify that too:
+Check PF sync:
 
 ```bash
 curl -sS http://127.0.0.1:8010/pf-sync/healthz
 ```
 
+Expected:
+
 ```json
 {"status":"ok"}
 ```
 
-The standalone `pf_sync` process on port 8011 is retired -- nothing should be
-listening there anymore. Confirm with:
+Check the retired PF port:
 
 ```bash
-sudo ss -tulpn | grep 8011   # expect no output
+sudo ss -tulpn | grep 8011
 ```
 
-If a leftover standalone `pf_sync` systemd unit or ad-hoc process is still running
-on 8011 from before this merge, stop and disable it on the VM.
-
-### 9) Production URL
+Expected:
 
 ```text
-http://<SERVER-IP>/
+no output
 ```
 
-## Useful Commands
+Check the active application port:
+
+```bash
+sudo ss -tulpn | grep 8010
+```
+
+---
+
+# 10. Production Configuration
+
+Keep Uvicorn bound to:
+
+```text
+127.0.0.1:8010
+```
+
+Put Nginx in front of the application for external HTTP/HTTPS access.
+
+Production `.env`:
+
+```dotenv
+MYOPS_API_ENV=production
+PF_SYNC_API_ENV=production
+```
+
+Development `.env`:
+
+```dotenv
+MYOPS_API_ENV=development
+PF_SYNC_API_ENV=development
+```
+
+`.env` is the source of truth for these values.
+
+After changing `.env`:
+
+```bash
+sudo systemctl restart myops
+```
+
+Changing `.env` alone does not change an already-running process.
+
+---
+
+# 11. Troubleshooting
+
+## VNC: `Address already in use`
+
+Run:
+
+```bash
+pkill -x x11vnc
+sudo ss -ltnp | grep 5900
+```
+
+Start one clean x11vnc process again.
+
+## Mac: `nc -vz localhost 5900` fails
+
+Make sure the Mac SSH tunnel is still open:
+
+```bash
+ssh -L 5900:127.0.0.1:5900 ibrcmadmin@20.46.228.47
+```
+
+Then from another Mac Terminal:
+
+```bash
+nc -vz localhost 5900
+```
+
+## TigerVNC connects but screen is blank
+
+On the VM verify:
+
+```bash
+systemctl status xvfb --no-pager
+DISPLAY=:99 xdpyinfo >/dev/null && echo "DISPLAY OK"
+```
+
+Make sure Openbox is running:
+
+```bash
+DISPLAY=:99 openbox &
+```
+
+Make sure Chrome is running on the same display:
+
+```bash
+pgrep -a -f '/opt/google/chrome/chrome'
+```
+
+The Chrome window can be inspected with:
+
+```bash
+DISPLAY=:99 xwininfo -root -tree
+```
+
+A Chrome window should appear in the output.
+
+## `xterm: command not found`
+
+This is not a Chrome or VNC failure. `xterm` is not required.
+
+## Chrome DBus / UPower warning
+
+Messages mentioning:
+
+```text
+org.freedesktop.UPower
+```
+
+are not by themselves a PF login failure on this minimal VM.
+
+## Chrome profile
+
+The real persistent profile is:
+
+```text
+~/pf_rpa_chrome
+```
+
+Do not replace it with:
+
+```text
+~/pf_rpa_chrome_test
+```
+
+for the actual PF login.
+
+## Python path
+
+From:
+
+```text
+~/intellibill-rpa-vm
+```
+
+use:
+
+```bash
+./venv/bin/python
+```
+
+From:
+
+```text
+~/intellibill-rpa-vm/pf_sync_v5_6
+```
+
+use:
+
+```bash
+../venv/bin/python
+```
+
+Do not use:
+
+```bash
+../venv/bin/python
+```
+
+while you are already at the repository root.
+
+---
+
+# 12. Quick First-Time PF Login Checklist
+
+For a first-time PF OTP login, the complete sequence is:
+
+### VM — Terminal 1
+
+```bash
+sudo systemctl status xvfb --no-pager
+```
+
+### VM — Terminal 2
+
+```bash
+DISPLAY=:99 openbox &
+```
+
+### VM — Terminal 3
+
+```bash
+pkill -x x11vnc
+
+x11vnc \
+  -display :99 \
+  -nopw \
+  -localhost \
+  -forever \
+  -shared \
+  -noxdamage \
+  -noxfixes \
+  -noxrecord \
+  -nowf \
+  -noscr \
+  -wait 5 \
+  -defer 5 \
+  -rfbport 5900
+```
+
+### Mac — Terminal 1
+
+```bash
+ssh -L 5900:127.0.0.1:5900 ibrcmadmin@20.46.228.47
+```
+
+### Mac — Terminal 2
+
+```bash
+nc -vz localhost 5900
+```
+
+Expected:
+
+```text
+Connection to localhost port 5900 [tcp/rfb] succeeded!
+```
+
+### Mac — TigerVNC
+
+Connect to:
+
+```text
+localhost:5900
+```
+
+### VM — PF login
+
+```bash
+cd ~/intellibill-rpa-vm
+
+DISPLAY=:99 ./venv/bin/python pf_sync_v5_6/pf_soap_sync_v5_16.py pull-report \
+  --report-config-json pf_sync_v5_6/config/pf_appointment_report_config.json \
+  --output-csv /tmp/pf_report_test.csv \
+  --chrome-user-data-dir "$HOME/pf_rpa_chrome"
+```
+
+Complete the OTP/security challenge in the visible Chrome window.
+
+After successful first login:
+
+```dotenv
+PF_PLAYWRIGHT_HEADLESS=true
+```
+
+Then:
+
+```bash
+sudo systemctl restart myops
+```
+
+---
+
+# 13. Useful Commands
 
 Restart:
 
@@ -315,46 +918,20 @@ Tail logs:
 sudo journalctl -fu myops
 ```
 
-Check port:
+Check port 8010:
 
 ```bash
 sudo ss -tulpn | grep 8010
 ```
 
-## Production Recommendation
-
-- Keep Uvicorn bound to `127.0.0.1:8010`.
-- Put Nginx in front on port 80/443.
-- Disable FastAPI docs in production using environment variables -- both apps
-  gate their own docs independently off their own env var:
-
-```dotenv
-MYOPS_API_ENV=production
-PF_SYNC_API_ENV=production
-```
-
-- For development, use:
-
-```dotenv
-MYOPS_API_ENV=development
-PF_SYNC_API_ENV=development
-```
-
-**`.env` is the single source of truth for these two vars** -- `myops.service`
-only does `EnvironmentFile=.../.env`, it does NOT hardcode `Environment=` lines
-for `MYOPS_API_ENV`/`PF_SYNC_API_ENV` on top of that. If you ever add an
-`Environment=MYOPS_API_ENV=...` (or `PF_SYNC_API_ENV=...`) line directly to the
-unit file, know that it silently wins over whatever `.env` says (systemd
-applies `EnvironmentFile=` first, then explicit `Environment=` lines override
-it) -- editing `.env` afterward would look like it does nothing.
-
-After changing `.env`, restart for it to take effect -- editing the file alone
-doesn't affect an already-running process:
+Check Xvfb:
 
 ```bash
-sudo systemctl restart myops
+systemctl status xvfb --no-pager
 ```
 
-If docs are disabled in production, `/docs`, `/redoc`, `/openapi.json`,
-`/pf-sync/docs`, `/pf-sync/redoc`, and `/pf-sync/openapi.json` will not be
-available.
+Check VNC:
+
+```bash
+sudo ss -ltnp | grep 5900
+```
