@@ -398,14 +398,6 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     appointments_by_date.add_argument("--schedule-config-json", default="")
-    appointments_by_date.add_argument(
-        "--output-json", default="",
-        help=(
-            "Write the result to this JSON file too (not just the return value/HTTP "
-            "response). Defaults to appointments_by_date_<start>_to_<end>.json in the "
-            "current directory when left blank."
-        ),
-    )
     add_report_dates(appointments_by_date)
     add_browser_arguments(appointments_by_date)
 
@@ -1235,20 +1227,6 @@ def run_appointments_by_date(args: argparse.Namespace) -> dict:
                 for appt in appointments
             ],
         }
-
-        output_json = getattr(args, "output_json", "") or (
-            f"appointments_by_date_{start_date.isoformat()}_to_{end_date.isoformat()}.json"
-        )
-        try:
-            atomic_write_json(output_json, result)
-            result["output_json_path"] = str(Path(output_json).resolve())
-            print(f"Wrote {result['count']} appointment(s) to {result['output_json_path']}", flush=True)
-        except Exception as exc:
-            # Never let a write failure erase the already-scraped, already-returned
-            # result -- same "surface, don't swallow the real work" pattern as
-            # build_and_upload_zip's own docstring.
-            result["output_json_error"] = f"{type(exc).__name__}: {exc}"
-            print(f"  WARNING: could not write {output_json}: {exc}", flush=True)
 
         return result
 

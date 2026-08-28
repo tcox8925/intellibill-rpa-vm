@@ -616,7 +616,6 @@ class AppointmentsByDateRequest(BrowserFieldsNoCreds, ReportDateFields):
         default_factory=lambda: _pf_path("config/pf_schedule_scrape_config.json"),
         examples=[_pf_path("config/pf_schedule_scrape_config.json")],
     )
-    output_json: str = ""
     wait_for_completion: bool = True
 
 
