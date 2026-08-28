@@ -86,6 +86,12 @@ app = FastAPI(
 
 PF_SYNC_API_PORT = int(os.environ.get("PF_SYNC_API_PORT", 8011))
 
+# Hardcoded for now (2026-08-28 direction) -- true: /appointments-by-date
+# also syncs its result straight into EDI_Tebra.patient_visit_header; false:
+# fetch-only, just returns the scraped JSON. Meant to become a real request
+# field later.
+INSERT_INTO_DB = True
+
 # Only one Chrome/CDP session can be driven at a time, so every browser-driving
 # endpoint shares this single lock.
 _locks = {}
@@ -625,17 +631,15 @@ class AppointmentsByDateRequestSlim(BaseModel):
     FacesheetPullByDateRequestSlim's docstring above for why the browser/config
     fields aren't exposed here at all.
 
-    sync_dry_run: after the Schedule scrape, this endpoint always feeds the
-    result straight into sync_appointments_to_edi_tebra (patient match/create
-    + patient_visit_header insert, see that module's docstring) -- set this
-    true to run that step without committing, e.g. to sanity-check a date
-    range before writing anything real."""
+    When INSERT_INTO_DB (module-level, hardcoded for now) is true, this
+    endpoint also feeds the Schedule scrape result straight into
+    sync_appointments_to_edi_tebra (patient match/create + patient_visit_header
+    insert, see that module's docstring); when false, it's fetch-only."""
 
     report_date: str = ""
     start_date: str = ""
     end_date: str = ""
     wait_for_completion: bool = True
-    sync_dry_run: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -972,10 +976,10 @@ def appointments_by_date_endpoint(request: AppointmentsByDateRequestSlim):
         # still holds this endpoint's own dispatch lock (see
         # _dispatch_browser_job) for its duration.
         fetch_result = run_appointments_by_date(args)
-        fetch_result["edi_tebra_sync"] = sync_appointments_to_edi_tebra(
-            fetch_result.get("appointments", []),
-            dry_run=request.sync_dry_run,
-        )
+        if INSERT_INTO_DB:
+            fetch_result["edi_tebra_sync"] = sync_appointments_to_edi_tebra(
+                fetch_result.get("appointments", [])
+            )
         return fetch_result
 
     return _dispatch_browser_job(request.wait_for_completion, "appointments-by-date", job)

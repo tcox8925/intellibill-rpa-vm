@@ -3,7 +3,7 @@
 
 Usage:
     python3 sync_patient_visits_to_edi_tebra.py --appointments-json output_json/appointments_by_date_2026-06-29_to_2026-08-28.json
-    python3 sync_patient_visits_to_edi_tebra.py --appointments-json <path> --dry-run
+    python3 sync_patient_visits_to_edi_tebra.py --appointments-json <path> --concurrency 4
 
 For each appointment row:
   1. Look up EDI_Tebra.patient_header by source_id = the PF chart GUID
@@ -39,15 +39,24 @@ Internal Medicine"). NWARK = NW-ARK = Northwest Arkansas. Revisit this (a
 real per-practice resolver) if/when this pipeline serves more than one
 practice.
 
-Each appointment is processed inside its own SAVEPOINT so one bad row
-(unparseable data, an unexpected DB constraint) doesn't roll back the whole
-batch -- everything else in the run still commits.
+Concurrency: appointments are grouped by ehr_patient_guid and each GROUP runs
+on its own worker thread/connection, committing after every appointment
+individually -- one appointment never waits on the whole batch to finish, and
+a crash partway through no longer discards already-processed rows (each has
+already committed independently by then). Appointments for DIFFERENT patients
+run fully in parallel; appointments for the SAME patient stay serialized
+against each other on one connection, so the first one's patient_header
+creation is always committed and visible before the next looks it up -- see
+_sync_patient_group's docstring for why that matters.
 """
 
 import argparse
 import json
 import os
 import sys
+import threading
+from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime, time as dt_time
 from pathlib import Path
 from typing import Optional
@@ -60,6 +69,7 @@ load_dotenv(find_dotenv(usecwd=False))
 SCHEMA = "EDI_Tebra"
 RCM_SCHEMA = "rcm"  # rcm.users -- see rcm_schema/schema.ts's `users` table.
 DEFAULT_RCM_SYSTEM_EMAIL = os.environ.get("RCM_SYSTEM_EMAIL", "rcmsystem@834labs.com")
+DEFAULT_SYNC_CONCURRENCY = 8
 LOG_DIR = Path(__file__).resolve().parent / "logs"
 
 # Northwest Arkansas Internal Medicine -- the only practice this pipeline
@@ -284,44 +294,97 @@ def insert_patient_visit(cur, appt: dict, dos: date, patient_header_id: str,
     )
 
 
-def process_appointment(cur, appt: dict, created_by: str, counts: dict, index: int, total: int) -> None:
-    label = f"[{index}/{total}] {appt.get('first_name')} {appt.get('last_name')} on {appt.get('appointment_date')}"
+def process_appointment(cur, appt: dict, created_by: str) -> dict:
+    """Does the actual match/create + insert work for ONE appointment and
+    returns an outcome dict for the caller to log/tally -- no shared state
+    touched here, so this is safe to call from any thread as long as `cur`
+    belongs to that thread's own connection.
 
+    Returns {"visit": "skipped_bad_dob"}, or
+            {"patient": "created"|"matched", "visit": "skipped_existing"}, or
+            {"patient": "created"|"matched", "visit": "inserted", "provider": "found"|"not_found"}.
+    """
     dob = _parse_dob(appt.get("dob", ""))
     if dob is None:
-        counts["skipped_bad_dob"] += 1
-        print(f"{label}: SKIP -- unparseable dob {appt.get('dob')!r}", flush=True)
-        return
+        return {"visit": "skipped_bad_dob"}
 
     dos = date.fromisoformat(appt["appointment_date"])
 
     patient_header_id = find_patient_header_by_source_id(cur, appt["ehr_patient_guid"])
     if patient_header_id is None:
         patient_header_id = create_patient_header(cur, appt, dob)
-        counts["patients_created"] += 1
-        patient_outcome = "patient=created"
+        patient_kind = "created"
     else:
-        counts["patients_matched"] += 1
-        patient_outcome = "patient=matched"
+        patient_kind = "matched"
 
     if visit_already_exists(cur, patient_header_id, dos):
-        counts["visits_skipped_existing"] += 1
-        print(f"{label}: {patient_outcome}, visit=SKIPPED (already exists)", flush=True)
-        return
+        return {"patient": patient_kind, "visit": "skipped_existing"}
 
     provider_id = find_provider_id(cur, appt.get("provider_name", ""))
-    provider_outcome = "provider=found" if provider_id else "provider=NOT FOUND"
     insert_patient_visit(cur, appt, dos, patient_header_id, provider_id, created_by)
-    counts["visits_inserted"] += 1
-    print(f"{label}: {patient_outcome}, {provider_outcome}, visit=inserted", flush=True)
+    return {
+        "patient": patient_kind,
+        "visit": "inserted",
+        "provider": "found" if provider_id else "not_found",
+    }
+
+
+def _appointment_label(appt: dict, index: int, total: int) -> str:
+    return f"[{index}/{total}] {appt.get('first_name')} {appt.get('last_name')} on {appt.get('appointment_date')}"
+
+
+def _outcome_message(outcome: dict) -> str:
+    if outcome["visit"] == "skipped_bad_dob":
+        return "SKIP -- unparseable dob"
+    if outcome["visit"] == "skipped_existing":
+        return f"patient={outcome['patient']}, visit=SKIPPED (already exists)"
+    provider_text = "found" if outcome["provider"] == "found" else "NOT FOUND"
+    return f"patient={outcome['patient']}, provider={provider_text}, visit=inserted"
+
+
+def _sync_patient_group(appts_with_indices: list, created_by: str, total: int, print_lock: threading.Lock) -> list:
+    """Processes every appointment for ONE patient (same ehr_patient_guid)
+    sequentially, on its own connection, committing after each appointment --
+    a group's own appointments stay serialized against each other so the
+    first one's patient_header creation is always committed and visible
+    (not just locally cached in an uncommitted transaction) before the next
+    one looks it up. DIFFERENT patients' groups run fully concurrently across
+    worker threads (see sync_appointments_to_edi_tebra) -- two threads never
+    race to create the same patient_header row, because they're never
+    working on the same patient's appointments at the same time.
+
+    appts_with_indices: list of (appointment_dict, 1-based_index_in_full_batch).
+    Returns a list of outcome dicts, one per appointment, each tagged with
+    "error" instead of "visit" if that row failed.
+    """
+    results = []
+    conn = _connect()
+    conn.autocommit = False
+    try:
+        with conn.cursor() as cur:
+            for appt, index in appts_with_indices:
+                label = _appointment_label(appt, index, total)
+                try:
+                    outcome = process_appointment(cur, appt, created_by)
+                    conn.commit()
+                    with print_lock:
+                        print(f"{label}: {_outcome_message(outcome)}", flush=True)
+                    results.append(outcome)
+                except Exception as exc:
+                    conn.rollback()
+                    with print_lock:
+                        print(f"{label}: ERROR -- {type(exc).__name__}: {exc}", flush=True)
+                    results.append({"error": str(exc)})
+    finally:
+        conn.close()
+    return results
 
 
 def sync_appointments_to_edi_tebra(appointments: list, rcm_system_email: str = DEFAULT_RCM_SYSTEM_EMAIL,
-                                    dry_run: bool = False) -> dict:
+                                    concurrency: int = DEFAULT_SYNC_CONCURRENCY) -> dict:
     """Core sync entry point -- takes an in-memory appointments list (the same
-    shape appointments-by-date's JSON `appointments` field uses) and does the
-    patient-match/create + visit-insert loop described in the module
-    docstring, returning the summary dict.
+    shape appointments-by-date's JSON `appointments` field uses), processes
+    it concurrently (see module docstring), and returns the summary dict.
 
     Reusable from both the CLI (main, below, which loads the list from a
     file) and the /appointments-by-date HTTP endpoint (server.py, which
@@ -330,8 +393,7 @@ def sync_appointments_to_edi_tebra(appointments: list, rcm_system_email: str = D
     CLI-only, see _setup_logging) -- reassigning it here would hijack a live
     server process's output for every other request, not just this one.
     """
-    conn = _connect()
-    conn.autocommit = False
+    total = len(appointments)
     counts = {
         "patients_matched": 0,
         "patients_created": 0,
@@ -340,44 +402,50 @@ def sync_appointments_to_edi_tebra(appointments: list, rcm_system_email: str = D
         "skipped_bad_dob": 0,
         "row_errors": 0,
     }
+    if total == 0:
+        return {"total_appointments": 0, **counts}
+
+    conn = _connect()
     try:
         with conn.cursor() as cur:
             created_by = resolve_created_by(cur, rcm_system_email)
-            print(
-                f"Using client_id={CLIENT_ID}, group_id={GROUP_ID}, practice_id={PRACTICE_ID}, "
-                f"created_by={created_by}",
-                flush=True,
-            )
-
-            for i, appt in enumerate(appointments):
-                cur.execute("SAVEPOINT row_sp")
-                try:
-                    process_appointment(cur, appt, created_by, counts, i + 1, len(appointments))
-                    cur.execute("RELEASE SAVEPOINT row_sp")
-                except Exception as exc:
-                    cur.execute("ROLLBACK TO SAVEPOINT row_sp")
-                    counts["row_errors"] += 1
-                    print(
-                        f"[{i + 1}/{len(appointments)}] {appt.get('first_name')} {appt.get('last_name')} "
-                        f"on {appt.get('appointment_date')}: ERROR -- {type(exc).__name__}: {exc}",
-                        flush=True,
-                    )
-
-            summary = {"total_appointments": len(appointments), **counts}
-            print(json.dumps(summary, indent=2), flush=True)
-
-            if dry_run:
-                conn.rollback()
-                print("DRY RUN -- rolled back, nothing written.", flush=True)
-            else:
-                conn.commit()
-                print("Committed.", flush=True)
-            return summary
-    except Exception:
-        conn.rollback()
-        raise
     finally:
         conn.close()
+    print(
+        f"Using client_id={CLIENT_ID}, group_id={GROUP_ID}, practice_id={PRACTICE_ID}, "
+        f"created_by={created_by}, concurrency={concurrency}",
+        flush=True,
+    )
+
+    groups = defaultdict(list)
+    for i, appt in enumerate(appointments):
+        guid = appt.get("ehr_patient_guid") or f"__no_guid_{i}"
+        groups[guid].append((appt, i + 1))
+
+    print_lock = threading.Lock()
+    with ThreadPoolExecutor(max_workers=concurrency) as pool:
+        futures = [
+            pool.submit(_sync_patient_group, appts_with_indices, created_by, total, print_lock)
+            for appts_with_indices in groups.values()
+        ]
+        for future in as_completed(futures):
+            for outcome in future.result():
+                if "error" in outcome:
+                    counts["row_errors"] += 1
+                    continue
+                if outcome["visit"] == "skipped_bad_dob":
+                    counts["skipped_bad_dob"] += 1
+                    continue
+                counts["patients_created" if outcome["patient"] == "created" else "patients_matched"] += 1
+                if outcome["visit"] == "inserted":
+                    counts["visits_inserted"] += 1
+                else:
+                    counts["visits_skipped_existing"] += 1
+
+    summary = {"total_appointments": total, **counts}
+    print(json.dumps(summary, indent=2), flush=True)
+    print("Done.", flush=True)
+    return summary
 
 
 def main() -> int:
@@ -387,14 +455,14 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--appointments-json", required=True)
     parser.add_argument("--rcm-system-email", default=DEFAULT_RCM_SYSTEM_EMAIL)
-    parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--concurrency", type=int, default=DEFAULT_SYNC_CONCURRENCY)
     args = parser.parse_args()
 
     payload = json.loads(Path(args.appointments_json).read_text())
     appointments = payload.get("appointments", [])
     print(f"Loaded {len(appointments)} appointment(s) from {args.appointments_json}", flush=True)
 
-    sync_appointments_to_edi_tebra(appointments, args.rcm_system_email, args.dry_run)
+    sync_appointments_to_edi_tebra(appointments, args.rcm_system_email, args.concurrency)
     return 0
 
 
