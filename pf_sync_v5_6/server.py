@@ -86,12 +86,6 @@ app = FastAPI(
 
 PF_SYNC_API_PORT = int(os.environ.get("PF_SYNC_API_PORT", 8011))
 
-# Hardcoded for now (2026-08-28 direction) -- true: /appointments-by-date
-# also syncs its result straight into EDI_Tebra.patient_visit_header; false:
-# fetch-only, just returns the scraped JSON. Meant to become a real request
-# field later.
-INSERT_INTO_DB = True
-
 # Only one Chrome/CDP session can be driven at a time, so every browser-driving
 # endpoint shares this single lock.
 _locks = {}
@@ -631,15 +625,16 @@ class AppointmentsByDateRequestSlim(BaseModel):
     FacesheetPullByDateRequestSlim's docstring above for why the browser/config
     fields aren't exposed here at all.
 
-    When INSERT_INTO_DB (module-level, hardcoded for now) is true, this
-    endpoint also feeds the Schedule scrape result straight into
-    sync_appointments_to_edi_tebra (patient match/create + patient_visit_header
-    insert, see that module's docstring); when false, it's fetch-only."""
+    insert_into_db: defaults to False (fetch-only) -- only when explicitly
+    passed true does this endpoint also feed the Schedule scrape result
+    straight into sync_appointments_to_edi_tebra (patient match/create +
+    patient_visit_header insert, see that module's docstring)."""
 
     report_date: str = ""
     start_date: str = ""
     end_date: str = ""
     wait_for_completion: bool = True
+    insert_into_db: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -951,7 +946,6 @@ def sync_schedules_by_date_endpoint(request: SyncSchedulesByDateRequestSlim):
 
     return _dispatch_browser_job(request.wait_for_completion, "sync-schedules-by-date", job)
 
-
 @app.post("/appointments-by-date")
 def appointments_by_date_endpoint(request: AppointmentsByDateRequestSlim):
     # Expand the slim request into the full model so every other field keeps
@@ -976,7 +970,7 @@ def appointments_by_date_endpoint(request: AppointmentsByDateRequestSlim):
         # still holds this endpoint's own dispatch lock (see
         # _dispatch_browser_job) for its duration.
         fetch_result = run_appointments_by_date(args)
-        if INSERT_INTO_DB:
+        if request.insert_into_db:
             fetch_result["edi_tebra_sync"] = sync_appointments_to_edi_tebra(
                 fetch_result.get("appointments", [])
             )
