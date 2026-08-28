@@ -316,20 +316,20 @@ def process_appointment(cur, appt: dict, created_by: str, counts: dict, index: i
     print(f"{label}: {patient_outcome}, {provider_outcome}, visit=inserted", flush=True)
 
 
-def main() -> int:
-    log_path = _setup_logging()
-    print(f"Logging this run to {log_path}", flush=True)
+def sync_appointments_to_edi_tebra(appointments: list, rcm_system_email: str = DEFAULT_RCM_SYSTEM_EMAIL,
+                                    dry_run: bool = False) -> dict:
+    """Core sync entry point -- takes an in-memory appointments list (the same
+    shape appointments-by-date's JSON `appointments` field uses) and does the
+    patient-match/create + visit-insert loop described in the module
+    docstring, returning the summary dict.
 
-    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--appointments-json", required=True)
-    parser.add_argument("--rcm-system-email", default=DEFAULT_RCM_SYSTEM_EMAIL)
-    parser.add_argument("--dry-run", action="store_true")
-    args = parser.parse_args()
-
-    payload = json.loads(Path(args.appointments_json).read_text())
-    appointments = payload.get("appointments", [])
-    print(f"Loaded {len(appointments)} appointment(s) from {args.appointments_json}", flush=True)
-
+    Reusable from both the CLI (main, below, which loads the list from a
+    file) and the /appointments-by-date HTTP endpoint (server.py, which
+    passes the freshly-scraped list straight through, no file involved).
+    Deliberately does NOT touch sys.stdout/stderr (that redirection is
+    CLI-only, see _setup_logging) -- reassigning it here would hijack a live
+    server process's output for every other request, not just this one.
+    """
     conn = _connect()
     conn.autocommit = False
     counts = {
@@ -342,7 +342,7 @@ def main() -> int:
     }
     try:
         with conn.cursor() as cur:
-            created_by = resolve_created_by(cur, args.rcm_system_email)
+            created_by = resolve_created_by(cur, rcm_system_email)
             print(
                 f"Using client_id={CLIENT_ID}, group_id={GROUP_ID}, practice_id={PRACTICE_ID}, "
                 f"created_by={created_by}",
@@ -363,19 +363,38 @@ def main() -> int:
                         flush=True,
                     )
 
-            print(json.dumps({"total_appointments": len(appointments), **counts}, indent=2), flush=True)
+            summary = {"total_appointments": len(appointments), **counts}
+            print(json.dumps(summary, indent=2), flush=True)
 
-            if args.dry_run:
+            if dry_run:
                 conn.rollback()
                 print("DRY RUN -- rolled back, nothing written.", flush=True)
             else:
                 conn.commit()
                 print("Committed.", flush=True)
+            return summary
     except Exception:
         conn.rollback()
         raise
     finally:
         conn.close()
+
+
+def main() -> int:
+    log_path = _setup_logging()
+    print(f"Logging this run to {log_path}", flush=True)
+
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--appointments-json", required=True)
+    parser.add_argument("--rcm-system-email", default=DEFAULT_RCM_SYSTEM_EMAIL)
+    parser.add_argument("--dry-run", action="store_true")
+    args = parser.parse_args()
+
+    payload = json.loads(Path(args.appointments_json).read_text())
+    appointments = payload.get("appointments", [])
+    print(f"Loaded {len(appointments)} appointment(s) from {args.appointments_json}", flush=True)
+
+    sync_appointments_to_edi_tebra(appointments, args.rcm_system_email, args.dry_run)
     return 0
 
 

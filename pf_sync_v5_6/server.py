@@ -60,6 +60,7 @@ from pf_sync_pkg.pdf_pipeline import default_process_candidates, full_sync_on_pa
 from pf_sync_pkg.queue_admin import queue_status, reset_rows
 from pf_sync_pkg.report_pull import pull_appointment_report_on_page
 from pf_sync_pkg.store import append_run, finish_run, load_store, save_store, store_rows
+from sync_patient_visits_to_edi_tebra import sync_appointments_to_edi_tebra
 
 CST = ZoneInfo("America/Chicago")
 
@@ -622,12 +623,19 @@ class AppointmentsByDateRequest(BrowserFieldsNoCreds, ReportDateFields):
 class AppointmentsByDateRequestSlim(BaseModel):
     """The only fields that matter day-to-day for /appointments-by-date -- see
     FacesheetPullByDateRequestSlim's docstring above for why the browser/config
-    fields aren't exposed here at all."""
+    fields aren't exposed here at all.
+
+    sync_dry_run: after the Schedule scrape, this endpoint always feeds the
+    result straight into sync_appointments_to_edi_tebra (patient match/create
+    + patient_visit_header insert, see that module's docstring) -- set this
+    true to run that step without committing, e.g. to sanity-check a date
+    range before writing anything real."""
 
     report_date: str = ""
     start_date: str = ""
     end_date: str = ""
     wait_for_completion: bool = True
+    sync_dry_run: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -957,7 +965,17 @@ def appointments_by_date_endpoint(request: AppointmentsByDateRequestSlim):
     def job():
         # Read-only Schedule scrape across [start_date, end_date] -- no chart,
         # no facesheet, no queue writes -- reused via
-        # cli.run_appointments_by_date, not reimplemented here.
-        return run_appointments_by_date(args)
+        # cli.run_appointments_by_date, not reimplemented here. The browser
+        # is already closed by the time this returns (browser_command_wrapper
+        # closes it before run_appointments_by_date's own return), so the
+        # sync step below never holds the Playwright session open -- it only
+        # still holds this endpoint's own dispatch lock (see
+        # _dispatch_browser_job) for its duration.
+        fetch_result = run_appointments_by_date(args)
+        fetch_result["edi_tebra_sync"] = sync_appointments_to_edi_tebra(
+            fetch_result.get("appointments", []),
+            dry_run=request.sync_dry_run,
+        )
+        return fetch_result
 
     return _dispatch_browser_job(request.wait_for_completion, "appointments-by-date", job)
