@@ -17,8 +17,9 @@ For each appointment row:
      GROUP_ID -- lower+trim match first, then a whitespace-stripped
      comparison on both sides as a fallback. Best-effort: leaves
      provider_id NULL on no match rather than failing the row.
-  3. Maps appointment_status -> 'cancelled' (cancelled/no-show) or
-     'confirmed' (everything else).
+  3. Writes appointment_status straight through to `status`, unmodified --
+     whatever text Practice Fusion shows (e.g. "Seen", "Pending arrival",
+     "Confirmed", "No Show", "Cancelled").
   4. Skips (does not duplicate) any appointment that already has a
      patient_visit_header row for the same (patient_header_id, dos) --
      patient_visit_header has no natural-key unique constraint, so this
@@ -155,13 +156,6 @@ def _parse_time(value: str) -> Optional[dt_time]:
     return None
 
 
-def _map_status(appointment_status: str) -> str:
-    text = _clean(appointment_status).lower()
-    if "cancel" in text or "no show" in text or "no-show" in text or "noshow" in text:
-        return "cancelled"
-    return "confirmed"
-
-
 def resolve_created_by(cur, email: str) -> str:
     cur.execute(f'SELECT id FROM "{RCM_SCHEMA}".users WHERE email = %s', (email,))
     row = cur.fetchone()
@@ -271,7 +265,7 @@ def visit_already_exists(cur, patient_header_id: str, dos: date) -> bool:
 def insert_patient_visit(cur, appt: dict, dos: date, patient_header_id: str,
                           provider_id: Optional[str], created_by: str) -> None:
     visit_time = _parse_time(appt.get("appointment_start_time", ""))
-    status = _map_status(appt.get("appointment_status", ""))
+    status = appt.get("appointment_status", "")
     cur.execute(
         f"""
         INSERT INTO "{SCHEMA}".patient_visit_header
