@@ -398,6 +398,16 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     appointments_by_date.add_argument("--schedule-config-json", default="")
+    appointments_by_date.add_argument(
+        "--appointment-type", default="",
+        help=(
+            "Optional case-insensitive substring filter on each row's "
+            "appointment_type (e.g. 'walk-in' matches 'Walk-In', 'WALK IN visit', "
+            "etc). Every appointment in the date range is still scraped -- PF's "
+            "Schedule view has no server-side type filter -- this only trims what's "
+            "returned. Blank (default) returns every type."
+        ),
+    )
     add_report_dates(appointments_by_date)
     add_browser_arguments(appointments_by_date)
 
@@ -1212,20 +1222,36 @@ def run_appointments_by_date(args: argparse.Namespace) -> dict:
         # which is what puts the toolbar/facility selector on screen in the
         # first place -- reading it first could race an unrendered toolbar.
         service_location = ps.read_schedule_facility(page, schedule_config)
+        appointment_dicts = [
+            {
+                "appointment_date": appt.appointment_date.isoformat(),
+                "service_location": service_location,
+                **asdict(appt.patient),
+            }
+            for appt in appointments
+        ]
+
+        # appointment_type filter is applied here, after the full scrape --
+        # PF's Schedule view has no server-side type filter to push this down
+        # into, so every row for the date range is still walked/scraped above
+        # regardless of this value. Case-insensitive substring match (not
+        # exact) since real appointment_type text varies in casing/spacing
+        # (e.g. "Walk-In" vs "WALK IN visit").
+        appointment_type_filter = (getattr(args, "appointment_type", "") or "").strip()
+        if appointment_type_filter:
+            needle = appointment_type_filter.lower()
+            appointment_dicts = [
+                a for a in appointment_dicts
+                if needle in (a.get("appointment_type") or "").lower()
+            ]
+
         result = {
             "start_date": start_date.isoformat(),
             "end_date": end_date.isoformat(),
-            "count": len(appointments),
+            "count": len(appointment_dicts),
             "service_location": service_location,
             "day_diagnostics": day_diagnostics,
-            "appointments": [
-                {
-                    "appointment_date": appt.appointment_date.isoformat(),
-                    "service_location": service_location,
-                    **asdict(appt.patient),
-                }
-                for appt in appointments
-            ],
+            "appointments": appointment_dicts,
         }
 
         return result

@@ -617,6 +617,7 @@ class AppointmentsByDateRequest(BrowserFieldsNoCreds, ReportDateFields):
         examples=[_pf_path("config/pf_schedule_scrape_config.json")],
     )
     wait_for_completion: bool = True
+    appointment_type: str = ""
 
 
 class AppointmentsByDateRequestSlim(BaseModel):
@@ -636,7 +637,13 @@ class AppointmentsByDateRequestSlim(BaseModel):
     existing visit instead of skipping it (CASCADE-deletes anything that
     referenced its old row id). clean_and_insert DELETEs every visit for
     this practice in [start_date, end_date] -- not just PF-sourced ones --
-    before inserting anything."""
+    before inserting anything.
+
+    appointment_type: optional case-insensitive substring filter (e.g.
+    "walk-in") applied to each row's appointment_type after the full
+    date-range scrape -- PF's Schedule view has no server-side type filter,
+    so this only trims what's returned/synced, not what's scraped. Blank
+    (default) returns every type."""
 
     report_date: str = ""
     start_date: str = ""
@@ -645,6 +652,7 @@ class AppointmentsByDateRequestSlim(BaseModel):
     insert_into_db: bool = False
     update_appointments: bool = False
     clean_and_insert: bool = False
+    appointment_type: str = ""
 
 
 # ---------------------------------------------------------------------------
@@ -967,6 +975,7 @@ def appointments_by_date_endpoint(request: AppointmentsByDateRequestSlim):
         start_date=request.start_date,
         end_date=request.end_date,
         wait_for_completion=request.wait_for_completion,
+        appointment_type=request.appointment_type,
     )
     args = _namespace_with_env_creds(full_request)
 
