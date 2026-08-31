@@ -495,6 +495,25 @@ for the application environment.
 
 Use this section when the VM already has the application deployed.
 
+## 8.0 Quick reference — source-only change, no new dependencies
+
+The common case: you edited `.py` files, `requirements.txt` did not change.
+SSH in and run:
+
+```bash
+cd ~/intellibill-rpa-vm
+git checkout dev
+git fetch origin
+git reset --hard origin/dev
+sudo systemctl restart myops
+```
+
+`systemctl restart` is required after ANY source change, not just dependency
+changes — the running process has the old code loaded in memory until it's
+restarted. `pip install -r requirements.txt` (8.5) is only needed when
+`requirements.txt` itself changed. If you're unsure, run the full 8.1–8.8
+sequence below.
+
 ## 8.1 SSH into the VM
 
 ```bash
@@ -507,12 +526,14 @@ ssh ibrcmadmin@20.46.228.47
 cd ~/intellibill-rpa-vm
 ```
 
-## 8.3 Pull the production code
+## 8.3 Pull the latest code
+
+This VM is currently deployed straight from `dev` (not `prod`):
 
 ```bash
-git checkout prod
+git checkout dev
 git fetch origin
-git reset --hard origin/prod
+git reset --hard origin/dev
 ```
 
 ## 8.4 Activate the shared venv
