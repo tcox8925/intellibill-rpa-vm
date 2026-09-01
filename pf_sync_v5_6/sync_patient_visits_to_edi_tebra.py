@@ -532,7 +532,7 @@ def sync_appointments_to_edi_tebra(appointments: list, rcm_system_email: str = D
         "row_errors": 0,
     }
     if total == 0:
-        return {"total_appointments": 0, **counts}
+        return {"total_appointments": 0, **counts, "visits_removed": 0, "removed_by_date": {}, "added_by_date": {}}
 
     deleted_by_date: Dict[str, int] = {}
     if clean_and_insert:
@@ -598,7 +598,13 @@ def sync_appointments_to_edi_tebra(appointments: list, rcm_system_email: str = D
         for day in sorted(set(deleted_by_date) | set(added_by_date)):
             print(f"  {day}: removed={deleted_by_date.get(day, 0)}, added={added_by_date.get(day, 0)}", flush=True)
 
-    summary = {"total_appointments": total, **counts}
+    summary = {
+        "total_appointments": total,
+        **counts,
+        "visits_removed": sum(deleted_by_date.values()),
+        "removed_by_date": deleted_by_date,
+        "added_by_date": dict(added_by_date),
+    }
     print(json.dumps(summary, indent=2), flush=True)
     print("Done.", flush=True)
     return summary
