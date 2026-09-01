@@ -87,7 +87,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime, time as dt_time
 from decimal import Decimal
 from pathlib import Path
-from typing import Optional
+from typing import Dict, Optional
 
 import psycopg2
 from dotenv import find_dotenv, load_dotenv
@@ -323,12 +323,13 @@ def delete_visit(cur, patient_header_id: str, dos: date) -> None:
     )
 
 
-def clean_visits_for_range(start_date: date, end_date: date) -> int:
+def clean_visits_for_range(start_date: date, end_date: date) -> Dict[str, int]:
     """Deletes EVERY patient_visit_header row for CLIENT_ID/GROUP_ID/
     PRACTICE_ID with `dos` in [start_date, end_date], on its own short-lived
     connection/transaction -- see clean_and_insert's warning in the module
     docstring for why this is NOT scoped to PF-sourced rows only. Returns the
-    number of rows deleted."""
+    number of rows deleted per dos (ISO date string) via RETURNING, so the
+    caller can log removed-vs-added per date rather than just a grand total."""
     conn = _connect()
     conn.autocommit = False
     try:
@@ -338,12 +339,17 @@ def clean_visits_for_range(start_date: date, end_date: date) -> int:
                 DELETE FROM "{SCHEMA}".patient_visit_header
                 WHERE client_id = %s AND group_id = %s AND practice_id = %s
                   AND dos BETWEEN %s AND %s
+                RETURNING dos
                 """,
                 (CLIENT_ID, GROUP_ID, PRACTICE_ID, start_date, end_date),
             )
-            deleted = cur.rowcount
+            deleted_rows = cur.fetchall()
         conn.commit()
-        return deleted
+        counts: Dict[str, int] = {}
+        for (dos,) in deleted_rows:
+            key = dos.isoformat()
+            counts[key] = counts.get(key, 0) + 1
+        return counts
     except Exception:
         conn.rollback()
         raise
@@ -398,19 +404,25 @@ def process_appointment(cur, appt: dict, created_by: str, update_appointments: b
     touched here, so this is safe to call from any thread as long as `cur`
     belongs to that thread's own connection.
 
-    Returns {"visit": "skipped_bad_dob"}, or
-            {"patient": "created"|"matched", "visit": "skipped_existing"}, or
-            {"patient": "created"|"matched", "visit": "inserted"|"updated", "provider": "found"|"not_found"}.
+    Returns {"visit": "skipped_bad_dob", "appointment_date": ...}, or
+            {"patient": "created"|"matched", "visit": "skipped_existing", "appointment_date": ...}, or
+            {"patient": "created"|"matched", "visit": "inserted"|"updated",
+             "provider": "found"|"not_found", "appointment_date": ...}.
+
+    appointment_date rides along on every outcome (not just the successful
+    ones) so callers can tally per-date inserted/removed/skipped counts --
+    see sync_appointments_to_edi_tebra's clean_and_insert per-date summary.
 
     update_appointments: see its warning in the module docstring -- DELETEs
     the existing visit row (CASCADE) before inserting the fresh one, instead
     of skipping.
     """
+    appointment_date = appt.get("appointment_date", "")
     dob = _parse_dob(appt.get("dob", ""))
     if dob is None:
-        return {"visit": "skipped_bad_dob"}
+        return {"visit": "skipped_bad_dob", "appointment_date": appointment_date}
 
-    dos = date.fromisoformat(appt["appointment_date"])
+    dos = date.fromisoformat(appointment_date)
 
     patient_header_id = find_patient_header_by_source_id(cur, appt["ehr_patient_guid"])
     if patient_header_id is None:
@@ -422,7 +434,7 @@ def process_appointment(cur, appt: dict, created_by: str, update_appointments: b
     visit_kind = "inserted"
     if visit_already_exists(cur, patient_header_id, dos):
         if not update_appointments:
-            return {"patient": patient_kind, "visit": "skipped_existing"}
+            return {"patient": patient_kind, "visit": "skipped_existing", "appointment_date": appointment_date}
         delete_visit(cur, patient_header_id, dos)
         visit_kind = "updated"
 
@@ -432,6 +444,7 @@ def process_appointment(cur, appt: dict, created_by: str, update_appointments: b
         "patient": patient_kind,
         "visit": visit_kind,
         "provider": "found" if provider_id else "not_found",
+        "appointment_date": appointment_date,
     }
 
 
@@ -481,7 +494,7 @@ def _sync_patient_group(appts_with_indices: list, created_by: str, total: int, p
                     conn.rollback()
                     with print_lock:
                         print(f"{label}: ERROR -- {type(exc).__name__}: {exc}", flush=True)
-                    results.append({"error": str(exc)})
+                    results.append({"error": str(exc), "appointment_date": appt.get("appointment_date", "")})
     finally:
         conn.close()
     return results
@@ -521,12 +534,13 @@ def sync_appointments_to_edi_tebra(appointments: list, rcm_system_email: str = D
     if total == 0:
         return {"total_appointments": 0, **counts}
 
+    deleted_by_date: Dict[str, int] = {}
     if clean_and_insert:
         if not (start_date and end_date):
             raise ValueError("clean_and_insert requires start_date and end_date.")
-        deleted = clean_visits_for_range(date.fromisoformat(start_date), date.fromisoformat(end_date))
+        deleted_by_date = clean_visits_for_range(date.fromisoformat(start_date), date.fromisoformat(end_date))
         print(
-            f"clean_and_insert: deleted {deleted} existing patient_visit_header row(s) "
+            f"clean_and_insert: deleted {sum(deleted_by_date.values())} existing patient_visit_header row(s) "
             f"for client_id={CLIENT_ID}, group_id={GROUP_ID}, practice_id={PRACTICE_ID} "
             f"in [{start_date}, {end_date}]",
             flush=True,
@@ -549,6 +563,7 @@ def sync_appointments_to_edi_tebra(appointments: list, rcm_system_email: str = D
         guid = appt.get("ehr_patient_guid") or f"__no_guid_{i}"
         groups[guid].append((appt, i + 1))
 
+    added_by_date: Dict[str, int] = defaultdict(int)
     print_lock = threading.Lock()
     with ThreadPoolExecutor(max_workers=concurrency) as pool:
         futures = [
@@ -566,10 +581,22 @@ def sync_appointments_to_edi_tebra(appointments: list, rcm_system_email: str = D
                 counts["patients_created" if outcome["patient"] == "created" else "patients_matched"] += 1
                 if outcome["visit"] == "inserted":
                     counts["visits_inserted"] += 1
+                    added_by_date[outcome.get("appointment_date", "")] += 1
                 elif outcome["visit"] == "updated":
                     counts["visits_updated"] += 1
+                    added_by_date[outcome.get("appointment_date", "")] += 1
                 else:
                     counts["visits_skipped_existing"] += 1
+
+    if clean_and_insert:
+        # Removed comes from the upfront wipe (dos actually in the DB before
+        # this run); added comes from what got (re-)inserted this run for
+        # that same date -- printed together so a per-date mismatch (e.g. PF
+        # showed fewer appointments today than the range used to have) is
+        # visible at a glance instead of buried in the row-by-row log above.
+        print("Per-date clean_and_insert summary (removed vs added):", flush=True)
+        for day in sorted(set(deleted_by_date) | set(added_by_date)):
+            print(f"  {day}: removed={deleted_by_date.get(day, 0)}, added={added_by_date.get(day, 0)}", flush=True)
 
     summary = {"total_appointments": total, **counts}
     print(json.dumps(summary, indent=2), flush=True)
