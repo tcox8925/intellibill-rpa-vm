@@ -19,7 +19,12 @@ For each appointment row:
      provider_id NULL on no match rather than failing the row.
   3. Writes appointment_status straight through to `status`, unmodified --
      whatever text Practice Fusion shows (e.g. "Seen", "Pending arrival",
-     "Confirmed", "No Show", "Cancelled").
+     "Confirmed", "No Show", "Cancelled"). chief_complaint/intake_form/
+     eligibility are also written through as raw text; copay/balance_due are
+     parsed out of the scraped cell text into a $ Decimal (see _parse_money);
+     confirmation_status is parsed into a nullable bool (see
+     _parse_confirmation) rather than stored as PF's raw "Confirmed"/"Not
+     confirmed" text, since the DB column is `confirmation boolean`.
   4. Skips (does not duplicate) any appointment that already has a
      patient_visit_header row for the same (patient_header_id, dos) --
      patient_visit_header has no natural-key unique constraint, so this
@@ -74,11 +79,13 @@ _sync_patient_group's docstring for why that matters.
 import argparse
 import json
 import os
+import re
 import sys
 import threading
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime, time as dt_time
+from decimal import Decimal
 from pathlib import Path
 from typing import Optional
 
@@ -173,6 +180,30 @@ def _parse_time(value: str) -> Optional[dt_time]:
             return datetime.strptime(value, fmt).time()
         except ValueError:
             continue
+    return None
+
+
+def _parse_money(value: str) -> Optional[Decimal]:
+    """Pulls the first $-amount out of raw scraped cell text (e.g. "No copay
+    info $20.00 due" -> Decimal("20.00")). Returns None for cell text with no
+    dollar amount at all (e.g. "Nothing due", "" for an empty balance-due
+    cell) -- that's the expected/common case, not a parse failure."""
+    match = re.search(r"\$\s*([\d,]+\.\d{2})", _clean(value))
+    if not match:
+        return None
+    return Decimal(match.group(1).replace(",", ""))
+
+
+def _parse_confirmation(value: str) -> Optional[bool]:
+    """appt['confirmation_status'] is raw text ("Confirmed"/"Not confirmed").
+    "not confirmed" is checked before the bare "confirmed" substring since the
+    former contains the latter. Returns None (not False) for blank/unrecognized
+    text -- a scrape miss should read as unknown, not as an explicit "no"."""
+    value = _clean(value).lower()
+    if "not confirmed" in value:
+        return False
+    if "confirmed" in value:
+        return True
     return None
 
 
@@ -324,12 +355,20 @@ def insert_patient_visit(cur, appt: dict, dos: date, patient_header_id: str,
                           provider_id: Optional[str], created_by: str) -> None:
     visit_time = _parse_time(appt.get("appointment_start_time", ""))
     status = appt.get("appointment_status", "")
+    visit_type = _clean(appt.get("appointment_type", "")) or None
+    chief_complaint = _clean(appt.get("chief_complaint", "")) or None
+    confirmation = _parse_confirmation(appt.get("confirmation_status", ""))
+    copay = _parse_money(appt.get("copay", ""))
+    intake_form = _clean(appt.get("intake_form_status", "")) or None
+    eligibility = _clean(appt.get("eligibility_status", "")) or None
+    balance_due = _parse_money(appt.get("balance_due", ""))
     cur.execute(
         f"""
         INSERT INTO "{SCHEMA}".patient_visit_header
             (client_id, group_id, practice_id, patient_header_id, dos, created_by,
-             visit_time, provider_id, status, source_id)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+             visit_time, provider_id, status, source_id, visit_type,
+             chief_complaint, confirmation, copay, intake_form, eligibility, balance_due)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         """,
         (
             CLIENT_ID,
@@ -342,6 +381,13 @@ def insert_patient_visit(cur, appt: dict, dos: date, patient_header_id: str,
             provider_id,
             status,
             appt["ehr_patient_guid"],
+            visit_type,
+            chief_complaint,
+            confirmation,
+            copay,
+            intake_form,
+            eligibility,
+            balance_due,
         ),
     )
 
