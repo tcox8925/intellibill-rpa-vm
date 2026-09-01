@@ -588,6 +588,34 @@ class ScheduleScrapeConfig:
     start_time_selector: str = "[data-element='start-time']"
     start_time_prefix_fallback: str = "[data-element^='start-time']"
 
+    # Confirmed live 2026-09-01. Cell holds two lines (status + $ amount);
+    # read as one string rather than picking a single nested element.
+    copay_prefix: str = "[data-element^='cell-copay-']"
+
+    # Confirmed live 2026-09-01. NOT cell-intake-form-N (that was a wrong
+    # guess) -- also don't confuse with intake_status_button_prefix above,
+    # PF's unrelated Seen/Confirmed status dropdown.
+    intake_form_prefix: str = "[data-element^='appt-intake-status-']"
+
+    # No cell-eligibility-N wrapper exists. text-eligibility-unavailable is
+    # confirmed live; eligibility_status_data_element is an unconfirmed guess
+    # by analogy with the insurance-card field of the same name (no
+    # eligible/checked row seen yet). The generic fallback usually lands on
+    # the leading icon instead of text and yields "".
+    eligibility_unavailable_data_element: str = "text-eligibility-unavailable"
+    eligibility_status_data_element: str = "eligibility-status"
+    eligibility_generic_selector: str = "[data-element*='eligibility']"
+
+    # Confirmed live 2026-09-01. Renders as an empty div when nothing is due --
+    # "" is expected on most rows, not a scrape miss.
+    balance_due_prefix: str = "[data-element^='cell-balance-due-']"
+
+    chief_complaint_prefix: str = "[data-element^='cell-chief-complaint-']"
+    confirmation_prefix: str = "[data-element^='cell-confirmation-']"
+    # Query scoped inside cell-confirmation-N, not off the row directly --
+    # "status" is also used as a data-element inside cell-copay-N's markup.
+    confirmation_status_text_selector: str = "[data-element='status']"
+
     scheduler_tab_selector: str = "[data-element='scheduler-tab-0']"
     scheduler_selected_date_data_element: str = "scheduler-selected-date"
     date_next_selector: str = "[data-element='btn-date-next']"

@@ -187,6 +187,15 @@ class ReportPatient:
     appointment_type: str = ""
     provider_name: str = ""
 
+    # Raw cell text, not parsed into a number/bool (e.g. "No copay info /
+    # $20.00 due", "Not submitted", "Not available.").
+    copay: str = ""
+    intake_form_status: str = ""
+    eligibility_status: str = ""
+    balance_due: str = ""
+    chief_complaint: str = ""
+    confirmation_status: str = ""
+
 
 def clean(value: Optional[str]) -> str:
     if value is None:
@@ -1071,6 +1080,68 @@ def _schedule_row_start_time(row: ElementHandle, config: ScheduleScrapeConfig) -
         return ""
 
 
+def _schedule_row_copay(row: ElementHandle, config: ScheduleScrapeConfig) -> str:
+    try:
+        el = row.query_selector(config.copay_prefix)
+        return el_text(el) if el is not None else ""
+    except PWError:
+        return ""
+
+
+def _schedule_row_intake_form(row: ElementHandle, config: ScheduleScrapeConfig) -> str:
+    """Not the same thing as intake_status_button_prefix (that's the separate
+    Seen/Confirmed status dropdown -- see _schedule_row_status)."""
+    try:
+        el = row.query_selector(config.intake_form_prefix)
+        return el_text(el) if el is not None else ""
+    except PWError:
+        return ""
+
+
+def _schedule_row_eligibility(row: ElementHandle, config: ScheduleScrapeConfig) -> str:
+    """Same fallback chain as scrape_insurance_card's unrelated eligibility
+    read; see ScheduleScrapeConfig.eligibility_status_data_element for the
+    caveat on the second fallback."""
+    try:
+        return (
+            safe_text_by_data(row, config.eligibility_unavailable_data_element)
+            or safe_text_by_data(row, config.eligibility_status_data_element)
+            or safe_text(row, config.eligibility_generic_selector)
+        )
+    except PWError:
+        return ""
+
+
+def _schedule_row_balance_due(row: ElementHandle, config: ScheduleScrapeConfig) -> str:
+    """"" is expected on most rows (empty div when nothing is due), not a miss."""
+    try:
+        el = row.query_selector(config.balance_due_prefix)
+        return el_text(el) if el is not None else ""
+    except PWError:
+        return ""
+
+
+def _schedule_row_chief_complaint(row: ElementHandle, config: ScheduleScrapeConfig) -> str:
+    try:
+        el = row.query_selector(config.chief_complaint_prefix)
+        return el_text(el) if el is not None else ""
+    except PWError:
+        return ""
+
+
+def _schedule_row_confirmation(row: ElementHandle, config: ScheduleScrapeConfig) -> str:
+    """Distinct from appointment_status (the STATUS column). Queried scoped to
+    this cell, not the row -- "status" is reused inside cell-copay-N too."""
+    try:
+        cell = row.query_selector(config.confirmation_prefix)
+        if cell is None:
+            return ""
+        el = cell.query_selector(config.confirmation_status_text_selector)
+        return el_text(el) if el is not None else ""
+    except PWError:
+        return ""
+
+
 def scrape_schedule_day(page: Page, config: Optional[ScheduleScrapeConfig] = None) -> List[ReportPatient]:
     """Scrapes name/DOB/phone/chart-GUID/appointment-status/start-time/type/
     provider from every appointment row on the currently displayed Schedule
@@ -1098,6 +1169,10 @@ def scrape_schedule_day(page: Page, config: Optional[ScheduleScrapeConfig] = Non
     never by an exact suffixed data-element string. Each of the four is wrapped
     so a selector miss on any one of them degrades to "" instead of losing the
     row's name/dob/phone/guid, which is the part matching actually depends on.
+
+    copay/intake_form_status/eligibility_status/balance_due/chief_complaint/
+    confirmation_status follow the same row-scoped pattern; see
+    ScheduleScrapeConfig's field comments for selector details.
     """
     config = config or ScheduleScrapeConfig()
     rows: List[ReportPatient] = []
@@ -1140,6 +1215,12 @@ def scrape_schedule_day(page: Page, config: Optional[ScheduleScrapeConfig] = Non
             appointment_start_time = _schedule_row_start_time(row_scope, config)
             appointment_type = _schedule_row_appointment_type(row_scope, config)
             provider_name = _schedule_row_provider(row_scope, config)
+            copay = _schedule_row_copay(row_scope, config)
+            intake_form_status = _schedule_row_intake_form(row_scope, config)
+            eligibility_status = _schedule_row_eligibility(row_scope, config)
+            balance_due = _schedule_row_balance_due(row_scope, config)
+            chief_complaint = _schedule_row_chief_complaint(row_scope, config)
+            confirmation_status = _schedule_row_confirmation(row_scope, config)
 
             rows.append(
                 ReportPatient(
@@ -1153,6 +1234,12 @@ def scrape_schedule_day(page: Page, config: Optional[ScheduleScrapeConfig] = Non
                     appointment_start_time=appointment_start_time,
                     appointment_type=appointment_type,
                     provider_name=provider_name,
+                    copay=copay,
+                    intake_form_status=intake_form_status,
+                    eligibility_status=eligibility_status,
+                    balance_due=balance_due,
+                    chief_complaint=chief_complaint,
+                    confirmation_status=confirmation_status,
                 )
             )
         except PWError:
