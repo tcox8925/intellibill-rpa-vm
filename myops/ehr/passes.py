@@ -13,6 +13,7 @@ scrape_dashboard_notes (the working two-phase reader); the only changes are:
 """
 
 from collections import defaultdict
+from datetime import timedelta
 
 from .db import get_ehr_connection
 from .query import select_appointments
@@ -121,6 +122,27 @@ def _ensure_dashboard_filters(page, first_day):
             page.wait_for_timeout(200)
 
 
+def _dismiss_stray_overlays(page):
+    """
+    Close any leftover header patient-search dropdown (Tebra's own always-
+    mounted @tebra/navigation-ui widget, outside our control). goto() calls
+    in this flow only change the URL fragment, so the single-spa shell never
+    remounts and a stray open overlay from earlier in this page's session
+    can sit on top of the page and intercept clicks (e.g. the "Finished" tab
+    button underneath it) for the full default timeout. Same idea as
+    browser.py's _close_filters_if_open, ported to this separate Dashboard
+    flow which had no equivalent guard.
+    """
+    try:
+        overlay = page.locator("[data-testid^='patient-search-option-label']")
+        if overlay.count():
+            page.keyboard.press("Escape")
+            page.mouse.click(5, 5)  # neutral point, outside the search box
+            overlay.first.wait_for(state="hidden", timeout=3_000)
+    except Exception:
+        pass
+
+
 def _open_finished_tab(page, date_str):
     """Navigate to the date's dashboard and click the Finished tab."""
     page.goto("https://app.kareo.com/v2/#/scheduling/dashboard")
@@ -140,7 +162,13 @@ def _open_finished_tab(page, date_str):
     if finished_tab.count() == 0:
         print(f"[NOTES] No 'Finished' tab for {date_str}, skipping")
         return False
-    finished_tab.first.click()
+    _dismiss_stray_overlays(page)
+    try:
+        finished_tab.first.click(timeout=5_000)
+    except Exception:
+        # One more shot: dismiss again (the overlay can re-render) and force it.
+        _dismiss_stray_overlays(page)
+        finished_tab.first.click(force=True)
 
     try:
         page.wait_for_selector(CARD_SEL, timeout=8_000)
@@ -343,20 +371,53 @@ def _process_by_patient(page, context, cur, conn, rows, phase,
         print(f"[{phase}] [{idx}/{len(by_patient)}] {patient_name} "
               f"({len(all_db_ids)} appts, using {primary_appt_id} on {appt_day})")
 
-        try:
-            apply_date_filter(page, appt_day, appt_day)
-            ok = _download_and_mark(
-                page, context, cur, conn,
-                primary_appt_id, patient_name, all_db_ids, phase, keep_retry,
-            )
-            if ok and clear_on_success:
-                _clear_retry(cur, conn, all_db_ids)
-        except Exception as e:
-            print(f"[{phase}] [{idx}] {patient_name} failed, recovering: {e!r}")
+        # One in-run retry: a single stray patient (stale page from the prior
+        # patient's cleanup, a slow render, etc.) shouldn't cost a whole
+        # extra daily sweep. Force a hard reset to the grid before retrying
+        # so the retry isn't fighting the same stale state that caused the
+        # first failure.
+        last_err = None
+        for attempt in (1, 2):
             try:
-                conn.rollback()
-            except Exception:
-                pass
+                if attempt == 2:
+                    print(f"[{phase}] [{idx}] {patient_name} retrying "
+                          f"after reset (attempt {attempt})")
+                    _reset_to_grid(page)
+                # Confirmed live against Tebra (2026-09-02): a single-day
+                # (start==end) Worklist date filter can silently drop a real,
+                # in-range, signed appointment from the grid -- reproduced
+                # for TORCHON, CAMILLE (appt 1832, 2026-07-29): a fresh
+                # single-day 7/29-7/29 filter rendered only 1 row and never
+                # showed her, even though she's clearly there in Tebra's own
+                # Dashboard view and in a wider Worklist range (7/25-7/31).
+                # Padding the end date forward by one day reliably surfaced
+                # her row in the same live test; padding the start date
+                # backward instead did NOT. This is a Tebra-side filter bug,
+                # not a checkbox/provider-visibility issue -- the earlier
+                # ensure_worklist_filters_checked theory didn't hold up under
+                # live testing. find_row_by_appt_id_with_scroll still matches
+                # by exact appt_id, so the extra day's rows are harmless.
+                apply_date_filter(page, appt_day, appt_day + timedelta(days=1))
+                ok = _download_and_mark(
+                    page, context, cur, conn,
+                    primary_appt_id, patient_name, all_db_ids, phase, keep_retry,
+                )
+                if ok and clear_on_success:
+                    _clear_retry(cur, conn, all_db_ids)
+                last_err = None
+                break
+            except Exception as e:
+                last_err = e
+                print(f"[{phase}] [{idx}] {patient_name} failed "
+                      f"(attempt {attempt}): {e!r}")
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
+
+        if last_err is not None:
+            print(f"[{phase}] [{idx}] {patient_name} failed after retry, "
+                  f"recovering: {last_err!r}")
             try:
                 cur.execute(
                     f"""
@@ -365,7 +426,7 @@ def _process_by_patient(page, context, cur, conn, rows, phase,
                         process_error_message=%s, updated_date=now()
                     WHERE id = ANY(%s)
                     """,
-                    (phase, str(e)[:500], all_db_ids),
+                    (phase, str(last_err)[:500], all_db_ids),
                 )
                 conn.commit()
             except Exception:
@@ -467,8 +528,20 @@ def _download_and_mark(page, context, cur, conn,
             else:
                 page.go_back()
                 wait_for_grid_settled(page)
-        except Exception:
-            pass
+        except Exception as cleanup_err:
+            # Don't swallow this: if go_back()/settle fails, `page` is left
+            # stranded on the Facesheet route with no "Table filters" button,
+            # which cascades into the *next* patient's apply_date_filter
+            # failing with a confusing 30s locator timeout. Log it and force
+            # a real reset back to the grid so the next patient isn't
+            # silently dropped too.
+            print(f"[{phase}] cleanup after {patient_name} failed, "
+                  f"forcing grid reset: {cleanup_err!r}")
+            try:
+                _reset_to_grid(page)
+            except Exception as reset_err:
+                print(f"[{phase}] grid reset after cleanup failure also "
+                      f"failed: {reset_err!r}")
 
 
 def _clear_retry(cur, conn, db_ids):

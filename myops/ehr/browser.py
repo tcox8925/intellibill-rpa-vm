@@ -59,10 +59,21 @@ def _open_filters(page):
         btn.click(timeout=5_000)
     except Exception:
         try:
-            handle = btn.element_handle()
+            handle = btn.element_handle(timeout=5_000)
             page.evaluate("(el) => el && el.click()", handle)
         except Exception:
-            btn.click(force=True)
+            try:
+                btn.click(force=True, timeout=5_000)
+            except Exception as e:
+                # If the button genuinely isn't on the page, we're not on the
+                # worklist grid at all -- most likely a previous patient's
+                # cleanup (go_back/facesheet-tab-close) left `page` stranded
+                # on a stale route. Surface that instead of a bare 30s
+                # locator-timeout so it's obvious this isn't a slow render.
+                raise RuntimeError(
+                    f"Table filters button not found (not on worklist grid?); "
+                    f"current url={page.url!r}: {e!r}"
+                ) from e
     page.wait_for_timeout(100)
 
 
