@@ -6,6 +6,15 @@
 # inside myops/server.py's process and runs under this same venv -- see
 # myops/server.py's pf_sync mount and pf_sync_v5_6/server.py's module docstring.
 # pf_sync_v5_6/.venv (Python 3.14) is retired; both apps now share this 3.12 venv.
+#
+# Also covers tebra_patient_sync/requirements.txt (zeep, psycopg[binary],
+# azure-keyvault-keys, PyJWT[crypto]) now that tebra_patient_sync/app_tebra.py
+# is mounted at /patient-sync by the repo-root server.py -- same one-venv
+# setup as pf_sync above. zeep in particular is required: tebra_api.py builds
+# its SOAP client at import time, so without it the whole combined server
+# would fail that sub-app's import (guarded -- see server.py's try/except
+# around loading patient_sync_app -- but it still won't be *available*
+# without this installed).
 fastapi==0.115.0
 uvicorn[standard]==0.30.6
 gunicorn
@@ -34,6 +43,12 @@ pyodbc
 # Security & Auth
 passlib[bcrypt]==1.7.4
 pyjwt==2.9.0
+PyJWT[crypto]
+
+# Tebra patient-sync (SOAP GetPatients -> patient_header/patient_coverages)
+zeep
+psycopg[binary]
+azure-keyvault-keys
 
 # Utils
 httpx==0.27.2   # for async requests (optional, testing or API calls)
