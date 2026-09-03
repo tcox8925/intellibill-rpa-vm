@@ -16,13 +16,13 @@ from collections import defaultdict
 from datetime import timedelta
 
 from .db import get_ehr_connection
-from .query import select_appointments
+from .query import select_appointments, NO_VISIT_STATUSES
 from .matching import name_key, find_name_match, to_date_obj
 from .config import TABLE_NAME, PATIENTS_TABLE, DOWNLOAD_DIR
 from .browser import (
     apply_date_filter, wait_for_grid_settled,
     find_row_by_appt_id_with_scroll, click_patient_row, scrape_tebra_patient_id,
-    ensure_worklist_filters_checked,
+    ensure_worklist_filters_checked, cell,
 )
 import os
 import re
@@ -278,7 +278,21 @@ def _mark_from_cards(cur, conn, collected, needed):
             continue
 
         try:
-            if appt_status != "Checked Out":
+            # A signed note existing doesn't mean the visit happened -- staff
+            # can document a Cancelled/No Show/Rescheduled appointment too.
+            # Forcing appt_status to 'Checked Out' here for those genuinely
+            # blows away the real status (confirmed live: Sandra Alvarado,
+            # 2026-08-27, shows "No Show" on Tebra's own Dashboard but this
+            # unconditional overwrite had already flipped her DB row to
+            # 'Checked Out' before the facesheets gate ever saw her real
+            # status) -- which then defeats query.py's NO_VISIT_STATUSES
+            # exclusion and sends a no-visit appointment into the facesheet
+            # pull anyway, where it's guaranteed to fail and can strand the
+            # page for whoever's processed next. Only normalize to
+            # 'Checked Out' when the current status isn't already one of
+            # those -- i.e. some other transient status ("Roomed", blank,
+            # etc.) that a signed note legitimately supersedes.
+            if appt_status != "Checked Out" and appt_status not in NO_VISIT_STATUSES:
                 cur.execute(
                     f"""
                     UPDATE {TABLE_NAME}
@@ -450,6 +464,29 @@ def _download_and_mark(page, context, cur, conn,
         row = find_row_by_appt_id_with_scroll(page, appt_id)
         if not row:
             raise RuntimeError("No matching row found in grid")
+
+        # Belt-and-suspenders on top of query.py's NO_VISIT_STATUSES gate:
+        # that gate only ever sees whatever appt_status is currently stored,
+        # and a row can still be stale here if it hasn't been re-ingested
+        # since it went Cancelled/No Show/Rescheduled (pass_appointments only
+        # re-scrapes a rolling recent window, while this facesheets pass is
+        # deliberately unbounded across all history -- confirmed live
+        # 2026-09-03: Sandra Alvarado's row sat stale for over a week before
+        # this exact pull attempted her anyway). We already have the live
+        # grid row in hand right here, so re-check its real status before
+        # ever clicking -- self-healing the stale DB value in the same move,
+        # rather than trusting a field that might not have been touched in
+        # days.
+        live_status = cell(row, "APPOINTMENT_STATUS")
+        if live_status in NO_VISIT_STATUSES:
+            cur.execute(
+                f"UPDATE {TABLE_NAME} SET appt_status=%s, updated_date=now() WHERE id = ANY(%s)",
+                (live_status, all_db_ids),
+            )
+            conn.commit()
+            print(f"[{phase}] {patient_name} is actually '{live_status}' on Tebra "
+                  f"(stale DB status healed) -- skipping facesheet pull")
+            return False
 
         fs, opened_new_tab = click_patient_row(page, row)
 
