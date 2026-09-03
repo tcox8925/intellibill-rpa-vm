@@ -73,3 +73,14 @@ else:
     PLAYWRIGHT_HEADLESS = not bool(os.environ.get("DISPLAY", "").strip())
 
 PLAYWRIGHT_LAUNCH_ARGS = [] if PLAYWRIGHT_HEADLESS else ["--start-maximized"]
+
+# Headed mode runs maximized on Xvfb's 1920x1080 display (xvfb.service), so
+# Tebra's responsive MUI UI always renders at a full desktop layout there.
+# Headless mode has no --start-maximized to maximize against and, combined
+# with new_context(no_viewport=True), falls back to headless Chromium's
+# small built-in default window (~800x600) -- Tebra's grid/filters/drawers
+# render differently (or off-screen) at that size, breaking selectors that
+# were only ever built/tested against the 1920x1080 headed layout. Give
+# headless the same canvas explicitly instead of leaving it to the browser's
+# default.
+PLAYWRIGHT_VIEWPORT = {"width": 1920, "height": 1080} if PLAYWRIGHT_HEADLESS else None
