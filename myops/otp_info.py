@@ -13,7 +13,7 @@ def _is_visible(locator, timeout_ms=1500) -> bool:
     except Exception:
         return False
 
-def handle_tebra_otp_if_present(page, fetch_latest_otp_code_fn, *, since_dt_utc=None, poll_seconds=60):
+def handle_tebra_otp_if_present(page, fetch_latest_otp_code_fn, *, since_dt_utc=None, poll_seconds=240):
 
     otp_form = page.locator("form[name='Two-Factor Authentication Method Form']")
     otp_heading = page.locator("h2:has-text('Two-Factor Authentication')")

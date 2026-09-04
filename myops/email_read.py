@@ -26,7 +26,7 @@ def fetch_latest_tebra_otp_code_graph(
     access_token: str,
     *,
     since_dt_utc: datetime,
-    poll_seconds=60,
+    poll_seconds=240,
     poll_interval=5,
     page_size=25
 ) -> str:
@@ -112,7 +112,7 @@ def fetch_latest_tebra_otp_code_graph(
 
     raise RuntimeError(f"[OTP] No unread '{OTP_SUBJECT}' email from '{OTP_SENDER}' found within {poll_seconds}s")
 
-def fetch_latest_tebra_otp_code(*, since_dt_utc, poll_seconds=60) -> str:
+def fetch_latest_tebra_otp_code(*, since_dt_utc, poll_seconds=240) -> str:
     access_token = get_graph_access_token()
     return fetch_latest_tebra_otp_code_graph(
         access_token,

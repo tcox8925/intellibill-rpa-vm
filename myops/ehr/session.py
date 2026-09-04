@@ -78,7 +78,13 @@ def _handle_otp(page):
         page,
         fetch_latest_otp_code_fn=fetch_latest_tebra_otp_code,
         since_dt_utc=otp_since,
-        poll_seconds=75,
+        # Confirmed live 2026-09-04: the actual Tebra Verification Code email
+        # to this mailbox took 3+ minutes to arrive (login at 10:37:50, email
+        # landed 10:41:08) -- 75s wasn't a bug in the polling logic, delivery
+        # itself is just slower than that. 240s gives real headroom; the 5s
+        # poll interval inside fetch_latest_tebra_otp_code_graph means this
+        # still returns fast whenever the email shows up sooner.
+        poll_seconds=240,
     )
 
 
