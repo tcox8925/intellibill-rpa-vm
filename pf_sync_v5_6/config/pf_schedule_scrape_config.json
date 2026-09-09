@@ -20,5 +20,6 @@
   "scheduler_tab_selector": "[data-element='scheduler-tab-0']",
   "scheduler_selected_date_data_element": "scheduler-selected-date",
   "date_next_selector": "[data-element='btn-date-next']",
-  "date_previous_selector": "[data-element='btn-date-previous']"
+  "date_previous_selector": "[data-element='btn-date-previous']",
+  "all_statuses_checkbox_selector": "[data-element='chk-all-statuses'] input[type='checkbox']"
 }

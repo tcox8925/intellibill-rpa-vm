@@ -843,8 +843,54 @@ def open_patient_list_report(page: Page) -> None:
     visible(page, "[data-element='text-input-search-criteria-range-low']", DEFAULT_TIMEOUT)
 
 
+def ensure_all_appointment_statuses_selected(page: Page, config: Optional[ScheduleScrapeConfig] = None) -> bool:
+    """Force the Schedule 'Appointments' list's own left Filter panel to
+    APPOINTMENT STATUS: All before scraping any date in the range.
+
+    This is a page-level filter, not a per-day one: PF's persistent Chrome
+    profile carries over whatever subset a prior manual session last left
+    checked (confirmed live 2026-09-09 -- a profile left with only "Seen"
+    checked). A date whose appointments are all some OTHER status then reads
+    back as a clean "0 appointments", indistinguishable from a real empty day
+    without this check -- it doesn't surface as a scrape error, it just quietly
+    undercounts. Must run once before every range walk, same as the
+    Appointments tab (re)assertion this is called from in
+    open_schedule_appointments_view.
+
+    chk-all-statuses is a stable, non-Ember-numeric data-element -- see
+    ScheduleScrapeConfig.all_statuses_checkbox_selector's own docstring for why
+    the checkbox is selected by descending from that wrapper, never by the
+    input's own (Ember-generated, unstable) id.
+    """
+    config = config or ScheduleScrapeConfig()
+    checkbox = page.locator(config.all_statuses_checkbox_selector).first
+    if checkbox.count() == 0:
+        # Filter panel may be collapsed on a fresh page load -- toggle it open
+        # (by its own visible button text, confirmed live 2026-09-09) and retry
+        # once before giving up.
+        click_sel_any(page, ["text='Filter'"], SHORT_TIMEOUT, label="Filter panel toggle")
+        time.sleep(0.4)
+        checkbox = page.locator(config.all_statuses_checkbox_selector).first
+    if checkbox.count() == 0:
+        raise RuntimeError(
+            "ALL_STATUSES_CHECKBOX_NOT_FOUND: APPOINTMENT STATUS 'All' checkbox not "
+            "found; schedule scrape may be filtered to a subset of statuses."
+        )
+    if checkbox.is_checked():
+        return True
+    checkbox.click()
+    time.sleep(0.3)
+    if not checkbox.is_checked():
+        raise RuntimeError(
+            "ALL_STATUSES_NOT_APPLIED: Clicked APPOINTMENT STATUS 'All' but it still "
+            "reads unchecked; schedule scrape may be filtered to a subset of statuses."
+        )
+    return True
+
+
 def open_schedule_appointments_view(page: Page, config: Optional[ScheduleScrapeConfig] = None) -> None:
-    """Navigate to Schedule and select the 'Appointments' (list/agenda) tab.
+    """Navigate to Schedule, select the 'Appointments' (list/agenda) tab, and
+    force the APPOINTMENT STATUS filter to All.
 
     Confirmed live 2026-08-11: the Schedule page has two distinct views sharing
     the same date-nav controls -- 'Appointments' (list/agenda,
@@ -858,6 +904,11 @@ def open_schedule_appointments_view(page: Page, config: Optional[ScheduleScrapeC
     own count (e.g. "26 Appointments") proved the data was there. Always
     (re)assert this tab is selected before scraping a day; see go_to_schedule_date
     for the same defensive re-check during a multi-day walk.
+
+    ensure_all_appointment_statuses_selected is called last, once the
+    Appointments tab (and with it, the Filter panel) is definitely on screen --
+    see its own docstring for why the status filter needs the same defensive
+    re-assertion as the tab itself.
     """
     config = config or ScheduleScrapeConfig()
     page.goto(f"{EHR_BASE_URL}#/PF/schedule", wait_until="domcontentloaded")
@@ -868,6 +919,7 @@ def open_schedule_appointments_view(page: Page, config: Optional[ScheduleScrapeC
         label="Appointments (list) tab",
     )
     time.sleep(0.6)
+    ensure_all_appointment_statuses_selected(page, config)
 
 
 def read_schedule_facility(page: Page, config: Optional[ScheduleScrapeConfig] = None) -> str:
