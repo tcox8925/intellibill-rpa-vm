@@ -1,0 +1,1303 @@
+2026-08-17T08:17:02.120802+00:00  ================================================================================
+2026-08-17T08:17:02.120960+00:00  Starting Practice Fusion full latest-data export
+2026-08-17T08:17:02.121010+00:00  FHIR base URL: https://api.practicefusion.com/fhir/r4/v1/d01a1865-6e13-4262-b0d5-0d897b5aa9a8
+2026-08-17T08:17:02.121079+00:00  Output directory: /Users/hmg/Documents/ehr-patient-sync/practice_fusion/fhir_out
+2026-08-17T08:17:02.121115+00:00  Resources: 22
+2026-08-17T08:17:02.121150+00:00  Authenticating with Practice Fusion
+2026-08-17T08:17:06.469764+00:00  Authentication successful
+2026-08-17T08:17:06.470125+00:00  --------------------------------------------------------------------------------
+2026-08-17T08:17:06.470231+00:00  Starting resource: Patient
+2026-08-17T08:17:06.470314+00:00  Patient: fetching page 1
+2026-08-17T08:17:08.126551+00:00  Patient: received 100 records (total so far: 100)
+2026-08-17T08:17:08.126790+00:00  Patient: fetching page 2
+2026-08-17T08:17:08.942418+00:00  Patient: received 100 records (total so far: 200)
+2026-08-17T08:17:08.942687+00:00  Patient: fetching page 3
+2026-08-17T08:17:09.880539+00:00  Patient: received 100 records (total so far: 300)
+2026-08-17T08:17:09.881003+00:00  Patient: fetching page 4
+2026-08-17T08:17:10.676599+00:00  Patient: received 100 records (total so far: 400)
+2026-08-17T08:17:10.676733+00:00  Patient: fetching page 5
+2026-08-17T08:17:11.553907+00:00  Patient: received 100 records (total so far: 500)
+2026-08-17T08:17:11.554421+00:00  Patient: fetching page 6
+2026-08-17T08:17:12.437131+00:00  Patient: received 100 records (total so far: 600)
+2026-08-17T08:17:12.437511+00:00  Patient: fetching page 7
+2026-08-17T08:17:13.397115+00:00  Patient: received 100 records (total so far: 700)
+2026-08-17T08:17:13.397432+00:00  Patient: fetching page 8
+2026-08-17T08:17:14.192253+00:00  Patient: received 100 records (total so far: 800)
+2026-08-17T08:17:14.192554+00:00  Patient: fetching page 9
+2026-08-17T08:17:15.061040+00:00  Patient: received 100 records (total so far: 900)
+2026-08-17T08:17:15.061462+00:00  Patient: fetching page 10
+2026-08-17T08:17:15.903205+00:00  Patient: received 100 records (total so far: 1000)
+2026-08-17T08:17:15.903604+00:00  Patient: fetching page 11
+2026-08-17T08:17:16.747902+00:00  Patient: received 100 records (total so far: 1100)
+2026-08-17T08:17:16.748071+00:00  Patient: fetching page 12
+2026-08-17T08:17:17.555204+00:00  Patient: received 100 records (total so far: 1200)
+2026-08-17T08:17:17.555855+00:00  Patient: fetching page 13
+2026-08-17T08:17:18.634815+00:00  Patient: received 100 records (total so far: 1300)
+2026-08-17T08:17:18.635279+00:00  Patient: fetching page 14
+2026-08-17T08:17:19.425477+00:00  Patient: received 100 records (total so far: 1400)
+2026-08-17T08:17:19.425914+00:00  Patient: fetching page 15
+2026-08-17T08:17:20.216236+00:00  Patient: received 100 records (total so far: 1500)
+2026-08-17T08:17:20.216832+00:00  Patient: fetching page 16
+2026-08-17T08:17:21.117695+00:00  Patient: received 100 records (total so far: 1600)
+2026-08-17T08:17:21.118049+00:00  Patient: fetching page 17
+2026-08-17T08:17:21.970445+00:00  Patient: received 100 records (total so far: 1700)
+2026-08-17T08:17:21.970739+00:00  Patient: fetching page 18
+2026-08-17T08:17:22.795539+00:00  Patient: received 100 records (total so far: 1800)
+2026-08-17T08:17:22.795921+00:00  Patient: fetching page 19
+2026-08-17T08:17:23.616677+00:00  Patient: received 100 records (total so far: 1900)
+2026-08-17T08:17:23.617125+00:00  Patient: fetching page 20
+2026-08-17T08:17:24.393537+00:00  Patient: received 100 records (total so far: 2000)
+2026-08-17T08:17:24.393882+00:00  Patient: fetching page 21
+2026-08-17T08:17:25.205069+00:00  Patient: received 100 records (total so far: 2100)
+2026-08-17T08:17:25.205488+00:00  Patient: fetching page 22
+2026-08-17T08:17:26.056543+00:00  Patient: received 100 records (total so far: 2200)
+2026-08-17T08:17:26.056756+00:00  Patient: fetching page 23
+2026-08-17T08:17:27.068709+00:00  Patient: received 100 records (total so far: 2300)
+2026-08-17T08:17:27.069545+00:00  Patient: fetching page 24
+2026-08-17T08:17:27.904304+00:00  Patient: received 100 records (total so far: 2400)
+2026-08-17T08:17:27.904845+00:00  Patient: fetching page 25
+2026-08-17T08:17:28.717870+00:00  Patient: received 100 records (total so far: 2500)
+2026-08-17T08:17:28.718136+00:00  Patient: fetching page 26
+2026-08-17T08:17:29.486740+00:00  Patient: received 100 records (total so far: 2600)
+2026-08-17T08:17:29.487026+00:00  Patient: fetching page 27
+2026-08-17T08:17:30.290583+00:00  Patient: received 100 records (total so far: 2700)
+2026-08-17T08:17:30.291347+00:00  Patient: fetching page 28
+2026-08-17T08:17:31.430958+00:00  Patient: received 100 records (total so far: 2800)
+2026-08-17T08:17:31.431362+00:00  Patient: fetching page 29
+2026-08-17T08:17:32.425915+00:00  Patient: received 100 records (total so far: 2900)
+2026-08-17T08:17:32.426299+00:00  Patient: fetching page 30
+2026-08-17T08:17:33.310886+00:00  Patient: received 100 records (total so far: 3000)
+2026-08-17T08:17:33.311422+00:00  Patient: fetching page 31
+2026-08-17T08:17:34.216185+00:00  Patient: received 100 records (total so far: 3100)
+2026-08-17T08:17:34.216530+00:00  Patient: fetching page 32
+2026-08-17T08:17:35.164319+00:00  Patient: received 100 records (total so far: 3200)
+2026-08-17T08:17:35.164701+00:00  Patient: fetching page 33
+2026-08-17T08:17:35.953892+00:00  Patient: received 100 records (total so far: 3300)
+2026-08-17T08:17:35.954102+00:00  Patient: fetching page 34
+2026-08-17T08:17:36.764963+00:00  Patient: received 100 records (total so far: 3400)
+2026-08-17T08:17:36.765220+00:00  Patient: fetching page 35
+2026-08-17T08:17:37.570930+00:00  Patient: received 100 records (total so far: 3500)
+2026-08-17T08:17:37.571218+00:00  Patient: fetching page 36
+2026-08-17T08:17:38.536673+00:00  Patient: received 100 records (total so far: 3600)
+2026-08-17T08:17:38.537053+00:00  Patient: fetching page 37
+2026-08-17T08:17:39.613061+00:00  Patient: received 100 records (total so far: 3700)
+2026-08-17T08:17:39.613492+00:00  Patient: fetching page 38
+2026-08-17T08:17:40.439320+00:00  Patient: received 100 records (total so far: 3800)
+2026-08-17T08:17:40.439752+00:00  Patient: fetching page 39
+2026-08-17T08:17:41.487885+00:00  Patient: received 100 records (total so far: 3900)
+2026-08-17T08:17:41.488484+00:00  Patient: fetching page 40
+2026-08-17T08:17:42.359196+00:00  Patient: received 100 records (total so far: 4000)
+2026-08-17T08:17:42.359508+00:00  Patient: fetching page 41
+2026-08-17T08:17:43.293056+00:00  Patient: received 100 records (total so far: 4100)
+2026-08-17T08:17:43.293373+00:00  Patient: fetching page 42
+2026-08-17T08:17:44.077662+00:00  Patient: received 100 records (total so far: 4200)
+2026-08-17T08:17:44.078435+00:00  Patient: fetching page 43
+2026-08-17T08:17:45.059144+00:00  Patient: received 100 records (total so far: 4300)
+2026-08-17T08:17:45.059640+00:00  Patient: fetching page 44
+2026-08-17T08:17:45.858624+00:00  Patient: received 100 records (total so far: 4400)
+2026-08-17T08:17:45.859247+00:00  Patient: fetching page 45
+2026-08-17T08:17:46.804491+00:00  Patient: received 100 records (total so far: 4500)
+2026-08-17T08:17:46.805039+00:00  Patient: fetching page 46
+2026-08-17T08:17:47.590482+00:00  Patient: received 100 records (total so far: 4600)
+2026-08-17T08:17:47.591667+00:00  Patient: fetching page 47
+2026-08-17T08:17:48.415143+00:00  Patient: received 100 records (total so far: 4700)
+2026-08-17T08:17:48.415356+00:00  Patient: fetching page 48
+2026-08-17T08:17:49.409469+00:00  Patient: received 100 records (total so far: 4800)
+2026-08-17T08:17:49.410226+00:00  Patient: fetching page 49
+2026-08-17T08:17:50.279437+00:00  Patient: received 100 records (total so far: 4900)
+2026-08-17T08:17:50.279762+00:00  Patient: fetching page 50
+2026-08-17T08:17:51.521951+00:00  Patient: received 100 records (total so far: 5000)
+2026-08-17T08:17:51.522507+00:00  Patient: fetching page 51
+2026-08-17T08:17:52.309159+00:00  Patient: received 100 records (total so far: 5100)
+2026-08-17T08:17:52.309457+00:00  Patient: fetching page 52
+2026-08-17T08:17:53.107877+00:00  Patient: received 100 records (total so far: 5200)
+2026-08-17T08:17:53.108074+00:00  Patient: fetching page 53
+2026-08-17T08:17:53.928904+00:00  Patient: received 100 records (total so far: 5300)
+2026-08-17T08:17:53.929251+00:00  Patient: fetching page 54
+2026-08-17T08:17:54.821753+00:00  Patient: received 100 records (total so far: 5400)
+2026-08-17T08:17:54.822023+00:00  Patient: fetching page 55
+2026-08-17T08:17:55.814341+00:00  Patient: received 100 records (total so far: 5500)
+2026-08-17T08:17:55.814740+00:00  Patient: fetching page 56
+2026-08-17T08:17:57.030253+00:00  Patient: received 100 records (total so far: 5600)
+2026-08-17T08:17:57.030434+00:00  Patient: fetching page 57
+2026-08-17T08:17:58.032084+00:00  Patient: received 100 records (total so far: 5700)
+2026-08-17T08:17:58.032477+00:00  Patient: fetching page 58
+2026-08-17T08:17:58.806213+00:00  Patient: received 100 records (total so far: 5800)
+2026-08-17T08:17:58.806768+00:00  Patient: fetching page 59
+2026-08-17T08:17:59.681770+00:00  Patient: received 100 records (total so far: 5900)
+2026-08-17T08:17:59.682030+00:00  Patient: fetching page 60
+2026-08-17T08:18:00.543206+00:00  Patient: received 100 records (total so far: 6000)
+2026-08-17T08:18:00.543554+00:00  Patient: fetching page 61
+2026-08-17T08:18:01.379665+00:00  Patient: received 100 records (total so far: 6100)
+2026-08-17T08:18:01.380284+00:00  Patient: fetching page 62
+2026-08-17T08:18:02.166066+00:00  Patient: received 100 records (total so far: 6200)
+2026-08-17T08:18:02.166359+00:00  Patient: fetching page 63
+2026-08-17T08:18:03.273374+00:00  Patient: received 100 records (total so far: 6300)
+2026-08-17T08:18:03.274392+00:00  Patient: fetching page 64
+2026-08-17T08:18:04.138341+00:00  Patient: received 100 records (total so far: 6400)
+2026-08-17T08:18:04.138572+00:00  Patient: fetching page 65
+2026-08-17T08:18:04.935999+00:00  Patient: received 100 records (total so far: 6500)
+2026-08-17T08:18:04.936323+00:00  Patient: fetching page 66
+2026-08-17T08:18:05.724604+00:00  Patient: received 100 records (total so far: 6600)
+2026-08-17T08:18:05.725035+00:00  Patient: fetching page 67
+2026-08-17T08:18:06.568253+00:00  Patient: received 100 records (total so far: 6700)
+2026-08-17T08:18:06.568571+00:00  Patient: fetching page 68
+2026-08-17T08:18:07.398207+00:00  Patient: received 100 records (total so far: 6800)
+2026-08-17T08:18:07.398533+00:00  Patient: fetching page 69
+2026-08-17T08:18:08.219867+00:00  Patient: received 100 records (total so far: 6900)
+2026-08-17T08:18:08.220287+00:00  Patient: fetching page 70
+2026-08-17T08:18:09.012183+00:00  Patient: received 100 records (total so far: 7000)
+2026-08-17T08:18:09.012459+00:00  Patient: fetching page 71
+2026-08-17T08:18:09.795063+00:00  Patient: received 100 records (total so far: 7100)
+2026-08-17T08:18:09.795706+00:00  Patient: fetching page 72
+2026-08-17T08:18:10.606551+00:00  Patient: received 100 records (total so far: 7200)
+2026-08-17T08:18:10.606922+00:00  Patient: fetching page 73
+2026-08-17T08:18:11.424714+00:00  Patient: received 100 records (total so far: 7300)
+2026-08-17T08:18:11.425095+00:00  Patient: fetching page 74
+2026-08-17T08:18:12.461894+00:00  Patient: received 100 records (total so far: 7400)
+2026-08-17T08:18:12.462110+00:00  Patient: fetching page 75
+2026-08-17T08:18:13.356751+00:00  Patient: received 100 records (total so far: 7500)
+2026-08-17T08:18:13.356972+00:00  Patient: fetching page 76
+2026-08-17T08:18:14.350127+00:00  Patient: received 100 records (total so far: 7600)
+2026-08-17T08:18:14.350462+00:00  Patient: fetching page 77
+2026-08-17T08:18:15.138560+00:00  Patient: received 100 records (total so far: 7700)
+2026-08-17T08:18:15.139048+00:00  Patient: fetching page 78
+2026-08-17T08:18:16.010981+00:00  Patient: received 100 records (total so far: 7800)
+2026-08-17T08:18:16.011182+00:00  Patient: fetching page 79
+2026-08-17T08:18:16.795972+00:00  Patient: received 100 records (total so far: 7900)
+2026-08-17T08:18:16.796285+00:00  Patient: fetching page 80
+2026-08-17T08:18:17.624217+00:00  Patient: received 100 records (total so far: 8000)
+2026-08-17T08:18:17.625660+00:00  Patient: fetching page 81
+2026-08-17T08:18:18.406918+00:00  Patient: received 100 records (total so far: 8100)
+2026-08-17T08:18:18.407392+00:00  Patient: fetching page 82
+2026-08-17T08:18:19.234835+00:00  Patient: received 100 records (total so far: 8200)
+2026-08-17T08:18:19.235165+00:00  Patient: fetching page 83
+2026-08-17T08:18:20.105460+00:00  Patient: received 100 records (total so far: 8300)
+2026-08-17T08:18:20.105742+00:00  Patient: fetching page 84
+2026-08-17T08:18:20.915580+00:00  Patient: received 100 records (total so far: 8400)
+2026-08-17T08:18:20.915880+00:00  Patient: fetching page 85
+2026-08-17T08:18:21.813904+00:00  Patient: received 100 records (total so far: 8500)
+2026-08-17T08:18:21.814245+00:00  Patient: fetching page 86
+2026-08-17T08:18:22.613268+00:00  Patient: received 100 records (total so far: 8600)
+2026-08-17T08:18:22.613636+00:00  Patient: fetching page 87
+2026-08-17T08:18:23.404309+00:00  Patient: received 100 records (total so far: 8700)
+2026-08-17T08:18:23.404573+00:00  Patient: fetching page 88
+2026-08-17T08:18:24.360891+00:00  Patient: received 100 records (total so far: 8800)
+2026-08-17T08:18:24.361455+00:00  Patient: fetching page 89
+2026-08-17T08:18:25.182056+00:00  Patient: received 100 records (total so far: 8900)
+2026-08-17T08:18:25.182543+00:00  Patient: fetching page 90
+2026-08-17T08:18:26.015477+00:00  Patient: received 100 records (total so far: 9000)
+2026-08-17T08:18:26.015737+00:00  Patient: fetching page 91
+2026-08-17T08:18:26.890570+00:00  Patient: received 100 records (total so far: 9100)
+2026-08-17T08:18:26.890713+00:00  Patient: fetching page 92
+2026-08-17T08:18:27.729632+00:00  Patient: received 100 records (total so far: 9200)
+2026-08-17T08:18:27.729853+00:00  Patient: fetching page 93
+2026-08-17T08:18:28.596202+00:00  Patient: received 100 records (total so far: 9300)
+2026-08-17T08:18:28.596452+00:00  Patient: fetching page 94
+2026-08-17T08:18:29.331247+00:00  Patient: received 49 records (total so far: 9349)
+2026-08-17T08:18:29.902215+00:00  Patient: SUCCESS - 9349 records -> fhir_out/Patient.csv
+2026-08-17T08:18:29.902350+00:00  --------------------------------------------------------------------------------
+2026-08-17T08:18:29.902395+00:00  Starting resource: Coverage
+2026-08-17T08:18:29.902433+00:00  Coverage: fetching page 1
+2026-08-17T08:18:30.564795+00:00  Coverage: received 100 records (total so far: 100)
+2026-08-17T08:18:30.565728+00:00  Coverage: fetching page 2
+2026-08-17T08:18:31.176563+00:00  Coverage: received 100 records (total so far: 200)
+2026-08-17T08:18:31.177032+00:00  Coverage: fetching page 3
+2026-08-17T08:18:31.784174+00:00  Coverage: received 100 records (total so far: 300)
+2026-08-17T08:18:31.784637+00:00  Coverage: fetching page 4
+2026-08-17T08:18:32.627363+00:00  Coverage: received 100 records (total so far: 400)
+2026-08-17T08:18:32.627814+00:00  Coverage: fetching page 5
+2026-08-17T08:18:33.240860+00:00  Coverage: received 100 records (total so far: 500)
+2026-08-17T08:18:33.241061+00:00  Coverage: fetching page 6
+2026-08-17T08:18:33.861094+00:00  Coverage: received 100 records (total so far: 600)
+2026-08-17T08:18:33.861463+00:00  Coverage: fetching page 7
+2026-08-17T08:18:34.456816+00:00  Coverage: received 100 records (total so far: 700)
+2026-08-17T08:18:34.457202+00:00  Coverage: fetching page 8
+2026-08-17T08:18:35.065625+00:00  Coverage: received 100 records (total so far: 800)
+2026-08-17T08:18:35.065999+00:00  Coverage: fetching page 9
+2026-08-17T08:18:35.673050+00:00  Coverage: received 100 records (total so far: 900)
+2026-08-17T08:18:35.673442+00:00  Coverage: fetching page 10
+2026-08-17T08:18:36.316797+00:00  Coverage: received 100 records (total so far: 1000)
+2026-08-17T08:18:36.317205+00:00  Coverage: fetching page 11
+2026-08-17T08:18:36.917293+00:00  Coverage: received 100 records (total so far: 1100)
+2026-08-17T08:18:36.917793+00:00  Coverage: fetching page 12
+2026-08-17T08:18:37.541835+00:00  Coverage: received 100 records (total so far: 1200)
+2026-08-17T08:18:37.542626+00:00  Coverage: fetching page 13
+2026-08-17T08:18:38.154575+00:00  Coverage: received 100 records (total so far: 1300)
+2026-08-17T08:18:38.154906+00:00  Coverage: fetching page 14
+2026-08-17T08:18:38.761662+00:00  Coverage: received 100 records (total so far: 1400)
+2026-08-17T08:18:38.762223+00:00  Coverage: fetching page 15
+2026-08-17T08:18:39.362448+00:00  Coverage: received 100 records (total so far: 1500)
+2026-08-17T08:18:39.362655+00:00  Coverage: fetching page 16
+2026-08-17T08:18:39.967129+00:00  Coverage: received 100 records (total so far: 1600)
+2026-08-17T08:18:39.967331+00:00  Coverage: fetching page 17
+2026-08-17T08:18:40.932045+00:00  Coverage: received 100 records (total so far: 1700)
+2026-08-17T08:18:40.932593+00:00  Coverage: fetching page 18
+2026-08-17T08:18:41.657188+00:00  Coverage: received 100 records (total so far: 1800)
+2026-08-17T08:18:41.657346+00:00  Coverage: fetching page 19
+2026-08-17T08:18:42.268801+00:00  Coverage: received 100 records (total so far: 1900)
+2026-08-17T08:18:42.269593+00:00  Coverage: fetching page 20
+2026-08-17T08:18:42.879402+00:00  Coverage: received 100 records (total so far: 2000)
+2026-08-17T08:18:42.879617+00:00  Coverage: fetching page 21
+2026-08-17T08:18:43.530537+00:00  Coverage: received 100 records (total so far: 2100)
+2026-08-17T08:18:43.530849+00:00  Coverage: fetching page 22
+2026-08-17T08:18:44.142619+00:00  Coverage: received 100 records (total so far: 2200)
+2026-08-17T08:18:44.143237+00:00  Coverage: fetching page 23
+2026-08-17T08:18:44.811046+00:00  Coverage: received 100 records (total so far: 2300)
+2026-08-17T08:18:44.811549+00:00  Coverage: fetching page 24
+2026-08-17T08:18:45.424537+00:00  Coverage: received 100 records (total so far: 2400)
+2026-08-17T08:18:45.424929+00:00  Coverage: fetching page 25
+2026-08-17T08:18:46.024695+00:00  Coverage: received 100 records (total so far: 2500)
+2026-08-17T08:18:46.024858+00:00  Coverage: fetching page 26
+2026-08-17T08:18:46.637168+00:00  Coverage: received 100 records (total so far: 2600)
+2026-08-17T08:18:46.637749+00:00  Coverage: fetching page 27
+2026-08-17T08:18:47.267730+00:00  Coverage: received 100 records (total so far: 2700)
+2026-08-17T08:18:47.268120+00:00  Coverage: fetching page 28
+2026-08-17T08:18:47.879945+00:00  Coverage: received 100 records (total so far: 2800)
+2026-08-17T08:18:47.880638+00:00  Coverage: fetching page 29
+2026-08-17T08:18:48.492912+00:00  Coverage: received 100 records (total so far: 2900)
+2026-08-17T08:18:48.493604+00:00  Coverage: fetching page 30
+2026-08-17T08:18:49.127925+00:00  Coverage: received 100 records (total so far: 3000)
+2026-08-17T08:18:49.128628+00:00  Coverage: fetching page 31
+2026-08-17T08:18:49.761286+00:00  Coverage: received 100 records (total so far: 3100)
+2026-08-17T08:18:49.761663+00:00  Coverage: fetching page 32
+2026-08-17T08:18:50.400723+00:00  Coverage: received 100 records (total so far: 3200)
+2026-08-17T08:18:50.401054+00:00  Coverage: fetching page 33
+2026-08-17T08:18:51.012106+00:00  Coverage: received 100 records (total so far: 3300)
+2026-08-17T08:18:51.012414+00:00  Coverage: fetching page 34
+2026-08-17T08:18:51.629310+00:00  Coverage: received 100 records (total so far: 3400)
+2026-08-17T08:18:51.629466+00:00  Coverage: fetching page 35
+2026-08-17T08:18:52.233444+00:00  Coverage: received 100 records (total so far: 3500)
+2026-08-17T08:18:52.233642+00:00  Coverage: fetching page 36
+2026-08-17T08:18:52.861954+00:00  Coverage: received 100 records (total so far: 3600)
+2026-08-17T08:18:52.862302+00:00  Coverage: fetching page 37
+2026-08-17T08:18:53.495997+00:00  Coverage: received 100 records (total so far: 3700)
+2026-08-17T08:18:53.496148+00:00  Coverage: fetching page 38
+2026-08-17T08:18:54.101569+00:00  Coverage: received 100 records (total so far: 3800)
+2026-08-17T08:18:54.102168+00:00  Coverage: fetching page 39
+2026-08-17T08:18:54.720067+00:00  Coverage: received 100 records (total so far: 3900)
+2026-08-17T08:18:54.720459+00:00  Coverage: fetching page 40
+2026-08-17T08:18:55.327998+00:00  Coverage: received 100 records (total so far: 4000)
+2026-08-17T08:18:55.329286+00:00  Coverage: fetching page 41
+2026-08-17T08:18:55.951285+00:00  Coverage: received 100 records (total so far: 4100)
+2026-08-17T08:18:55.951533+00:00  Coverage: fetching page 42
+2026-08-17T08:18:56.562070+00:00  Coverage: received 100 records (total so far: 4200)
+2026-08-17T08:18:56.562483+00:00  Coverage: fetching page 43
+2026-08-17T08:18:57.219825+00:00  Coverage: received 100 records (total so far: 4300)
+2026-08-17T08:18:57.220177+00:00  Coverage: fetching page 44
+2026-08-17T08:18:57.841687+00:00  Coverage: received 100 records (total so far: 4400)
+2026-08-17T08:18:57.842492+00:00  Coverage: fetching page 45
+2026-08-17T08:18:58.445383+00:00  Coverage: received 100 records (total so far: 4500)
+2026-08-17T08:18:58.445866+00:00  Coverage: fetching page 46
+2026-08-17T08:18:59.061069+00:00  Coverage: received 100 records (total so far: 4600)
+2026-08-17T08:18:59.061413+00:00  Coverage: fetching page 47
+2026-08-17T08:18:59.710075+00:00  Coverage: received 100 records (total so far: 4700)
+2026-08-17T08:18:59.710493+00:00  Coverage: fetching page 48
+2026-08-17T08:19:00.338800+00:00  Coverage: received 100 records (total so far: 4800)
+2026-08-17T08:19:00.339453+00:00  Coverage: fetching page 49
+2026-08-17T08:19:00.951392+00:00  Coverage: received 100 records (total so far: 4900)
+2026-08-17T08:19:00.951968+00:00  Coverage: fetching page 50
+2026-08-17T08:19:01.561212+00:00  Coverage: received 100 records (total so far: 5000)
+2026-08-17T08:19:01.562163+00:00  Coverage: fetching page 51
+2026-08-17T08:19:02.179857+00:00  Coverage: received 100 records (total so far: 5100)
+2026-08-17T08:19:02.180468+00:00  Coverage: fetching page 52
+2026-08-17T08:19:02.804497+00:00  Coverage: received 100 records (total so far: 5200)
+2026-08-17T08:19:02.805002+00:00  Coverage: fetching page 53
+2026-08-17T08:19:03.430094+00:00  Coverage: received 100 records (total so far: 5300)
+2026-08-17T08:19:03.431465+00:00  Coverage: fetching page 54
+2026-08-17T08:19:04.052778+00:00  Coverage: received 100 records (total so far: 5400)
+2026-08-17T08:19:04.053259+00:00  Coverage: fetching page 55
+2026-08-17T08:19:04.684449+00:00  Coverage: received 100 records (total so far: 5500)
+2026-08-17T08:19:04.684688+00:00  Coverage: fetching page 56
+2026-08-17T08:19:05.281343+00:00  Coverage: received 100 records (total so far: 5600)
+2026-08-17T08:19:05.281676+00:00  Coverage: fetching page 57
+2026-08-17T08:19:05.995921+00:00  Coverage: received 100 records (total so far: 5700)
+2026-08-17T08:19:05.996227+00:00  Coverage: fetching page 58
+2026-08-17T08:19:06.621726+00:00  Coverage: received 100 records (total so far: 5800)
+2026-08-17T08:19:06.622397+00:00  Coverage: fetching page 59
+2026-08-17T08:19:07.212254+00:00  Coverage: received 85 records (total so far: 5885)
+2026-08-17T08:19:07.614300+00:00  Coverage: SUCCESS - 5885 records -> fhir_out/Coverage.csv
+2026-08-17T08:19:07.614425+00:00  --------------------------------------------------------------------------------
+2026-08-17T08:19:07.614470+00:00  Starting resource: Encounter
+2026-08-17T08:19:07.614512+00:00  Encounter: fetching page 1
+2026-08-17T08:19:08.243425+00:00  Encounter: received 100 records (total so far: 100)
+2026-08-17T08:19:08.244113+00:00  Encounter: fetching page 2
+2026-08-17T08:19:08.852137+00:00  Encounter: received 100 records (total so far: 200)
+2026-08-17T08:19:08.852445+00:00  Encounter: fetching page 3
+2026-08-17T08:19:09.487226+00:00  Encounter: received 100 records (total so far: 300)
+2026-08-17T08:19:09.487679+00:00  Encounter: fetching page 4
+2026-08-17T08:19:10.127631+00:00  Encounter: received 100 records (total so far: 400)
+2026-08-17T08:19:10.128272+00:00  Encounter: fetching page 5
+2026-08-17T08:19:10.729961+00:00  Encounter: received 100 records (total so far: 500)
+2026-08-17T08:19:10.730329+00:00  Encounter: fetching page 6
+2026-08-17T08:19:11.629454+00:00  Encounter: received 100 records (total so far: 600)
+2026-08-17T08:19:11.630270+00:00  Encounter: fetching page 7
+2026-08-17T08:19:12.218762+00:00  Encounter: received 100 records (total so far: 700)
+2026-08-17T08:19:12.219038+00:00  Encounter: fetching page 8
+2026-08-17T08:19:12.830323+00:00  Encounter: received 100 records (total so far: 800)
+2026-08-17T08:19:12.830514+00:00  Encounter: fetching page 9
+2026-08-17T08:19:13.461402+00:00  Encounter: received 100 records (total so far: 900)
+2026-08-17T08:19:13.461987+00:00  Encounter: fetching page 10
+2026-08-17T08:19:14.058335+00:00  Encounter: received 100 records (total so far: 1000)
+2026-08-17T08:19:14.058737+00:00  Encounter: fetching page 11
+2026-08-17T08:19:14.692019+00:00  Encounter: received 100 records (total so far: 1100)
+2026-08-17T08:19:14.692332+00:00  Encounter: fetching page 12
+2026-08-17T08:19:15.323661+00:00  Encounter: received 100 records (total so far: 1200)
+2026-08-17T08:19:15.324607+00:00  Encounter: fetching page 13
+2026-08-17T08:19:15.942252+00:00  Encounter: received 100 records (total so far: 1300)
+2026-08-17T08:19:15.942674+00:00  Encounter: fetching page 14
+2026-08-17T08:19:16.564265+00:00  Encounter: received 100 records (total so far: 1400)
+2026-08-17T08:19:16.565321+00:00  Encounter: fetching page 15
+2026-08-17T08:19:17.349551+00:00  Encounter: received 100 records (total so far: 1500)
+2026-08-17T08:19:17.349979+00:00  Encounter: fetching page 16
+2026-08-17T08:19:17.932763+00:00  Encounter: received 100 records (total so far: 1600)
+2026-08-17T08:19:17.933086+00:00  Encounter: fetching page 17
+2026-08-17T08:19:18.535420+00:00  Encounter: received 100 records (total so far: 1700)
+2026-08-17T08:19:18.535592+00:00  Encounter: fetching page 18
+2026-08-17T08:19:19.152657+00:00  Encounter: received 100 records (total so far: 1800)
+2026-08-17T08:19:19.152934+00:00  Encounter: fetching page 19
+2026-08-17T08:19:19.749413+00:00  Encounter: received 100 records (total so far: 1900)
+2026-08-17T08:19:19.750110+00:00  Encounter: fetching page 20
+2026-08-17T08:19:20.511544+00:00  Encounter: received 100 records (total so far: 2000)
+2026-08-17T08:19:20.511945+00:00  Encounter: fetching page 21
+2026-08-17T08:19:21.136235+00:00  Encounter: received 100 records (total so far: 2100)
+2026-08-17T08:19:21.136521+00:00  Encounter: fetching page 22
+2026-08-17T08:19:21.743088+00:00  Encounter: received 100 records (total so far: 2200)
+2026-08-17T08:19:21.743518+00:00  Encounter: fetching page 23
+2026-08-17T08:19:22.346915+00:00  Encounter: received 100 records (total so far: 2300)
+2026-08-17T08:19:22.347307+00:00  Encounter: fetching page 24
+2026-08-17T08:19:22.948805+00:00  Encounter: received 100 records (total so far: 2400)
+2026-08-17T08:19:22.949181+00:00  Encounter: fetching page 25
+2026-08-17T08:19:23.538077+00:00  Encounter: received 100 records (total so far: 2500)
+2026-08-17T08:19:23.538947+00:00  Encounter: fetching page 26
+2026-08-17T08:19:24.131255+00:00  Encounter: received 100 records (total so far: 2600)
+2026-08-17T08:19:24.131596+00:00  Encounter: fetching page 27
+2026-08-17T08:19:24.744964+00:00  Encounter: received 100 records (total so far: 2700)
+2026-08-17T08:19:24.745631+00:00  Encounter: fetching page 28
+2026-08-17T08:19:25.347425+00:00  Encounter: received 100 records (total so far: 2800)
+2026-08-17T08:19:25.347769+00:00  Encounter: fetching page 29
+2026-08-17T08:19:25.978346+00:00  Encounter: received 100 records (total so far: 2900)
+2026-08-17T08:19:25.978731+00:00  Encounter: fetching page 30
+2026-08-17T08:19:26.588962+00:00  Encounter: received 100 records (total so far: 3000)
+2026-08-17T08:19:26.589350+00:00  Encounter: fetching page 31
+2026-08-17T08:19:27.195529+00:00  Encounter: received 100 records (total so far: 3100)
+2026-08-17T08:19:27.196224+00:00  Encounter: fetching page 32
+2026-08-17T08:19:27.813353+00:00  Encounter: received 100 records (total so far: 3200)
+2026-08-17T08:19:27.813811+00:00  Encounter: fetching page 33
+2026-08-17T08:19:28.433637+00:00  Encounter: received 100 records (total so far: 3300)
+2026-08-17T08:19:28.434165+00:00  Encounter: fetching page 34
+2026-08-17T08:19:29.022753+00:00  Encounter: received 100 records (total so far: 3400)
+2026-08-17T08:19:29.023019+00:00  Encounter: fetching page 35
+2026-08-17T08:19:29.635845+00:00  Encounter: received 100 records (total so far: 3500)
+2026-08-17T08:19:29.636308+00:00  Encounter: fetching page 36
+2026-08-17T08:19:30.240308+00:00  Encounter: received 100 records (total so far: 3600)
+2026-08-17T08:19:30.240512+00:00  Encounter: fetching page 37
+2026-08-17T08:19:30.876227+00:00  Encounter: received 100 records (total so far: 3700)
+2026-08-17T08:19:30.876599+00:00  Encounter: fetching page 38
+2026-08-17T08:19:31.536112+00:00  Encounter: received 100 records (total so far: 3800)
+2026-08-17T08:19:31.536344+00:00  Encounter: fetching page 39
+2026-08-17T08:19:32.377093+00:00  Encounter: received 100 records (total so far: 3900)
+2026-08-17T08:19:32.377490+00:00  Encounter: fetching page 40
+2026-08-17T08:19:32.962861+00:00  Encounter: received 100 records (total so far: 4000)
+2026-08-17T08:19:32.963153+00:00  Encounter: fetching page 41
+2026-08-17T08:19:33.763312+00:00  Encounter: received 100 records (total so far: 4100)
+2026-08-17T08:19:33.763486+00:00  Encounter: fetching page 42
+2026-08-17T08:19:34.377092+00:00  Encounter: received 100 records (total so far: 4200)
+2026-08-17T08:19:34.377432+00:00  Encounter: fetching page 43
+2026-08-17T08:19:34.963346+00:00  Encounter: received 100 records (total so far: 4300)
+2026-08-17T08:19:34.963666+00:00  Encounter: fetching page 44
+2026-08-17T08:19:35.604498+00:00  Encounter: received 100 records (total so far: 4400)
+2026-08-17T08:19:35.604790+00:00  Encounter: fetching page 45
+2026-08-17T08:19:36.223803+00:00  Encounter: received 100 records (total so far: 4500)
+2026-08-17T08:19:36.224486+00:00  Encounter: fetching page 46
+2026-08-17T08:19:36.811239+00:00  Encounter: received 100 records (total so far: 4600)
+2026-08-17T08:19:36.812002+00:00  Encounter: fetching page 47
+2026-08-17T08:19:37.529661+00:00  Encounter: received 100 records (total so far: 4700)
+2026-08-17T08:19:37.530161+00:00  Encounter: fetching page 48
+2026-08-17T08:19:38.163403+00:00  Encounter: received 100 records (total so far: 4800)
+2026-08-17T08:19:38.164060+00:00  Encounter: fetching page 49
+2026-08-17T08:19:38.769307+00:00  Encounter: received 100 records (total so far: 4900)
+2026-08-17T08:19:38.769996+00:00  Encounter: fetching page 50
+2026-08-17T08:19:39.378131+00:00  Encounter: received 100 records (total so far: 5000)
+2026-08-17T08:19:39.378772+00:00  Encounter: fetching page 51
+2026-08-17T08:19:40.028603+00:00  Encounter: received 100 records (total so far: 5100)
+2026-08-17T08:19:40.029094+00:00  Encounter: fetching page 52
+2026-08-17T08:19:40.746520+00:00  Encounter: received 100 records (total so far: 5200)
+2026-08-17T08:19:40.747780+00:00  Encounter: fetching page 53
+2026-08-17T08:19:41.532070+00:00  Encounter: received 100 records (total so far: 5300)
+2026-08-17T08:19:41.532487+00:00  Encounter: fetching page 54
+2026-08-17T08:19:42.155168+00:00  Encounter: received 100 records (total so far: 5400)
+2026-08-17T08:19:42.156167+00:00  Encounter: fetching page 55
+2026-08-17T08:19:42.767552+00:00  Encounter: received 100 records (total so far: 5500)
+2026-08-17T08:19:42.768652+00:00  Encounter: fetching page 56
+2026-08-17T08:19:43.375113+00:00  Encounter: received 100 records (total so far: 5600)
+2026-08-17T08:19:43.376032+00:00  Encounter: fetching page 57
+2026-08-17T08:19:43.971756+00:00  Encounter: received 100 records (total so far: 5700)
+2026-08-17T08:19:43.972403+00:00  Encounter: fetching page 58
+2026-08-17T08:19:44.565120+00:00  Encounter: received 100 records (total so far: 5800)
+2026-08-17T08:19:44.565935+00:00  Encounter: fetching page 59
+2026-08-17T08:19:45.164575+00:00  Encounter: received 100 records (total so far: 5900)
+2026-08-17T08:19:45.165234+00:00  Encounter: fetching page 60
+2026-08-17T08:19:45.780224+00:00  Encounter: received 100 records (total so far: 6000)
+2026-08-17T08:19:45.780865+00:00  Encounter: fetching page 61
+2026-08-17T08:19:46.388240+00:00  Encounter: received 100 records (total so far: 6100)
+2026-08-17T08:19:46.389147+00:00  Encounter: fetching page 62
+2026-08-17T08:19:47.273353+00:00  Encounter: received 100 records (total so far: 6200)
+2026-08-17T08:19:47.274035+00:00  Encounter: fetching page 63
+2026-08-17T08:19:47.897019+00:00  Encounter: received 100 records (total so far: 6300)
+2026-08-17T08:19:47.897538+00:00  Encounter: fetching page 64
+2026-08-17T08:19:48.477469+00:00  Encounter: received 100 records (total so far: 6400)
+2026-08-17T08:19:48.477820+00:00  Encounter: fetching page 65
+2026-08-17T08:19:49.075783+00:00  Encounter: received 100 records (total so far: 6500)
+2026-08-17T08:19:49.076286+00:00  Encounter: fetching page 66
+2026-08-17T08:19:49.677101+00:00  Encounter: received 100 records (total so far: 6600)
+2026-08-17T08:19:49.677607+00:00  Encounter: fetching page 67
+2026-08-17T08:19:50.272779+00:00  Encounter: received 100 records (total so far: 6700)
+2026-08-17T08:19:50.274761+00:00  Encounter: fetching page 68
+2026-08-17T08:19:50.889648+00:00  Encounter: received 100 records (total so far: 6800)
+2026-08-17T08:19:50.890527+00:00  Encounter: fetching page 69
+2026-08-17T08:19:51.483779+00:00  Encounter: received 100 records (total so far: 6900)
+2026-08-17T08:19:51.484101+00:00  Encounter: fetching page 70
+2026-08-17T08:19:52.107633+00:00  Encounter: received 100 records (total so far: 7000)
+2026-08-17T08:19:52.108329+00:00  Encounter: fetching page 71
+2026-08-17T08:19:52.727425+00:00  Encounter: received 100 records (total so far: 7100)
+2026-08-17T08:19:52.728855+00:00  Encounter: fetching page 72
+2026-08-17T08:19:53.312141+00:00  Encounter: received 100 records (total so far: 7200)
+2026-08-17T08:19:53.313033+00:00  Encounter: fetching page 73
+2026-08-17T08:19:53.967067+00:00  Encounter: received 100 records (total so far: 7300)
+2026-08-17T08:19:53.967857+00:00  Encounter: fetching page 74
+2026-08-17T08:19:54.567212+00:00  Encounter: received 100 records (total so far: 7400)
+2026-08-17T08:19:54.567794+00:00  Encounter: fetching page 75
+2026-08-17T08:19:55.179320+00:00  Encounter: received 100 records (total so far: 7500)
+2026-08-17T08:19:55.180076+00:00  Encounter: fetching page 76
+2026-08-17T08:19:55.775583+00:00  Encounter: received 100 records (total so far: 7600)
+2026-08-17T08:19:55.776445+00:00  Encounter: fetching page 77
+2026-08-17T08:19:56.389940+00:00  Encounter: received 100 records (total so far: 7700)
+2026-08-17T08:19:56.390433+00:00  Encounter: fetching page 78
+2026-08-17T08:19:56.995177+00:00  Encounter: received 100 records (total so far: 7800)
+2026-08-17T08:19:56.996485+00:00  Encounter: fetching page 79
+2026-08-17T08:19:57.615100+00:00  Encounter: received 100 records (total so far: 7900)
+2026-08-17T08:19:57.615656+00:00  Encounter: fetching page 80
+2026-08-17T08:19:58.215271+00:00  Encounter: received 100 records (total so far: 8000)
+2026-08-17T08:19:58.215621+00:00  Encounter: fetching page 81
+2026-08-17T08:19:58.814088+00:00  Encounter: received 100 records (total so far: 8100)
+2026-08-17T08:19:58.814710+00:00  Encounter: fetching page 82
+2026-08-17T08:19:59.453263+00:00  Encounter: received 100 records (total so far: 8200)
+2026-08-17T08:19:59.453745+00:00  Encounter: fetching page 83
+2026-08-17T08:20:00.068838+00:00  Encounter: received 100 records (total so far: 8300)
+2026-08-17T08:20:00.069258+00:00  Encounter: fetching page 84
+2026-08-17T08:20:00.675223+00:00  Encounter: received 100 records (total so far: 8400)
+2026-08-17T08:20:00.676039+00:00  Encounter: fetching page 85
+2026-08-17T08:20:01.283142+00:00  Encounter: received 100 records (total so far: 8500)
+2026-08-17T08:20:01.284128+00:00  Encounter: fetching page 86
+2026-08-17T08:20:01.894552+00:00  Encounter: received 100 records (total so far: 8600)
+2026-08-17T08:20:01.895281+00:00  Encounter: fetching page 87
+2026-08-17T08:20:02.476664+00:00  Encounter: received 100 records (total so far: 8700)
+2026-08-17T08:20:02.477565+00:00  Encounter: fetching page 88
+2026-08-17T08:20:03.262485+00:00  Encounter: received 100 records (total so far: 8800)
+2026-08-17T08:20:03.263253+00:00  Encounter: fetching page 89
+2026-08-17T08:20:03.896354+00:00  Encounter: received 100 records (total so far: 8900)
+2026-08-17T08:20:03.897032+00:00  Encounter: fetching page 90
+2026-08-17T08:20:04.614953+00:00  Encounter: received 100 records (total so far: 9000)
+2026-08-17T08:20:04.615478+00:00  Encounter: fetching page 91
+2026-08-17T08:20:05.228312+00:00  Encounter: received 100 records (total so far: 9100)
+2026-08-17T08:20:05.229218+00:00  Encounter: fetching page 92
+2026-08-17T08:20:05.854673+00:00  Encounter: received 100 records (total so far: 9200)
+2026-08-17T08:20:05.855416+00:00  Encounter: fetching page 93
+2026-08-17T08:20:06.454325+00:00  Encounter: received 100 records (total so far: 9300)
+2026-08-17T08:20:06.454921+00:00  Encounter: fetching page 94
+2026-08-17T08:20:07.072764+00:00  Encounter: received 100 records (total so far: 9400)
+2026-08-17T08:20:07.073676+00:00  Encounter: fetching page 95
+2026-08-17T08:20:07.708736+00:00  Encounter: received 100 records (total so far: 9500)
+2026-08-17T08:20:07.709923+00:00  Encounter: fetching page 96
+2026-08-17T08:20:08.299510+00:00  Encounter: received 100 records (total so far: 9600)
+2026-08-17T08:20:08.299883+00:00  Encounter: fetching page 97
+2026-08-17T08:20:08.967345+00:00  Encounter: received 100 records (total so far: 9700)
+2026-08-17T08:20:08.967916+00:00  Encounter: fetching page 98
+2026-08-17T08:20:09.592371+00:00  Encounter: received 100 records (total so far: 9800)
+2026-08-17T08:20:09.593150+00:00  Encounter: fetching page 99
+2026-08-17T08:20:10.233506+00:00  Encounter: received 100 records (total so far: 9900)
+2026-08-17T08:20:10.234239+00:00  Encounter: fetching page 100
+2026-08-17T08:20:10.992570+00:00  Encounter: received 100 records (total so far: 10000)
+2026-08-17T08:20:11.572219+00:00  Encounter: SUCCESS - 10000 records -> fhir_out/Encounter.csv
+2026-08-17T08:20:11.572468+00:00  --------------------------------------------------------------------------------
+2026-08-17T08:20:11.572520+00:00  Starting resource: Condition
+2026-08-17T08:20:11.572560+00:00  Condition: fetching page 1
+2026-08-17T08:20:12.180355+00:00  Condition: received 100 records (total so far: 100)
+2026-08-17T08:20:12.180712+00:00  Condition: fetching page 2
+2026-08-17T08:20:12.801426+00:00  Condition: received 100 records (total so far: 200)
+2026-08-17T08:20:12.801847+00:00  Condition: fetching page 3
+2026-08-17T08:20:13.416846+00:00  Condition: received 100 records (total so far: 300)
+2026-08-17T08:20:13.418001+00:00  Condition: fetching page 4
+2026-08-17T08:20:14.206930+00:00  Condition: received 100 records (total so far: 400)
+2026-08-17T08:20:14.207592+00:00  Condition: fetching page 5
+2026-08-17T08:20:14.819944+00:00  Condition: received 100 records (total so far: 500)
+2026-08-17T08:20:14.820740+00:00  Condition: fetching page 6
+2026-08-17T08:20:15.452387+00:00  Condition: received 100 records (total so far: 600)
+2026-08-17T08:20:15.453335+00:00  Condition: fetching page 7
+2026-08-17T08:20:16.056025+00:00  Condition: received 100 records (total so far: 700)
+2026-08-17T08:20:16.056429+00:00  Condition: fetching page 8
+2026-08-17T08:20:16.673076+00:00  Condition: received 100 records (total so far: 800)
+2026-08-17T08:20:16.674178+00:00  Condition: fetching page 9
+2026-08-17T08:20:17.510330+00:00  Condition: received 100 records (total so far: 900)
+2026-08-17T08:20:17.511369+00:00  Condition: fetching page 10
+2026-08-17T08:20:18.131920+00:00  Condition: received 100 records (total so far: 1000)
+2026-08-17T08:20:18.132271+00:00  Condition: fetching page 11
+2026-08-17T08:20:18.789968+00:00  Condition: received 100 records (total so far: 1100)
+2026-08-17T08:20:18.790219+00:00  Condition: fetching page 12
+2026-08-17T08:20:19.421225+00:00  Condition: received 100 records (total so far: 1200)
+2026-08-17T08:20:19.422053+00:00  Condition: fetching page 13
+2026-08-17T08:20:20.083813+00:00  Condition: received 100 records (total so far: 1300)
+2026-08-17T08:20:20.084114+00:00  Condition: fetching page 14
+2026-08-17T08:20:20.708567+00:00  Condition: received 100 records (total so far: 1400)
+2026-08-17T08:20:20.709063+00:00  Condition: fetching page 15
+2026-08-17T08:20:21.359665+00:00  Condition: received 100 records (total so far: 1500)
+2026-08-17T08:20:21.360729+00:00  Condition: fetching page 16
+2026-08-17T09:09:07.895897+00:00  ================================================================================
+2026-08-17T09:09:07.897128+00:00  Starting Practice Fusion full latest-data export
+2026-08-17T09:09:07.897186+00:00  FHIR base URL: https://api.practicefusion.com/fhir/r4/v1/d01a1865-6e13-4262-b0d5-0d897b5aa9a8
+2026-08-17T09:09:07.897259+00:00  Output directory: /Users/hmg/Documents/ehr-patient-sync/practice_fusion/fhir_out
+2026-08-17T09:09:07.897299+00:00  Resources: 2
+2026-08-17T09:09:07.897338+00:00  Authenticating with Practice Fusion
+2026-08-17T09:09:14.177651+00:00  Authentication successful
+2026-08-17T09:09:14.178916+00:00  --------------------------------------------------------------------------------
+2026-08-17T09:09:14.179259+00:00  Starting resource: Patient
+2026-08-17T09:09:14.179543+00:00  Patient: fetching page 1
+2026-08-17T09:09:15.855335+00:00  Patient: received 100 records (total so far: 100)
+2026-08-17T09:09:15.856195+00:00  Patient: fetching page 2
+2026-08-17T09:09:16.636017+00:00  Patient: received 100 records (total so far: 200)
+2026-08-17T09:09:16.636579+00:00  Patient: fetching page 3
+2026-08-17T09:09:17.669006+00:00  Patient: received 100 records (total so far: 300)
+2026-08-17T09:09:17.669600+00:00  Patient: fetching page 4
+2026-08-17T09:09:18.824722+00:00  Patient: received 100 records (total so far: 400)
+2026-08-17T09:09:18.825248+00:00  Patient: fetching page 5
+2026-08-17T09:09:19.613830+00:00  Patient: received 100 records (total so far: 500)
+2026-08-17T09:09:19.614413+00:00  Patient: fetching page 6
+2026-08-17T09:09:20.430903+00:00  Patient: received 100 records (total so far: 600)
+2026-08-17T09:09:20.431248+00:00  Patient: fetching page 7
+2026-08-17T09:09:21.299289+00:00  Patient: received 100 records (total so far: 700)
+2026-08-17T09:09:21.299856+00:00  Patient: fetching page 8
+2026-08-17T09:09:22.105530+00:00  Patient: received 100 records (total so far: 800)
+2026-08-17T09:09:22.106008+00:00  Patient: fetching page 9
+2026-08-17T09:09:23.174307+00:00  Patient: received 100 records (total so far: 900)
+2026-08-17T09:09:23.175787+00:00  Patient: fetching page 10
+2026-08-17T09:09:24.259139+00:00  Patient: received 100 records (total so far: 1000)
+2026-08-17T09:09:24.260039+00:00  Patient: fetching page 11
+2026-08-17T09:09:25.092156+00:00  Patient: received 100 records (total so far: 1100)
+2026-08-17T09:09:25.093129+00:00  Patient: fetching page 12
+2026-08-17T09:09:25.888559+00:00  Patient: received 100 records (total so far: 1200)
+2026-08-17T09:09:25.889614+00:00  Patient: fetching page 13
+2026-08-17T09:09:26.766507+00:00  Patient: received 100 records (total so far: 1300)
+2026-08-17T09:09:26.767100+00:00  Patient: fetching page 14
+2026-08-17T09:09:27.611477+00:00  Patient: received 100 records (total so far: 1400)
+2026-08-17T09:09:27.612484+00:00  Patient: fetching page 15
+2026-08-17T09:09:28.386709+00:00  Patient: received 100 records (total so far: 1500)
+2026-08-17T09:09:28.387870+00:00  Patient: fetching page 16
+2026-08-17T09:09:29.157807+00:00  Patient: received 100 records (total so far: 1600)
+2026-08-17T09:09:29.158920+00:00  Patient: fetching page 17
+2026-08-17T09:09:30.093031+00:00  Patient: received 100 records (total so far: 1700)
+2026-08-17T09:09:30.093929+00:00  Patient: fetching page 18
+2026-08-17T09:09:31.196718+00:00  Patient: received 100 records (total so far: 1800)
+2026-08-17T09:09:31.197955+00:00  Patient: fetching page 19
+2026-08-17T09:09:32.258852+00:00  Patient: received 100 records (total so far: 1900)
+2026-08-17T09:09:32.259863+00:00  Patient: fetching page 20
+2026-08-17T09:09:33.463396+00:00  Patient: received 100 records (total so far: 2000)
+2026-08-17T09:09:33.464237+00:00  Patient: fetching page 21
+2026-08-17T09:09:34.378527+00:00  Patient: received 100 records (total so far: 2100)
+2026-08-17T09:09:34.379289+00:00  Patient: fetching page 22
+2026-08-17T09:09:35.186859+00:00  Patient: received 100 records (total so far: 2200)
+2026-08-17T09:09:35.188450+00:00  Patient: fetching page 23
+2026-08-17T09:09:36.595184+00:00  Patient: received 100 records (total so far: 2300)
+2026-08-17T09:09:36.596045+00:00  Patient: fetching page 24
+2026-08-17T09:09:37.472674+00:00  Patient: received 100 records (total so far: 2400)
+2026-08-17T09:09:37.473934+00:00  Patient: fetching page 25
+2026-08-17T09:09:38.635408+00:00  Patient: received 100 records (total so far: 2500)
+2026-08-17T09:09:38.635710+00:00  Patient: fetching page 26
+2026-08-17T09:09:39.554838+00:00  Patient: received 100 records (total so far: 2600)
+2026-08-17T09:09:39.555569+00:00  Patient: fetching page 27
+2026-08-17T09:09:40.355110+00:00  Patient: received 100 records (total so far: 2700)
+2026-08-17T09:09:40.355719+00:00  Patient: fetching page 28
+2026-08-17T09:09:41.407759+00:00  Patient: received 100 records (total so far: 2800)
+2026-08-17T09:09:41.409082+00:00  Patient: fetching page 29
+2026-08-17T09:09:42.236993+00:00  Patient: received 100 records (total so far: 2900)
+2026-08-17T09:09:42.237608+00:00  Patient: fetching page 30
+2026-08-17T09:09:43.046273+00:00  Patient: received 100 records (total so far: 3000)
+2026-08-17T09:09:43.046728+00:00  Patient: fetching page 31
+2026-08-17T09:09:44.109225+00:00  Patient: received 100 records (total so far: 3100)
+2026-08-17T09:09:44.110088+00:00  Patient: fetching page 32
+2026-08-17T09:09:44.915903+00:00  Patient: received 100 records (total so far: 3200)
+2026-08-17T09:09:44.916414+00:00  Patient: fetching page 33
+2026-08-17T09:09:45.836452+00:00  Patient: received 100 records (total so far: 3300)
+2026-08-17T09:09:45.837426+00:00  Patient: fetching page 34
+2026-08-17T09:09:46.616150+00:00  Patient: received 100 records (total so far: 3400)
+2026-08-17T09:09:46.617685+00:00  Patient: fetching page 35
+2026-08-17T09:09:47.455539+00:00  Patient: received 100 records (total so far: 3500)
+2026-08-17T09:09:47.456575+00:00  Patient: fetching page 36
+2026-08-17T09:09:48.247432+00:00  Patient: received 100 records (total so far: 3600)
+2026-08-17T09:09:48.248591+00:00  Patient: fetching page 37
+2026-08-17T09:09:49.087601+00:00  Patient: received 100 records (total so far: 3700)
+2026-08-17T09:09:49.088161+00:00  Patient: fetching page 38
+2026-08-17T09:09:49.872767+00:00  Patient: received 100 records (total so far: 3800)
+2026-08-17T09:09:49.873154+00:00  Patient: fetching page 39
+2026-08-17T09:09:50.602153+00:00  Patient: received 100 records (total so far: 3900)
+2026-08-17T09:09:50.602478+00:00  Patient: fetching page 40
+2026-08-17T09:09:51.406928+00:00  Patient: received 100 records (total so far: 4000)
+2026-08-17T09:09:51.407744+00:00  Patient: fetching page 41
+2026-08-17T09:09:52.231668+00:00  Patient: received 100 records (total so far: 4100)
+2026-08-17T09:09:52.232754+00:00  Patient: fetching page 42
+2026-08-17T09:09:53.075441+00:00  Patient: received 100 records (total so far: 4200)
+2026-08-17T09:09:53.075941+00:00  Patient: fetching page 43
+2026-08-17T09:09:53.874716+00:00  Patient: received 100 records (total so far: 4300)
+2026-08-17T09:09:53.875751+00:00  Patient: fetching page 44
+2026-08-17T09:09:55.496865+00:00  Patient: received 100 records (total so far: 4400)
+2026-08-17T09:09:55.498113+00:00  Patient: fetching page 45
+2026-08-17T09:09:56.578566+00:00  Patient: received 100 records (total so far: 4500)
+2026-08-17T09:09:56.579467+00:00  Patient: fetching page 46
+2026-08-17T09:09:57.663967+00:00  Patient: received 100 records (total so far: 4600)
+2026-08-17T09:09:57.668339+00:00  Patient: fetching page 47
+2026-08-17T09:09:58.482982+00:00  Patient: received 100 records (total so far: 4700)
+2026-08-17T09:09:58.483781+00:00  Patient: fetching page 48
+2026-08-17T09:09:59.355601+00:00  Patient: received 100 records (total so far: 4800)
+2026-08-17T09:09:59.356702+00:00  Patient: fetching page 49
+2026-08-17T09:10:00.665106+00:00  Patient: received 100 records (total so far: 4900)
+2026-08-17T09:10:00.665644+00:00  Patient: fetching page 50
+2026-08-17T09:10:01.938700+00:00  Patient: received 100 records (total so far: 5000)
+2026-08-17T09:10:01.939046+00:00  Patient: fetching page 51
+2026-08-17T09:10:02.936083+00:00  Patient: received 100 records (total so far: 5100)
+2026-08-17T09:10:02.937276+00:00  Patient: fetching page 52
+2026-08-17T09:10:03.759925+00:00  Patient: received 100 records (total so far: 5200)
+2026-08-17T09:10:03.760809+00:00  Patient: fetching page 53
+2026-08-17T09:10:05.038237+00:00  Patient: received 100 records (total so far: 5300)
+2026-08-17T09:10:05.038933+00:00  Patient: fetching page 54
+2026-08-17T09:10:05.840804+00:00  Patient: received 100 records (total so far: 5400)
+2026-08-17T09:10:05.841865+00:00  Patient: fetching page 55
+2026-08-17T09:10:06.694507+00:00  Patient: received 100 records (total so far: 5500)
+2026-08-17T09:10:06.700570+00:00  Patient: fetching page 56
+2026-08-17T09:10:07.502183+00:00  Patient: received 100 records (total so far: 5600)
+2026-08-17T09:10:07.502639+00:00  Patient: fetching page 57
+2026-08-17T09:10:08.288664+00:00  Patient: received 100 records (total so far: 5700)
+2026-08-17T09:10:08.290097+00:00  Patient: fetching page 58
+2026-08-17T09:10:09.242815+00:00  Patient: received 100 records (total so far: 5800)
+2026-08-17T09:10:09.243442+00:00  Patient: fetching page 59
+2026-08-17T09:10:10.010332+00:00  Patient: received 100 records (total so far: 5900)
+2026-08-17T09:10:10.011103+00:00  Patient: fetching page 60
+2026-08-17T09:10:10.961172+00:00  Patient: received 100 records (total so far: 6000)
+2026-08-17T09:10:10.962039+00:00  Patient: fetching page 61
+2026-08-17T09:10:11.754059+00:00  Patient: received 100 records (total so far: 6100)
+2026-08-17T09:10:11.754996+00:00  Patient: fetching page 62
+2026-08-17T09:10:12.625508+00:00  Patient: received 100 records (total so far: 6200)
+2026-08-17T09:10:12.626178+00:00  Patient: fetching page 63
+2026-08-17T09:10:13.501282+00:00  Patient: received 100 records (total so far: 6300)
+2026-08-17T09:10:13.502103+00:00  Patient: fetching page 64
+2026-08-17T09:10:14.325886+00:00  Patient: received 100 records (total so far: 6400)
+2026-08-17T09:10:14.326880+00:00  Patient: fetching page 65
+2026-08-17T09:10:15.162913+00:00  Patient: received 100 records (total so far: 6500)
+2026-08-17T09:10:15.164000+00:00  Patient: fetching page 66
+2026-08-17T09:10:16.028484+00:00  Patient: received 100 records (total so far: 6600)
+2026-08-17T09:10:16.029520+00:00  Patient: fetching page 67
+2026-08-17T09:10:16.917337+00:00  Patient: received 100 records (total so far: 6700)
+2026-08-17T09:10:16.918364+00:00  Patient: fetching page 68
+2026-08-17T09:10:17.904860+00:00  Patient: received 100 records (total so far: 6800)
+2026-08-17T09:10:17.906679+00:00  Patient: fetching page 69
+2026-08-17T09:10:18.676201+00:00  Patient: received 100 records (total so far: 6900)
+2026-08-17T09:10:18.677159+00:00  Patient: fetching page 70
+2026-08-17T09:10:19.419319+00:00  Patient: received 100 records (total so far: 7000)
+2026-08-17T09:10:19.420275+00:00  Patient: fetching page 71
+2026-08-17T09:10:20.169270+00:00  Patient: received 100 records (total so far: 7100)
+2026-08-17T09:10:20.170208+00:00  Patient: fetching page 72
+2026-08-17T09:10:20.966337+00:00  Patient: received 100 records (total so far: 7200)
+2026-08-17T09:10:20.967262+00:00  Patient: fetching page 73
+2026-08-17T09:10:21.759286+00:00  Patient: received 100 records (total so far: 7300)
+2026-08-17T09:10:21.760087+00:00  Patient: fetching page 74
+2026-08-17T09:10:22.549393+00:00  Patient: received 100 records (total so far: 7400)
+2026-08-17T09:10:22.549883+00:00  Patient: fetching page 75
+2026-08-17T09:10:23.350177+00:00  Patient: received 100 records (total so far: 7500)
+2026-08-17T09:10:23.351005+00:00  Patient: fetching page 76
+2026-08-17T09:10:24.163364+00:00  Patient: received 100 records (total so far: 7600)
+2026-08-17T09:10:24.163848+00:00  Patient: fetching page 77
+2026-08-17T09:10:25.063549+00:00  Patient: received 100 records (total so far: 7700)
+2026-08-17T09:10:25.064005+00:00  Patient: fetching page 78
+2026-08-17T09:10:25.865859+00:00  Patient: received 100 records (total so far: 7800)
+2026-08-17T09:10:25.866479+00:00  Patient: fetching page 79
+2026-08-17T09:10:26.664583+00:00  Patient: received 100 records (total so far: 7900)
+2026-08-17T09:10:26.665190+00:00  Patient: fetching page 80
+2026-08-17T09:10:27.467287+00:00  Patient: received 100 records (total so far: 8000)
+2026-08-17T09:10:27.467761+00:00  Patient: fetching page 81
+2026-08-17T09:10:28.267219+00:00  Patient: received 100 records (total so far: 8100)
+2026-08-17T09:10:28.267689+00:00  Patient: fetching page 82
+2026-08-17T09:10:29.894535+00:00  Patient: received 100 records (total so far: 8200)
+2026-08-17T09:10:29.895206+00:00  Patient: fetching page 83
+2026-08-17T09:10:30.940071+00:00  Patient: received 100 records (total so far: 8300)
+2026-08-17T09:10:30.940966+00:00  Patient: fetching page 84
+2026-08-17T09:10:32.005319+00:00  Patient: received 100 records (total so far: 8400)
+2026-08-17T09:10:32.006228+00:00  Patient: fetching page 85
+2026-08-17T09:10:32.885123+00:00  Patient: received 100 records (total so far: 8500)
+2026-08-17T09:10:32.886209+00:00  Patient: fetching page 86
+2026-08-17T09:10:33.984292+00:00  Patient: received 100 records (total so far: 8600)
+2026-08-17T09:10:33.985315+00:00  Patient: fetching page 87
+2026-08-17T09:10:34.917516+00:00  Patient: received 100 records (total so far: 8700)
+2026-08-17T09:10:34.918606+00:00  Patient: fetching page 88
+2026-08-17T09:10:35.764266+00:00  Patient: received 100 records (total so far: 8800)
+2026-08-17T09:10:35.765221+00:00  Patient: fetching page 89
+2026-08-17T09:10:36.661200+00:00  Patient: received 100 records (total so far: 8900)
+2026-08-17T09:10:36.662235+00:00  Patient: fetching page 90
+2026-08-17T09:10:37.526856+00:00  Patient: received 100 records (total so far: 9000)
+2026-08-17T09:10:37.527863+00:00  Patient: fetching page 91
+2026-08-17T09:10:38.321153+00:00  Patient: received 100 records (total so far: 9100)
+2026-08-17T09:10:38.322223+00:00  Patient: fetching page 92
+2026-08-17T09:10:39.594799+00:00  Patient: received 100 records (total so far: 9200)
+2026-08-17T09:10:39.595122+00:00  Patient: fetching page 93
+2026-08-17T09:10:40.366454+00:00  Patient: received 100 records (total so far: 9300)
+2026-08-17T09:10:40.368285+00:00  Patient: fetching page 94
+2026-08-17T09:10:41.031391+00:00  Patient: received 49 records (total so far: 9349)
+2026-08-17T09:10:41.533612+00:00  Patient: SUCCESS - 9349 records -> fhir_out/Patient.csv
+2026-08-17T09:10:41.533828+00:00  --------------------------------------------------------------------------------
+2026-08-17T09:10:41.533873+00:00  Starting resource: Coverage
+2026-08-17T09:10:41.533915+00:00  Coverage: fetching page 1
+2026-08-17T09:10:42.854324+00:00  Coverage: received 100 records (total so far: 100)
+2026-08-17T09:10:42.855361+00:00  Coverage: fetching page 2
+2026-08-17T09:10:43.575543+00:00  Coverage: received 100 records (total so far: 200)
+2026-08-17T09:10:43.576237+00:00  Coverage: fetching page 3
+2026-08-17T09:10:44.303345+00:00  Coverage: received 100 records (total so far: 300)
+2026-08-17T09:10:44.304046+00:00  Coverage: fetching page 4
+2026-08-17T09:10:45.383880+00:00  Coverage: received 100 records (total so far: 400)
+2026-08-17T09:10:45.384141+00:00  Coverage: fetching page 5
+2026-08-17T09:10:45.989265+00:00  Coverage: received 100 records (total so far: 500)
+2026-08-17T09:10:45.990486+00:00  Coverage: fetching page 6
+2026-08-17T09:10:47.144173+00:00  Coverage: received 100 records (total so far: 600)
+2026-08-17T09:10:47.145035+00:00  Coverage: fetching page 7
+2026-08-17T09:10:48.242788+00:00  Coverage: received 100 records (total so far: 700)
+2026-08-17T09:10:48.243225+00:00  Coverage: fetching page 8
+2026-08-17T09:10:48.849656+00:00  Coverage: received 100 records (total so far: 800)
+2026-08-17T09:10:48.850344+00:00  Coverage: fetching page 9
+2026-08-17T09:10:49.556853+00:00  Coverage: received 100 records (total so far: 900)
+2026-08-17T09:10:49.558205+00:00  Coverage: fetching page 10
+2026-08-17T09:10:50.167638+00:00  Coverage: received 100 records (total so far: 1000)
+2026-08-17T09:10:50.168551+00:00  Coverage: fetching page 11
+2026-08-17T09:10:50.781035+00:00  Coverage: received 100 records (total so far: 1100)
+2026-08-17T09:10:50.782109+00:00  Coverage: fetching page 12
+2026-08-17T09:10:51.382940+00:00  Coverage: received 100 records (total so far: 1200)
+2026-08-17T09:10:51.383958+00:00  Coverage: fetching page 13
+2026-08-17T09:10:52.003012+00:00  Coverage: received 100 records (total so far: 1300)
+2026-08-17T09:10:52.003660+00:00  Coverage: fetching page 14
+2026-08-17T09:10:52.608099+00:00  Coverage: received 100 records (total so far: 1400)
+2026-08-17T09:10:52.608778+00:00  Coverage: fetching page 15
+2026-08-17T09:10:53.789325+00:00  Coverage: received 100 records (total so far: 1500)
+2026-08-17T09:10:53.790366+00:00  Coverage: fetching page 16
+2026-08-17T09:10:54.866680+00:00  Coverage: received 100 records (total so far: 1600)
+2026-08-17T09:10:54.867734+00:00  Coverage: fetching page 17
+2026-08-17T09:10:55.469493+00:00  Coverage: received 100 records (total so far: 1700)
+2026-08-17T09:10:55.470601+00:00  Coverage: fetching page 18
+2026-08-17T09:10:56.075992+00:00  Coverage: received 100 records (total so far: 1800)
+2026-08-17T09:10:56.076793+00:00  Coverage: fetching page 19
+2026-08-17T09:10:56.749583+00:00  Coverage: received 100 records (total so far: 1900)
+2026-08-17T09:10:56.750579+00:00  Coverage: fetching page 20
+2026-08-17T09:10:57.378416+00:00  Coverage: received 100 records (total so far: 2000)
+2026-08-17T09:10:57.378966+00:00  Coverage: fetching page 21
+2026-08-17T09:10:58.397478+00:00  Coverage: received 100 records (total so far: 2100)
+2026-08-17T09:10:58.398589+00:00  Coverage: fetching page 22
+2026-08-17T09:10:59.183487+00:00  Coverage: received 100 records (total so far: 2200)
+2026-08-17T09:10:59.184744+00:00  Coverage: fetching page 23
+2026-08-17T09:11:00.241265+00:00  Coverage: received 100 records (total so far: 2300)
+2026-08-17T09:11:00.241683+00:00  Coverage: fetching page 24
+2026-08-17T09:11:00.851292+00:00  Coverage: received 100 records (total so far: 2400)
+2026-08-17T09:11:00.852055+00:00  Coverage: fetching page 25
+2026-08-17T09:11:01.743217+00:00  Coverage: received 100 records (total so far: 2500)
+2026-08-17T09:11:01.744447+00:00  Coverage: fetching page 26
+2026-08-17T09:11:02.686357+00:00  Coverage: received 100 records (total so far: 2600)
+2026-08-17T09:11:02.687300+00:00  Coverage: fetching page 27
+2026-08-17T09:11:03.691349+00:00  Coverage: received 100 records (total so far: 2700)
+2026-08-17T09:11:03.692339+00:00  Coverage: fetching page 28
+2026-08-17T09:11:04.778218+00:00  Coverage: received 100 records (total so far: 2800)
+2026-08-17T09:11:04.778604+00:00  Coverage: fetching page 29
+2026-08-17T09:11:05.694048+00:00  Coverage: received 100 records (total so far: 2900)
+2026-08-17T09:11:05.694821+00:00  Coverage: fetching page 30
+2026-08-17T09:11:06.304983+00:00  Coverage: received 100 records (total so far: 3000)
+2026-08-17T09:11:06.306118+00:00  Coverage: fetching page 31
+2026-08-17T09:11:07.142701+00:00  Coverage: received 100 records (total so far: 3100)
+2026-08-17T09:11:07.143735+00:00  Coverage: fetching page 32
+2026-08-17T09:11:07.756820+00:00  Coverage: received 100 records (total so far: 3200)
+2026-08-17T09:11:07.758073+00:00  Coverage: fetching page 33
+2026-08-17T09:13:27.898015+00:00  ================================================================================
+2026-08-17T09:13:27.900058+00:00  Starting Practice Fusion full latest-data export
+2026-08-17T09:13:27.900124+00:00  FHIR base URL: https://api.practicefusion.com/fhir/r4/v1/d01a1865-6e13-4262-b0d5-0d897b5aa9a8
+2026-08-17T09:13:27.900203+00:00  Output directory: /Users/hmg/Documents/ehr-patient-sync/practice_fusion/fhir_out
+2026-08-17T09:13:27.900242+00:00  Resources: 2
+2026-08-17T09:13:27.900281+00:00  Authenticating with Practice Fusion
+2026-08-17T09:13:33.140054+00:00  Authentication successful
+2026-08-17T09:13:33.141246+00:00  --------------------------------------------------------------------------------
+2026-08-17T09:13:33.141553+00:00  Starting resource: Patient
+2026-08-17T09:13:33.141788+00:00  Patient: fetching page 1
+2026-08-17T09:13:34.793342+00:00  Patient: received 100 records (total so far: 100)
+2026-08-17T09:13:34.794470+00:00  Patient: fetching page 2
+2026-08-17T09:13:35.621775+00:00  Patient: received 100 records (total so far: 200)
+2026-08-17T09:13:35.623453+00:00  Patient: fetching page 3
+2026-08-17T09:13:36.503845+00:00  Patient: received 100 records (total so far: 300)
+2026-08-17T09:13:36.504911+00:00  Patient: fetching page 4
+2026-08-17T09:13:37.320759+00:00  Patient: received 100 records (total so far: 400)
+2026-08-17T09:13:37.322029+00:00  Patient: fetching page 5
+2026-08-17T09:13:38.085350+00:00  Patient: received 100 records (total so far: 500)
+2026-08-17T09:13:38.086378+00:00  Patient: fetching page 6
+2026-08-17T09:13:38.882795+00:00  Patient: received 100 records (total so far: 600)
+2026-08-17T09:13:38.883380+00:00  Patient: fetching page 7
+2026-08-17T09:13:39.779757+00:00  Patient: received 100 records (total so far: 700)
+2026-08-17T09:13:39.780249+00:00  Patient: fetching page 8
+2026-08-17T09:13:40.538912+00:00  Patient: received 100 records (total so far: 800)
+2026-08-17T09:13:40.540203+00:00  Patient: fetching page 9
+2026-08-17T09:13:41.483473+00:00  Patient: received 100 records (total so far: 900)
+2026-08-17T09:13:41.484116+00:00  Patient: fetching page 10
+2026-08-17T09:13:42.486573+00:00  Patient: received 100 records (total so far: 1000)
+2026-08-17T09:13:42.487653+00:00  Patient: fetching page 11
+2026-08-17T09:13:43.300710+00:00  Patient: received 100 records (total so far: 1100)
+2026-08-17T09:13:43.302309+00:00  Patient: fetching page 12
+2026-08-17T09:13:44.168715+00:00  Patient: received 100 records (total so far: 1200)
+2026-08-17T09:13:44.169907+00:00  Patient: fetching page 13
+2026-08-17T09:13:45.225172+00:00  Patient: received 100 records (total so far: 1300)
+2026-08-17T09:13:45.225587+00:00  Patient: fetching page 14
+2026-08-17T09:13:46.123847+00:00  Patient: received 100 records (total so far: 1400)
+2026-08-17T09:13:46.125447+00:00  Patient: fetching page 15
+2026-08-17T09:13:46.981005+00:00  Patient: received 100 records (total so far: 1500)
+2026-08-17T09:13:46.981564+00:00  Patient: fetching page 16
+2026-08-17T09:13:47.834548+00:00  Patient: received 100 records (total so far: 1600)
+2026-08-17T09:13:47.835037+00:00  Patient: fetching page 17
+2026-08-17T09:13:48.677014+00:00  Patient: received 100 records (total so far: 1700)
+2026-08-17T09:13:48.677661+00:00  Patient: fetching page 18
+2026-08-17T09:13:49.979514+00:00  Patient: received 100 records (total so far: 1800)
+2026-08-17T09:13:49.980129+00:00  Patient: fetching page 19
+2026-08-17T09:13:50.779978+00:00  Patient: received 100 records (total so far: 1900)
+2026-08-17T09:13:50.780388+00:00  Patient: fetching page 20
+2026-08-17T09:13:53.316197+00:00  Patient: received 100 records (total so far: 2000)
+2026-08-17T09:13:53.316782+00:00  Patient: fetching page 21
+2026-08-17T09:13:54.210930+00:00  Patient: received 100 records (total so far: 2100)
+2026-08-17T09:13:54.212017+00:00  Patient: fetching page 22
+2026-08-17T09:13:55.288185+00:00  Patient: received 100 records (total so far: 2200)
+2026-08-17T09:13:55.289032+00:00  Patient: fetching page 23
+2026-08-17T09:13:56.359987+00:00  Patient: received 100 records (total so far: 2300)
+2026-08-17T09:13:56.360946+00:00  Patient: fetching page 24
+2026-08-17T09:13:57.455381+00:00  Patient: received 100 records (total so far: 2400)
+2026-08-17T09:13:57.456421+00:00  Patient: fetching page 25
+2026-08-17T09:13:58.247666+00:00  Patient: received 100 records (total so far: 2500)
+2026-08-17T09:13:58.248740+00:00  Patient: fetching page 26
+2026-08-17T09:13:59.185362+00:00  Patient: received 100 records (total so far: 2600)
+2026-08-17T09:13:59.186459+00:00  Patient: fetching page 27
+2026-08-17T09:14:00.017223+00:00  Patient: received 100 records (total so far: 2700)
+2026-08-17T09:14:00.018397+00:00  Patient: fetching page 28
+2026-08-17T09:14:00.802679+00:00  Patient: received 100 records (total so far: 2800)
+2026-08-17T09:14:00.803991+00:00  Patient: fetching page 29
+2026-08-17T09:14:01.741825+00:00  Patient: received 100 records (total so far: 2900)
+2026-08-17T09:14:01.742302+00:00  Patient: fetching page 30
+2026-08-17T09:14:02.917091+00:00  Patient: received 100 records (total so far: 3000)
+2026-08-17T09:14:02.917903+00:00  Patient: fetching page 31
+2026-08-17T09:14:03.714139+00:00  Patient: received 100 records (total so far: 3100)
+2026-08-17T09:14:03.714524+00:00  Patient: fetching page 32
+2026-08-17T09:14:04.873724+00:00  Patient: received 100 records (total so far: 3200)
+2026-08-17T09:14:04.874239+00:00  Patient: fetching page 33
+2026-08-17T09:14:05.761531+00:00  Patient: received 100 records (total so far: 3300)
+2026-08-17T09:14:05.761835+00:00  Patient: fetching page 34
+2026-08-17T09:14:06.578075+00:00  Patient: received 100 records (total so far: 3400)
+2026-08-17T09:14:06.578769+00:00  Patient: fetching page 35
+2026-08-17T09:14:07.439341+00:00  Patient: received 100 records (total so far: 3500)
+2026-08-17T09:14:07.439758+00:00  Patient: fetching page 36
+2026-08-17T09:14:08.251336+00:00  Patient: received 100 records (total so far: 3600)
+2026-08-17T09:14:08.257333+00:00  Patient: fetching page 37
+2026-08-17T09:14:09.101005+00:00  Patient: received 100 records (total so far: 3700)
+2026-08-17T09:14:09.101346+00:00  Patient: fetching page 38
+2026-08-17T09:14:09.987683+00:00  Patient: received 100 records (total so far: 3800)
+2026-08-17T09:14:09.988419+00:00  Patient: fetching page 39
+2026-08-17T09:14:10.810508+00:00  Patient: received 100 records (total so far: 3900)
+2026-08-17T09:14:10.811088+00:00  Patient: fetching page 40
+2026-08-17T09:14:11.630264+00:00  Patient: received 100 records (total so far: 4000)
+2026-08-17T09:14:11.630845+00:00  Patient: fetching page 41
+2026-08-17T09:14:12.446354+00:00  Patient: received 100 records (total so far: 4100)
+2026-08-17T09:14:12.446888+00:00  Patient: fetching page 42
+2026-08-17T09:14:13.266399+00:00  Patient: received 100 records (total so far: 4200)
+2026-08-17T09:14:13.266864+00:00  Patient: fetching page 43
+2026-08-17T09:14:14.110123+00:00  Patient: received 100 records (total so far: 4300)
+2026-08-17T09:14:14.110614+00:00  Patient: fetching page 44
+2026-08-17T09:14:15.044780+00:00  Patient: received 100 records (total so far: 4400)
+2026-08-17T09:14:15.045550+00:00  Patient: fetching page 45
+2026-08-17T09:14:15.875017+00:00  Patient: received 100 records (total so far: 4500)
+2026-08-17T09:14:15.875428+00:00  Patient: fetching page 46
+2026-08-17T09:14:16.826790+00:00  Patient: received 100 records (total so far: 4600)
+2026-08-17T09:14:16.827725+00:00  Patient: fetching page 47
+2026-08-17T09:14:17.744567+00:00  Patient: received 100 records (total so far: 4700)
+2026-08-17T09:14:17.745528+00:00  Patient: fetching page 48
+2026-08-17T09:14:18.523111+00:00  Patient: received 100 records (total so far: 4800)
+2026-08-17T09:14:18.523856+00:00  Patient: fetching page 49
+2026-08-17T09:14:19.348296+00:00  Patient: received 100 records (total so far: 4900)
+2026-08-17T09:14:19.348753+00:00  Patient: fetching page 50
+2026-08-17T09:14:20.184745+00:00  Patient: received 100 records (total so far: 5000)
+2026-08-17T09:14:20.185091+00:00  Patient: fetching page 51
+2026-08-17T09:14:20.987527+00:00  Patient: received 100 records (total so far: 5100)
+2026-08-17T09:14:20.988501+00:00  Patient: fetching page 52
+2026-08-17T09:14:21.908401+00:00  Patient: received 100 records (total so far: 5200)
+2026-08-17T09:14:21.909294+00:00  Patient: fetching page 53
+2026-08-17T09:14:22.741289+00:00  Patient: received 100 records (total so far: 5300)
+2026-08-17T09:14:22.742230+00:00  Patient: fetching page 54
+2026-08-17T09:14:23.544412+00:00  Patient: received 100 records (total so far: 5400)
+2026-08-17T09:14:23.545303+00:00  Patient: fetching page 55
+2026-08-17T09:14:24.496506+00:00  Patient: received 100 records (total so far: 5500)
+2026-08-17T09:14:24.497420+00:00  Patient: fetching page 56
+2026-08-17T09:14:25.318392+00:00  Patient: received 100 records (total so far: 5600)
+2026-08-17T09:14:25.320288+00:00  Patient: fetching page 57
+2026-08-17T09:14:26.155949+00:00  Patient: received 100 records (total so far: 5700)
+2026-08-17T09:14:26.157104+00:00  Patient: fetching page 58
+2026-08-17T09:14:26.972785+00:00  Patient: received 100 records (total so far: 5800)
+2026-08-17T09:14:26.973849+00:00  Patient: fetching page 59
+2026-08-17T09:14:27.917126+00:00  Patient: received 100 records (total so far: 5900)
+2026-08-17T09:14:27.918161+00:00  Patient: fetching page 60
+2026-08-17T09:14:29.253667+00:00  Patient: received 100 records (total so far: 6000)
+2026-08-17T09:14:29.254696+00:00  Patient: fetching page 61
+2026-08-17T09:14:30.188243+00:00  Patient: received 100 records (total so far: 6100)
+2026-08-17T09:14:30.188576+00:00  Patient: fetching page 62
+2026-08-17T09:14:31.028644+00:00  Patient: received 100 records (total so far: 6200)
+2026-08-17T09:14:31.029707+00:00  Patient: fetching page 63
+2026-08-17T09:14:31.890787+00:00  Patient: received 100 records (total so far: 6300)
+2026-08-17T09:14:31.891252+00:00  Patient: fetching page 64
+2026-08-17T09:14:32.745551+00:00  Patient: received 100 records (total so far: 6400)
+2026-08-17T09:14:32.746761+00:00  Patient: fetching page 65
+2026-08-17T09:14:33.543397+00:00  Patient: received 100 records (total so far: 6500)
+2026-08-17T09:14:33.544018+00:00  Patient: fetching page 66
+2026-08-17T09:14:34.909552+00:00  Patient: received 100 records (total so far: 6600)
+2026-08-17T09:14:34.910570+00:00  Patient: fetching page 67
+2026-08-17T09:14:35.729822+00:00  Patient: received 100 records (total so far: 6700)
+2026-08-17T09:14:35.731070+00:00  Patient: fetching page 68
+2026-08-17T09:14:36.649945+00:00  Patient: received 100 records (total so far: 6800)
+2026-08-17T09:14:36.651142+00:00  Patient: fetching page 69
+2026-08-17T09:14:37.814568+00:00  Patient: received 100 records (total so far: 6900)
+2026-08-17T09:14:37.815568+00:00  Patient: fetching page 70
+2026-08-17T09:14:38.646362+00:00  Patient: received 100 records (total so far: 7000)
+2026-08-17T09:14:38.647438+00:00  Patient: fetching page 71
+2026-08-17T09:14:39.715704+00:00  Patient: received 100 records (total so far: 7100)
+2026-08-17T09:14:39.716792+00:00  Patient: fetching page 72
+2026-08-17T09:14:40.501744+00:00  Patient: received 100 records (total so far: 7200)
+2026-08-17T09:14:40.503085+00:00  Patient: fetching page 73
+2026-08-17T09:14:41.293966+00:00  Patient: received 100 records (total so far: 7300)
+2026-08-17T09:14:41.295055+00:00  Patient: fetching page 74
+2026-08-17T09:14:42.392100+00:00  Patient: received 100 records (total so far: 7400)
+2026-08-17T09:14:42.393169+00:00  Patient: fetching page 75
+2026-08-17T09:14:43.247757+00:00  Patient: received 100 records (total so far: 7500)
+2026-08-17T09:14:43.248860+00:00  Patient: fetching page 76
+2026-08-17T09:14:44.044829+00:00  Patient: received 100 records (total so far: 7600)
+2026-08-17T09:14:44.046156+00:00  Patient: fetching page 77
+2026-08-17T09:14:45.098932+00:00  Patient: received 100 records (total so far: 7700)
+2026-08-17T09:14:45.099952+00:00  Patient: fetching page 78
+2026-08-17T09:14:46.311197+00:00  Patient: received 100 records (total so far: 7800)
+2026-08-17T09:14:46.312313+00:00  Patient: fetching page 79
+2026-08-17T09:14:47.172100+00:00  Patient: received 100 records (total so far: 7900)
+2026-08-17T09:14:47.172910+00:00  Patient: fetching page 80
+2026-08-17T09:14:48.067134+00:00  Patient: received 100 records (total so far: 8000)
+2026-08-17T09:14:48.068366+00:00  Patient: fetching page 81
+2026-08-17T09:14:48.949687+00:00  Patient: received 100 records (total so far: 8100)
+2026-08-17T09:14:48.950971+00:00  Patient: fetching page 82
+2026-08-17T09:14:49.816259+00:00  Patient: received 100 records (total so far: 8200)
+2026-08-17T09:14:49.817350+00:00  Patient: fetching page 83
+2026-08-17T09:14:50.667594+00:00  Patient: received 100 records (total so far: 8300)
+2026-08-17T09:14:50.668679+00:00  Patient: fetching page 84
+2026-08-17T09:14:51.602712+00:00  Patient: received 100 records (total so far: 8400)
+2026-08-17T09:14:51.603892+00:00  Patient: fetching page 85
+2026-08-17T09:14:52.694193+00:00  Patient: received 100 records (total so far: 8500)
+2026-08-17T09:14:52.695223+00:00  Patient: fetching page 86
+2026-08-17T09:14:53.514564+00:00  Patient: received 100 records (total so far: 8600)
+2026-08-17T09:14:53.515917+00:00  Patient: fetching page 87
+2026-08-17T09:14:54.681866+00:00  Patient: received 100 records (total so far: 8700)
+2026-08-17T09:14:54.682524+00:00  Patient: fetching page 88
+2026-08-17T09:14:55.499176+00:00  Patient: received 100 records (total so far: 8800)
+2026-08-17T09:14:55.499789+00:00  Patient: fetching page 89
+2026-08-17T09:14:56.476617+00:00  Patient: received 100 records (total so far: 8900)
+2026-08-17T09:14:56.477164+00:00  Patient: fetching page 90
+2026-08-17T09:14:57.291899+00:00  Patient: received 100 records (total so far: 9000)
+2026-08-17T09:14:57.292204+00:00  Patient: fetching page 91
+2026-08-17T09:14:58.312481+00:00  Patient: received 100 records (total so far: 9100)
+2026-08-17T09:14:58.313130+00:00  Patient: fetching page 92
+2026-08-17T09:14:59.208261+00:00  Patient: received 100 records (total so far: 9200)
+2026-08-17T09:14:59.208458+00:00  Patient: fetching page 93
+2026-08-17T09:15:00.026231+00:00  Patient: received 100 records (total so far: 9300)
+2026-08-17T09:15:00.026736+00:00  Patient: fetching page 94
+2026-08-17T09:15:00.697200+00:00  Patient: received 49 records (total so far: 9349)
+2026-08-17T09:15:01.118559+00:00  Patient: SUCCESS - 9349 records -> fhir_out/Patient.json
+2026-08-17T09:15:01.118951+00:00  --------------------------------------------------------------------------------
+2026-08-17T09:15:01.119458+00:00  Starting resource: Coverage
+2026-08-17T09:15:01.119519+00:00  Coverage: fetching page 1
+2026-08-17T09:15:01.745860+00:00  Coverage: received 100 records (total so far: 100)
+2026-08-17T09:15:01.746271+00:00  Coverage: fetching page 2
+2026-08-17T09:15:02.718822+00:00  Coverage: received 100 records (total so far: 200)
+2026-08-17T09:15:02.719524+00:00  Coverage: fetching page 3
+2026-08-17T09:15:03.332670+00:00  Coverage: received 100 records (total so far: 300)
+2026-08-17T09:15:03.333729+00:00  Coverage: fetching page 4
+2026-08-17T09:15:03.958084+00:00  Coverage: received 100 records (total so far: 400)
+2026-08-17T09:15:03.959072+00:00  Coverage: fetching page 5
+2026-08-17T09:15:04.689482+00:00  Coverage: received 100 records (total so far: 500)
+2026-08-17T09:15:04.690227+00:00  Coverage: fetching page 6
+2026-08-17T09:15:05.316545+00:00  Coverage: received 100 records (total so far: 600)
+2026-08-17T09:15:05.317538+00:00  Coverage: fetching page 7
+2026-08-17T09:15:05.928542+00:00  Coverage: received 100 records (total so far: 700)
+2026-08-17T09:15:05.929484+00:00  Coverage: fetching page 8
+2026-08-17T09:15:06.569513+00:00  Coverage: received 100 records (total so far: 800)
+2026-08-17T09:15:06.570640+00:00  Coverage: fetching page 9
+2026-08-17T09:15:07.197570+00:00  Coverage: received 100 records (total so far: 900)
+2026-08-17T09:15:07.198701+00:00  Coverage: fetching page 10
+2026-08-17T09:15:07.949120+00:00  Coverage: received 100 records (total so far: 1000)
+2026-08-17T09:15:07.950162+00:00  Coverage: fetching page 11
+2026-08-17T09:15:08.584821+00:00  Coverage: received 100 records (total so far: 1100)
+2026-08-17T09:15:08.585732+00:00  Coverage: fetching page 12
+2026-08-17T09:15:09.213933+00:00  Coverage: received 100 records (total so far: 1200)
+2026-08-17T09:15:09.215036+00:00  Coverage: fetching page 13
+2026-08-17T09:15:09.853894+00:00  Coverage: received 100 records (total so far: 1300)
+2026-08-17T09:15:09.855057+00:00  Coverage: fetching page 14
+2026-08-17T09:15:10.475253+00:00  Coverage: received 100 records (total so far: 1400)
+2026-08-17T09:15:10.476382+00:00  Coverage: fetching page 15
+2026-08-17T09:15:11.117273+00:00  Coverage: received 100 records (total so far: 1500)
+2026-08-17T09:15:11.119041+00:00  Coverage: fetching page 16
+2026-08-17T09:15:11.740819+00:00  Coverage: received 100 records (total so far: 1600)
+2026-08-17T09:15:11.742192+00:00  Coverage: fetching page 17
+2026-08-17T09:15:12.365864+00:00  Coverage: received 100 records (total so far: 1700)
+2026-08-17T09:15:12.366747+00:00  Coverage: fetching page 18
+2026-08-17T09:15:12.989172+00:00  Coverage: received 100 records (total so far: 1800)
+2026-08-17T09:15:12.990219+00:00  Coverage: fetching page 19
+2026-08-17T09:15:13.608334+00:00  Coverage: received 100 records (total so far: 1900)
+2026-08-17T09:15:13.609410+00:00  Coverage: fetching page 20
+2026-08-17T09:15:14.334538+00:00  Coverage: received 100 records (total so far: 2000)
+2026-08-17T09:15:14.335476+00:00  Coverage: fetching page 21
+2026-08-17T09:15:15.016471+00:00  Coverage: received 100 records (total so far: 2100)
+2026-08-17T09:15:15.017749+00:00  Coverage: fetching page 22
+2026-08-17T09:15:15.747232+00:00  Coverage: received 100 records (total so far: 2200)
+2026-08-17T09:15:15.748338+00:00  Coverage: fetching page 23
+2026-08-17T09:15:16.372746+00:00  Coverage: received 100 records (total so far: 2300)
+2026-08-17T09:15:16.373677+00:00  Coverage: fetching page 24
+2026-08-17T09:15:17.184431+00:00  Coverage: received 100 records (total so far: 2400)
+2026-08-17T09:15:17.187271+00:00  Coverage: fetching page 25
+2026-08-17T09:15:17.986008+00:00  Coverage: received 100 records (total so far: 2500)
+2026-08-17T09:15:17.987109+00:00  Coverage: fetching page 26
+2026-08-17T09:15:18.607875+00:00  Coverage: received 100 records (total so far: 2600)
+2026-08-17T09:15:18.609061+00:00  Coverage: fetching page 27
+2026-08-17T09:15:19.237329+00:00  Coverage: received 100 records (total so far: 2700)
+2026-08-17T09:15:19.238421+00:00  Coverage: fetching page 28
+2026-08-17T09:15:19.893332+00:00  Coverage: received 100 records (total so far: 2800)
+2026-08-17T09:15:19.894093+00:00  Coverage: fetching page 29
+2026-08-17T09:15:20.505011+00:00  Coverage: received 100 records (total so far: 2900)
+2026-08-17T09:15:20.506213+00:00  Coverage: fetching page 30
+2026-08-17T09:15:21.292588+00:00  Coverage: received 100 records (total so far: 3000)
+2026-08-17T09:15:21.293708+00:00  Coverage: fetching page 31
+2026-08-17T09:15:21.915291+00:00  Coverage: received 100 records (total so far: 3100)
+2026-08-17T09:15:21.916410+00:00  Coverage: fetching page 32
+2026-08-17T09:15:22.557426+00:00  Coverage: received 100 records (total so far: 3200)
+2026-08-17T09:15:22.558595+00:00  Coverage: fetching page 33
+2026-08-17T09:15:23.215043+00:00  Coverage: received 100 records (total so far: 3300)
+2026-08-17T09:15:23.216171+00:00  Coverage: fetching page 34
+2026-08-17T09:15:23.842271+00:00  Coverage: received 100 records (total so far: 3400)
+2026-08-17T09:15:23.844286+00:00  Coverage: fetching page 35
+2026-08-17T09:15:24.682936+00:00  Coverage: received 100 records (total so far: 3500)
+2026-08-17T09:15:24.683633+00:00  Coverage: fetching page 36
+2026-08-17T09:15:25.479760+00:00  Coverage: received 100 records (total so far: 3600)
+2026-08-17T09:15:25.480911+00:00  Coverage: fetching page 37
+2026-08-17T09:15:26.117296+00:00  Coverage: received 100 records (total so far: 3700)
+2026-08-17T09:15:26.118519+00:00  Coverage: fetching page 38
+2026-08-17T09:15:26.742165+00:00  Coverage: received 100 records (total so far: 3800)
+2026-08-17T09:15:26.743142+00:00  Coverage: fetching page 39
+2026-08-17T09:15:27.364758+00:00  Coverage: received 100 records (total so far: 3900)
+2026-08-17T09:15:27.366569+00:00  Coverage: fetching page 40
+2026-08-17T09:15:28.094933+00:00  Coverage: received 100 records (total so far: 4000)
+2026-08-17T09:15:28.095892+00:00  Coverage: fetching page 41
+2026-08-17T09:15:28.709762+00:00  Coverage: received 100 records (total so far: 4100)
+2026-08-17T09:15:28.710893+00:00  Coverage: fetching page 42
+2026-08-17T09:15:29.333411+00:00  Coverage: received 100 records (total so far: 4200)
+2026-08-17T09:15:29.334624+00:00  Coverage: fetching page 43
+2026-08-17T09:15:29.950237+00:00  Coverage: received 100 records (total so far: 4300)
+2026-08-17T09:15:29.951420+00:00  Coverage: fetching page 44
+2026-08-17T09:15:30.569269+00:00  Coverage: received 100 records (total so far: 4400)
+2026-08-17T09:15:30.570435+00:00  Coverage: fetching page 45
+2026-08-17T09:15:31.193471+00:00  Coverage: received 100 records (total so far: 4500)
+2026-08-17T09:15:31.194741+00:00  Coverage: fetching page 46
+2026-08-17T09:15:31.815224+00:00  Coverage: received 100 records (total so far: 4600)
+2026-08-17T09:15:31.816665+00:00  Coverage: fetching page 47
+2026-08-17T09:15:33.043393+00:00  Coverage: received 100 records (total so far: 4700)
+2026-08-17T09:15:33.044084+00:00  Coverage: fetching page 48
+2026-08-17T09:15:34.128385+00:00  Coverage: received 100 records (total so far: 4800)
+2026-08-17T09:15:34.129003+00:00  Coverage: fetching page 49
+2026-08-17T09:15:34.742787+00:00  Coverage: received 100 records (total so far: 4900)
+2026-08-17T09:15:34.743548+00:00  Coverage: fetching page 50
+2026-08-17T09:15:35.369442+00:00  Coverage: received 100 records (total so far: 5000)
+2026-08-17T09:15:35.370926+00:00  Coverage: fetching page 51
+2026-08-17T09:15:35.999334+00:00  Coverage: received 100 records (total so far: 5100)
+2026-08-17T09:15:36.000079+00:00  Coverage: fetching page 52
+2026-08-17T09:15:36.679583+00:00  Coverage: received 100 records (total so far: 5200)
+2026-08-17T09:15:36.680595+00:00  Coverage: fetching page 53
+2026-08-17T09:15:37.382189+00:00  Coverage: received 100 records (total so far: 5300)
+2026-08-17T09:15:37.383154+00:00  Coverage: fetching page 54
+2026-08-17T09:15:38.063790+00:00  Coverage: received 100 records (total so far: 5400)
+2026-08-17T09:15:38.064871+00:00  Coverage: fetching page 55
+2026-08-17T09:15:38.902907+00:00  Coverage: received 100 records (total so far: 5500)
+2026-08-17T09:15:38.904122+00:00  Coverage: fetching page 56
+2026-08-17T09:15:39.519738+00:00  Coverage: received 100 records (total so far: 5600)
+2026-08-17T09:15:39.520247+00:00  Coverage: fetching page 57
+2026-08-17T09:15:40.200811+00:00  Coverage: received 100 records (total so far: 5700)
+2026-08-17T09:15:40.202491+00:00  Coverage: fetching page 58
+2026-08-17T09:15:40.835298+00:00  Coverage: received 100 records (total so far: 5800)
+2026-08-17T09:15:40.836228+00:00  Coverage: fetching page 59
+2026-08-17T09:15:41.521984+00:00  Coverage: received 85 records (total so far: 5885)
+2026-08-17T09:15:41.791810+00:00  Coverage: SUCCESS - 5885 records -> fhir_out/Coverage.json
+2026-08-17T09:15:41.792038+00:00  ================================================================================
+2026-08-17T09:15:41.792095+00:00  Export finished: successful=2, failed=0, total_records=15234, elapsed_seconds=133.9
+2026-08-17T09:15:41.792137+00:00  All resources exported successfully.
+2026-08-17T10:51:09.638685+00:00  ================================================================================
+2026-08-17T10:51:09.639740+00:00  Starting Practice Fusion full latest-data export
+2026-08-17T10:51:09.639784+00:00  FHIR base URL: https://api.practicefusion.com/fhir/r4/v1/d01a1865-6e13-4262-b0d5-0d897b5aa9a8
+2026-08-17T10:51:09.639838+00:00  Output directory: /Users/hmg/Documents/ehr-patient-sync/practice_fusion/fhir_out
+2026-08-17T10:51:09.639868+00:00  Resources: 1
+2026-08-17T10:51:09.639896+00:00  Authenticating with Practice Fusion
+2026-08-17T10:51:15.831474+00:00  Authentication successful
+2026-08-17T10:51:15.832406+00:00  --------------------------------------------------------------------------------
+2026-08-17T10:51:15.832612+00:00  Starting resource: RelatedPerson
+2026-08-17T10:51:15.832747+00:00  RelatedPerson: fetching page 1
+2026-08-17T10:51:17.315669+00:00  RelatedPerson: received 100 records (total so far: 100)
+2026-08-17T10:51:17.315973+00:00  RelatedPerson: fetching page 2
+2026-08-17T10:51:18.141000+00:00  RelatedPerson: received 100 records (total so far: 200)
+2026-08-17T10:51:18.141513+00:00  RelatedPerson: fetching page 3
+2026-08-17T10:51:18.814325+00:00  RelatedPerson: received 100 records (total so far: 300)
+2026-08-17T10:51:18.814664+00:00  RelatedPerson: fetching page 4
+2026-08-17T10:51:19.417530+00:00  RelatedPerson: received 100 records (total so far: 400)
+2026-08-17T10:51:19.418051+00:00  RelatedPerson: fetching page 5
+2026-08-17T10:51:20.002551+00:00  RelatedPerson: received 100 records (total so far: 500)
+2026-08-17T10:51:20.003478+00:00  RelatedPerson: fetching page 6
+2026-08-17T10:51:20.745516+00:00  RelatedPerson: received 100 records (total so far: 600)
+2026-08-17T10:51:20.746122+00:00  RelatedPerson: fetching page 7
+2026-08-17T10:51:21.368735+00:00  RelatedPerson: received 100 records (total so far: 700)
+2026-08-17T10:51:21.369380+00:00  RelatedPerson: fetching page 8
+2026-08-17T10:51:22.000001+00:00  RelatedPerson: received 100 records (total so far: 800)
+2026-08-17T10:51:22.001005+00:00  RelatedPerson: fetching page 9
+2026-08-17T10:51:22.606852+00:00  RelatedPerson: received 100 records (total so far: 900)
+2026-08-17T10:51:22.607040+00:00  RelatedPerson: fetching page 10
+2026-08-17T10:51:23.202434+00:00  RelatedPerson: received 100 records (total so far: 1000)
+2026-08-17T10:51:23.203142+00:00  RelatedPerson: fetching page 11
+2026-08-17T10:51:23.794428+00:00  RelatedPerson: received 100 records (total so far: 1100)
+2026-08-17T10:51:23.795735+00:00  RelatedPerson: fetching page 12
+2026-08-17T10:51:24.383093+00:00  RelatedPerson: received 100 records (total so far: 1200)
+2026-08-17T10:51:24.383589+00:00  RelatedPerson: fetching page 13
+2026-08-17T10:51:25.112607+00:00  RelatedPerson: received 100 records (total so far: 1300)
+2026-08-17T10:51:25.113354+00:00  RelatedPerson: fetching page 14
+2026-08-17T10:51:25.712877+00:00  RelatedPerson: received 100 records (total so far: 1400)
+2026-08-17T10:51:25.713899+00:00  RelatedPerson: fetching page 15
+2026-08-17T10:51:26.314228+00:00  RelatedPerson: received 100 records (total so far: 1500)
+2026-08-17T10:51:26.314934+00:00  RelatedPerson: fetching page 16
+2026-08-17T10:51:26.914546+00:00  RelatedPerson: received 100 records (total so far: 1600)
+2026-08-17T10:51:26.915694+00:00  RelatedPerson: fetching page 17
+2026-08-17T10:51:27.637723+00:00  RelatedPerson: received 100 records (total so far: 1700)
+2026-08-17T10:51:27.638879+00:00  RelatedPerson: fetching page 18
+2026-08-17T10:51:28.380691+00:00  RelatedPerson: received 100 records (total so far: 1800)
+2026-08-17T10:51:28.381924+00:00  RelatedPerson: fetching page 19
+2026-08-17T10:51:28.974196+00:00  RelatedPerson: received 100 records (total so far: 1900)
+2026-08-17T10:51:28.975133+00:00  RelatedPerson: fetching page 20
+2026-08-17T10:51:29.589430+00:00  RelatedPerson: received 100 records (total so far: 2000)
+2026-08-17T10:51:29.590763+00:00  RelatedPerson: fetching page 21
+2026-08-17T10:51:30.197742+00:00  RelatedPerson: received 100 records (total so far: 2100)
+2026-08-17T10:51:30.199853+00:00  RelatedPerson: fetching page 22
+2026-08-17T10:51:30.809487+00:00  RelatedPerson: received 100 records (total so far: 2200)
+2026-08-17T10:51:30.810588+00:00  RelatedPerson: fetching page 23
+2026-08-17T10:51:31.417491+00:00  RelatedPerson: received 100 records (total so far: 2300)
+2026-08-17T10:51:31.418549+00:00  RelatedPerson: fetching page 24
+2026-08-17T10:51:32.004829+00:00  RelatedPerson: received 100 records (total so far: 2400)
+2026-08-17T10:51:32.006019+00:00  RelatedPerson: fetching page 25
+2026-08-17T10:51:32.596320+00:00  RelatedPerson: received 100 records (total so far: 2500)
+2026-08-17T10:51:32.597495+00:00  RelatedPerson: fetching page 26
+2026-08-17T10:51:33.196004+00:00  RelatedPerson: received 100 records (total so far: 2600)
+2026-08-17T10:51:33.197208+00:00  RelatedPerson: fetching page 27
+2026-08-17T10:51:33.853368+00:00  RelatedPerson: received 100 records (total so far: 2700)
+2026-08-17T10:51:33.854710+00:00  RelatedPerson: fetching page 28
+2026-08-17T10:51:34.450938+00:00  RelatedPerson: received 100 records (total so far: 2800)
+2026-08-17T10:51:34.452580+00:00  RelatedPerson: fetching page 29
+2026-08-17T10:51:35.057075+00:00  RelatedPerson: received 100 records (total so far: 2900)
+2026-08-17T10:51:35.058410+00:00  RelatedPerson: fetching page 30
+2026-08-17T10:51:35.776404+00:00  RelatedPerson: received 100 records (total so far: 3000)
+2026-08-17T10:51:35.777666+00:00  RelatedPerson: fetching page 31
+2026-08-17T10:51:36.406427+00:00  RelatedPerson: received 100 records (total so far: 3100)
+2026-08-17T10:51:36.408358+00:00  RelatedPerson: fetching page 32
+2026-08-17T10:51:37.124433+00:00  RelatedPerson: received 100 records (total so far: 3200)
+2026-08-17T10:51:37.125483+00:00  RelatedPerson: fetching page 33
+2026-08-17T10:51:37.733795+00:00  RelatedPerson: received 100 records (total so far: 3300)
+2026-08-17T10:51:37.735126+00:00  RelatedPerson: fetching page 34
+2026-08-17T10:51:38.376343+00:00  RelatedPerson: received 100 records (total so far: 3400)
+2026-08-17T10:51:38.377859+00:00  RelatedPerson: fetching page 35
+2026-08-17T10:51:38.997209+00:00  RelatedPerson: received 100 records (total so far: 3500)
+2026-08-17T10:51:38.998413+00:00  RelatedPerson: fetching page 36
+2026-08-17T10:51:39.926604+00:00  RelatedPerson: received 100 records (total so far: 3600)
+2026-08-17T10:51:39.927813+00:00  RelatedPerson: fetching page 37
+2026-08-17T10:51:40.656837+00:00  RelatedPerson: received 100 records (total so far: 3700)
+2026-08-17T10:51:40.657963+00:00  RelatedPerson: fetching page 38
+2026-08-17T10:51:41.423708+00:00  RelatedPerson: received 100 records (total so far: 3800)
+2026-08-17T10:51:41.424918+00:00  RelatedPerson: fetching page 39
+2026-08-17T10:51:42.017969+00:00  RelatedPerson: received 100 records (total so far: 3900)
+2026-08-17T10:51:42.020187+00:00  RelatedPerson: fetching page 40
+2026-08-17T10:51:42.637329+00:00  RelatedPerson: received 100 records (total so far: 4000)
+2026-08-17T10:51:42.639516+00:00  RelatedPerson: fetching page 41
+2026-08-17T10:51:43.238203+00:00  RelatedPerson: received 100 records (total so far: 4100)
+2026-08-17T10:51:43.239390+00:00  RelatedPerson: fetching page 42
+2026-08-17T10:51:43.842955+00:00  RelatedPerson: received 100 records (total so far: 4200)
+2026-08-17T10:51:43.844123+00:00  RelatedPerson: fetching page 43
+2026-08-17T10:51:44.439723+00:00  RelatedPerson: received 100 records (total so far: 4300)
+2026-08-17T10:51:44.440720+00:00  RelatedPerson: fetching page 44
+2026-08-17T10:51:45.043316+00:00  RelatedPerson: received 100 records (total so far: 4400)
+2026-08-17T10:51:45.044273+00:00  RelatedPerson: fetching page 45
+2026-08-17T10:51:45.665103+00:00  RelatedPerson: received 100 records (total so far: 4500)
+2026-08-17T10:51:45.666237+00:00  RelatedPerson: fetching page 46
+2026-08-17T10:51:46.262204+00:00  RelatedPerson: received 100 records (total so far: 4600)
+2026-08-17T10:51:46.263754+00:00  RelatedPerson: fetching page 47
+2026-08-17T10:51:47.129204+00:00  RelatedPerson: received 100 records (total so far: 4700)
+2026-08-17T10:51:47.130276+00:00  RelatedPerson: fetching page 48
+2026-08-17T10:51:47.735793+00:00  RelatedPerson: received 100 records (total so far: 4800)
+2026-08-17T10:51:47.736933+00:00  RelatedPerson: fetching page 49
+2026-08-17T10:51:48.407303+00:00  RelatedPerson: received 100 records (total so far: 4900)
+2026-08-17T10:51:48.407907+00:00  RelatedPerson: fetching page 50
+2026-08-17T10:51:49.020182+00:00  RelatedPerson: received 100 records (total so far: 5000)
+2026-08-17T10:51:49.021775+00:00  RelatedPerson: fetching page 51
+2026-08-17T10:51:49.712500+00:00  RelatedPerson: received 100 records (total so far: 5100)
+2026-08-17T10:51:49.713577+00:00  RelatedPerson: fetching page 52
+2026-08-17T10:51:50.313963+00:00  RelatedPerson: received 100 records (total so far: 5200)
+2026-08-17T10:51:50.315513+00:00  RelatedPerson: fetching page 53
+2026-08-17T10:51:50.919145+00:00  RelatedPerson: received 100 records (total so far: 5300)
+2026-08-17T10:51:50.920448+00:00  RelatedPerson: fetching page 54
+2026-08-17T10:51:51.514836+00:00  RelatedPerson: received 100 records (total so far: 5400)
+2026-08-17T10:51:51.515844+00:00  RelatedPerson: fetching page 55
+2026-08-17T10:51:52.120784+00:00  RelatedPerson: received 100 records (total so far: 5500)
+2026-08-17T10:51:52.122160+00:00  RelatedPerson: fetching page 56
+2026-08-17T10:51:52.740523+00:00  RelatedPerson: received 100 records (total so far: 5600)
+2026-08-17T10:51:52.741503+00:00  RelatedPerson: fetching page 57
+2026-08-17T10:51:53.383412+00:00  RelatedPerson: received 100 records (total so far: 5700)
+2026-08-17T10:51:53.384395+00:00  RelatedPerson: fetching page 58
+2026-08-17T10:51:54.040552+00:00  RelatedPerson: received 100 records (total so far: 5800)
+2026-08-17T10:51:54.042559+00:00  RelatedPerson: fetching page 59
+2026-08-17T10:51:54.647896+00:00  RelatedPerson: received 100 records (total so far: 5900)
+2026-08-17T10:51:54.649122+00:00  RelatedPerson: fetching page 60
+2026-08-17T10:51:55.248182+00:00  RelatedPerson: received 100 records (total so far: 6000)
+2026-08-17T10:51:55.249499+00:00  RelatedPerson: fetching page 61
+2026-08-17T10:51:55.864362+00:00  RelatedPerson: received 100 records (total so far: 6100)
+2026-08-17T10:51:55.865600+00:00  RelatedPerson: fetching page 62
+2026-08-17T10:51:56.461011+00:00  RelatedPerson: received 100 records (total so far: 6200)
+2026-08-17T10:51:56.462282+00:00  RelatedPerson: fetching page 63
+2026-08-17T10:51:57.068388+00:00  RelatedPerson: received 100 records (total so far: 6300)
+2026-08-17T10:51:57.069607+00:00  RelatedPerson: fetching page 64
+2026-08-17T10:51:57.677737+00:00  RelatedPerson: received 100 records (total so far: 6400)
+2026-08-17T10:51:57.679092+00:00  RelatedPerson: fetching page 65
+2026-08-17T10:51:58.265921+00:00  RelatedPerson: received 100 records (total so far: 6500)
+2026-08-17T10:51:58.267198+00:00  RelatedPerson: fetching page 66
+2026-08-17T10:51:58.852494+00:00  RelatedPerson: received 100 records (total so far: 6600)
+2026-08-17T10:51:58.854090+00:00  RelatedPerson: fetching page 67
+2026-08-17T10:51:59.455382+00:00  RelatedPerson: received 100 records (total so far: 6700)
+2026-08-17T10:51:59.456709+00:00  RelatedPerson: fetching page 68
+2026-08-17T10:52:00.052353+00:00  RelatedPerson: received 100 records (total so far: 6800)
+2026-08-17T10:52:00.054252+00:00  RelatedPerson: fetching page 69
+2026-08-17T10:52:00.646002+00:00  RelatedPerson: received 100 records (total so far: 6900)
+2026-08-17T10:52:00.647167+00:00  RelatedPerson: fetching page 70
+2026-08-17T10:52:01.378291+00:00  RelatedPerson: received 100 records (total so far: 7000)
+2026-08-17T10:52:01.379521+00:00  RelatedPerson: fetching page 71
+2026-08-17T10:52:01.992229+00:00  RelatedPerson: received 100 records (total so far: 7100)
+2026-08-17T10:52:01.993364+00:00  RelatedPerson: fetching page 72
+2026-08-17T10:52:02.590104+00:00  RelatedPerson: received 100 records (total so far: 7200)
+2026-08-17T10:52:02.591241+00:00  RelatedPerson: fetching page 73
+2026-08-17T10:52:03.202694+00:00  RelatedPerson: received 100 records (total so far: 7300)
+2026-08-17T10:52:03.203930+00:00  RelatedPerson: fetching page 74
+2026-08-17T10:52:03.792700+00:00  RelatedPerson: received 57 records (total so far: 7357)
+2026-08-17T10:52:03.997746+00:00  RelatedPerson: SUCCESS - 7357 records -> fhir_out/RelatedPerson.json
+2026-08-17T10:52:03.998009+00:00  ================================================================================
+2026-08-17T10:52:03.998067+00:00  Export finished: successful=1, failed=0, total_records=7357, elapsed_seconds=54.4
+2026-08-17T10:52:03.998123+00:00  All resources exported successfully.

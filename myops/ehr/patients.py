@@ -37,6 +37,7 @@ from .config import (
     POSTGRES_CONFIG_EHR,
     PLAYWRIGHT_HEADLESS,
     PLAYWRIGHT_LAUNCH_ARGS,
+    PLAYWRIGHT_VIEWPORT,
 )
 from .db import log_run_event
 
@@ -1273,7 +1274,9 @@ def run_patient_insurance_rpa(
             headless=PLAYWRIGHT_HEADLESS,
             args=PLAYWRIGHT_LAUNCH_ARGS,
         )
-        context = browser.new_context(no_viewport=True)
+        context = browser.new_context(
+            no_viewport=(PLAYWRIGHT_VIEWPORT is None), viewport=PLAYWRIGHT_VIEWPORT,
+        )
         page = context.new_page()
 
         # ── Discover practices — login once to get the list ──
@@ -1314,7 +1317,9 @@ def run_patient_insurance_rpa(
                 headless=PLAYWRIGHT_HEADLESS,
                 args=PLAYWRIGHT_LAUNCH_ARGS,
             )
-            context = browser.new_context(no_viewport=True)
+            context = browser.new_context(
+                no_viewport=(PLAYWRIGHT_VIEWPORT is None), viewport=PLAYWRIGHT_VIEWPORT,
+            )
             page = context.new_page()
 
             start_dt = _now_cst()
@@ -1341,7 +1346,10 @@ def run_patient_insurance_rpa(
                             page,
                             fetch_latest_otp_code_fn=fetch_latest_tebra_otp_code,
                             since_dt_utc=otp_since,
-                            poll_seconds=75,
+                            # See ehr/session.py's _handle_otp for why this
+                            # isn't 75s anymore -- confirmed live delivery
+                            # latency of 3+ minutes on this mailbox.
+                            poll_seconds=240,
                         )
                         break
 

@@ -17,19 +17,38 @@ from .config import TABLE_NAME
 #   idx: 0   1        2             3    4            5          6          7
 COLUMNS = "id, appt_id, patient_name, dob, appt_status, appt_date, appt_time, charge_status"
 
+# Appointments in these statuses never actually happened, so Tebra has no
+# real facesheet to open for them -- a signed note can still exist (staff
+# documenting the no-show/cancellation itself), which otherwise lets these
+# slip through the "appt_note IS NOT NULL" gate below and into a facesheet
+# pull attempt that's guaranteed to fail ("Unable to open facesheet",
+# browser.py's click_patient_row). Confirmed live 2026-09-03: a No Show
+# appointment's failed facesheet click can strand the page and cascade into
+# failing the next several patients in the same run (see passes.py's
+# _process_by_patient/_download_and_mark cleanup) -- excluding these
+# statuses here stops the attempt before it can ever trigger that.
+NO_VISIT_STATUSES = ("Cancelled", "No Show", "Rescheduled")
+_NOT_NO_VISIT = "appt_status NOT IN ('" + "', '".join(NO_VISIT_STATUSES) + "')"
+
 # Per-pass eligibility gate. This is the single source of truth for "what
 # counts as needing this step".
 GATES = {
     # Needs a note collected.
     "notes": "appt_note IS NULL",
     # Signed and not yet successfully facesheeted (blank OR error, never NULL-only).
-    "facesheets": "COALESCE(process_status, '') IN ('', 'Error') AND appt_note IS NOT NULL",
+    "facesheets": (
+        f"COALESCE(process_status, '') IN ('', 'Error') AND appt_note IS NOT NULL "
+        f"AND {_NOT_NO_VISIT}"
+    ),
     # Tebra shows a charge but we haven't captured it into the JSON yet.
     "charges": "charge_status = 'Charge in billing' AND charge_data IS NULL",
     # Flagged from Tebra's own "Missed Charges" view during the appt scrape —
     # re-download the facesheet (the charge is expected to appear on the
     # regenerated PDF). Independent of the 'charges' VIEW-CHARGE scrape.
-    "missed_charges": "retry_flag = 1 AND retry_reason = 'Missed Charges' AND appt_note IS NOT NULL",
+    "missed_charges": (
+        f"retry_flag = 1 AND retry_reason = 'Missed Charges' AND appt_note IS NOT NULL "
+        f"AND {_NOT_NO_VISIT}"
+    ),
 }
 
 # For backfill/target, "facesheets" should re-pull regardless of prior
@@ -37,7 +56,7 @@ GATES = {
 # already-processed rows are redone too. Daily's unbounded sweep keeps the
 # full gate so it doesn't reprocess the entire historical backlog every night.
 UNGATED_REPULL = {
-    "facesheets": "appt_note IS NOT NULL",
+    "facesheets": f"appt_note IS NOT NULL AND {_NOT_NO_VISIT}",
 }
 
 

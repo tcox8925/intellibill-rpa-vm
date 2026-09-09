@@ -34,6 +34,7 @@ from fastapi import FastAPI
 REPO_ROOT = Path(__file__).resolve().parent
 MYOPS_DIR = REPO_ROOT / "myops"
 PF_SYNC_DIR = REPO_ROOT / "pf_sync_v5_6"
+PATIENT_SYNC_DIR = REPO_ROOT / "tebra_patient_sync"
 
 
 def _load_app(module_name: str, dir_path: Path, file_name: str = "server.py"):
@@ -62,6 +63,20 @@ pf_sync_module = _load_app("pf_sync_server", PF_SYNC_DIR)
 tebra_app = tebra_module.app
 pf_sync_app = pf_sync_module.app
 
+# Tebra patient-sync (SOAP GetPatients -> patient_header/patient_coverages) --
+# separate from tebra_app above, which is the Playwright RPA facesheet
+# puller. Loaded defensively: tebra_patient_sync/tebra/tebra_api.py builds a
+# zeep SOAP client from TEBRA_WSDL_URL/TEBRA_CUSTOMER_KEY/TEBRA_USERNAME at
+# *import time*, so a missing/bad env var there must not be able to crash
+# the whole combined process (and take the working RPA/pf-sync APIs down
+# with it) -- if it fails to load, log it and mount everything else anyway.
+patient_sync_app = None
+try:
+    patient_sync_module = _load_app("patient_sync_server", PATIENT_SYNC_DIR, file_name="app_tebra.py")
+    patient_sync_app = patient_sync_module.app
+except Exception as e:
+    print(f"[SERVER] Tebra patient-sync failed to load, mounting without it: {e!r}", flush=True)
+
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
@@ -85,7 +100,9 @@ async def lifespan(_app: FastAPI):
 app = FastAPI(title="Combined RPA API", docs_url=None, redoc_url=None, openapi_url=None, lifespan=lifespan)
 
 # Order matters: Starlette matches mounted routes in registration order, and
-# a Mount("/") matches every path -- so the more specific "/pf-sync" mount
-# must be registered first, or it would never be reached.
+# a Mount("/") matches every path -- so more specific mounts ("/pf-sync",
+# "/patient-sync") must be registered first, or they'd never be reached.
 app.mount("/pf-sync", pf_sync_app)
+if patient_sync_app is not None:
+    app.mount("/patient-sync", patient_sync_app)
 app.mount("/", tebra_app)

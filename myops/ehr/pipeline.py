@@ -11,7 +11,7 @@ from datetime import date
 
 from playwright.sync_api import sync_playwright
 
-from .config import DOWNLOAD_DIR, PLAYWRIGHT_HEADLESS, PLAYWRIGHT_LAUNCH_ARGS
+from .config import DOWNLOAD_DIR, PLAYWRIGHT_HEADLESS, PLAYWRIGHT_LAUNCH_ARGS, PLAYWRIGHT_VIEWPORT
 from .selector import WorkSelector
 from .db import get_ehr_connection, log_run_event
 from .session import (
@@ -87,7 +87,9 @@ def run(sel: WorkSelector, scrape_patients=None, no_upload=False, skip_appointme
             headless=PLAYWRIGHT_HEADLESS,
             args=PLAYWRIGHT_LAUNCH_ARGS,
         )
-        context = browser.new_context(no_viewport=True)
+        context = browser.new_context(
+            no_viewport=(PLAYWRIGHT_VIEWPORT is None), viewport=PLAYWRIGHT_VIEWPORT,
+        )
         page = context.new_page()
         page.goto(LOGIN_URL)
         page.fill("#userName", EMAIL)
@@ -137,7 +139,9 @@ def run(sel: WorkSelector, scrape_patients=None, no_upload=False, skip_appointme
                 headless=PLAYWRIGHT_HEADLESS,
                 args=PLAYWRIGHT_LAUNCH_ARGS,
             )
-            context = browser.new_context(no_viewport=True)
+            context = browser.new_context(
+                no_viewport=(PLAYWRIGHT_VIEWPORT is None), viewport=PLAYWRIGHT_VIEWPORT,
+            )
             page = context.new_page()
             try:
                 phase_clock = time.monotonic()
