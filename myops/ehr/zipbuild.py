@@ -13,6 +13,7 @@ import json
 import random
 import re
 import string
+import threading
 import zipfile
 
 from azure.storage.blob import BlobServiceClient
@@ -24,6 +25,38 @@ from .config import (
 from .db import get_ehr_connection
 from .query import scope_clause
 from .session import now_cst
+
+
+def _trigger_daily_pdf_processor():
+    """Fires the Tebra PDF processor (ehr/pdf_processor.py) right after a ZIP
+    actually lands in `rcm-attachments` below -- event-driven, not a guessed
+    cron delay after the scrape. Runs in a background thread so the upload
+    path (and whatever's awaiting pass_zip's return) never waits on the
+    processor's own blob scan + backend calls. server.py's
+    _run_daily_pdf_processor_job self-guards against overlapping runs (see
+    its docstring), so firing this once per practice's upload in a daily,
+    multi-practice run is safe -- redundant triggers just skip.
+    """
+    def _run():
+        try:
+            import sys
+            # When this VM is running the combined repo-root server.py, this
+            # very module is already loaded in sys.modules as "tebra_server"
+            # (see that file's _load_app) -- reuse THAT module object rather
+            # than `import server`, which would re-exec myops/server.py as a
+            # second, disconnected module (its own FastAPI app, its own
+            # _locks dict) instead of reaching the one actually serving
+            # requests. Only fall back to a plain import when myops/server.py
+            # is genuinely running standalone (`python -m uvicorn server:app`
+            # from inside myops/), where no such alias exists yet.
+            server_module = sys.modules.get("tebra_server") or sys.modules.get("server")
+            if server_module is None:
+                import server as server_module
+            server_module._run_daily_pdf_processor_job()
+        except Exception as e:
+            print(f"[ZIP] Failed to trigger daily PDF processor: {e!r}", flush=True)
+
+    threading.Thread(target=_run, daemon=True).start()
 
 
 def get_practice_abbr(practice_name):
@@ -266,6 +299,7 @@ def pass_zip(sel, practice_name, no_upload=False):
                 sel.folder_structure,
             )
             uploaded_count = 1
+            _trigger_daily_pdf_processor()
         except Exception as e:
             failed_count = 1
             upload_error = str(e)

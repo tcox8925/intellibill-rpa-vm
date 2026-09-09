@@ -21,6 +21,8 @@ import os
 import random
 import re
 import string
+import sys
+import threading
 import zipfile
 from pathlib import Path
 from typing import Dict
@@ -30,6 +32,41 @@ from pf_sync_pkg.constants import (
     PF_RCM_FOLDER_STRUCTURE,
     RCM_ATTACHMENTS_CONTAINER,
 )
+
+
+def _trigger_pf_facesheet_processor():
+    """Fires the Practice Fusion facesheet processor
+    (myops/ehr/pf_facesheet_processor.py) right after a ZIP actually lands in
+    `rcm-attachments` below -- event-driven, not a guessed cron delay after
+    the scrape. Runs in a background thread so the upload path never waits
+    on the processor's own blob scan + backend calls.
+
+    pf_sync_v5_6 is otherwise deliberately self-contained (see this module's
+    docstring) and normally wouldn't reach into myops -- but triggering the
+    processor genuinely needs to call into it, so this looks up
+    myops/server.py the same way ehr/zipbuild.py's own trigger does: reuse
+    the already-loaded module ("tebra_server" when this VM is running the
+    combined repo-root server.py) rather than a plain `import server`, which
+    would re-exec myops/server.py as a second, disconnected module (its own
+    FastAPI app, its own run-lock dict) instead of reaching the one actually
+    serving requests. If neither this process's combined server.py nor a
+    standalone myops/server.py has been loaded (e.g. pf_sync_v5_6 run fully
+    standalone, its historical mode), this just logs and no-ops -- a missing
+    processor trigger must never break the upload it's piggybacking on.
+    """
+    def _run():
+        try:
+            server_module = sys.modules.get("tebra_server") or sys.modules.get("server")
+            if server_module is None:
+                print("[RCM-UPLOAD] myops server module not loaded in this process "
+                      "- skipping PF facesheet processor trigger (expected when "
+                      "pf_sync_v5_6 is run standalone, outside the combined server.py)", flush=True)
+                return
+            server_module._run_pf_facesheet_processor_job()
+        except Exception as e:
+            print(f"[RCM-UPLOAD] Failed to trigger PF facesheet processor: {e!r}", flush=True)
+
+    threading.Thread(target=_run, daemon=True).start()
 
 
 def get_practice_abbr(practice_name: str) -> str:
@@ -148,6 +185,7 @@ def retry_orphaned_zips(downloads_dir: str, folder_structure: str = PF_RCM_FOLDE
 
         uploaded += 1
         details.append({"zip_name": zip_name, "blob_path": blob_path})
+        _trigger_pf_facesheet_processor()
         local_paths = [str(directory / name) for name in pdf_names] + [str(zip_path)]
         cleanup = _delete_local_files(local_paths)
         if cleanup["errors"]:
@@ -252,6 +290,7 @@ def build_and_upload_zip(
         result["blob_path"] = upload_zip_to_rcm(zip_path, zip_name, folder_structure)
         result["container"] = RCM_ATTACHMENTS_CONTAINER
         result["uploaded"] = True
+        _trigger_pf_facesheet_processor()
     except Exception as exc:
         result["uploaded"] = False
         result["error"] = f"{type(exc).__name__}: {exc}"
