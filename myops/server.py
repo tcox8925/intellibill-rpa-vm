@@ -8,14 +8,18 @@ endpoint now builds a WorkSelector and calls the one pipeline.
 - /run-tebra-daily                      — daily trigger for ALL Tebra practices
 - /run-patient-insurance-daily          — daily patient insurance scrape
 - /run-combined-daily                   — patients, then Tebra daily (scheduled task)
-- /run-daily-pdf-processor              — Tebra medical-extraction PDF processor (cron, see below)
-- /run-daily-practice-fusion-pdf-processor — Practice Fusion facesheet PDF processor (cron, see below)
+- /run-daily-pdf-processor               — Tebra medical-extraction PDF processor
+- /run-daily-practice-fusion-pdf-processor — Practice Fusion facesheet PDF processor
 
 The last two are ports of intellibill-rpa's DailyPdfProcessorJob.js /
 DailyPracticeFusionPdfProcessorJob.js (see ehr/pdf_processor.py and
 ehr/pf_facesheet_processor.py) — that Azure Function App no longer schedules
-or runs them. This module's `_scheduler` fires them on cron instead; the
-endpoints below just let them also be triggered on demand / for testing.
+or runs them, and neither runs on a fixed cron here either. Instead they're
+event-triggered: ehr/zipbuild.py (Tebra) and
+pf_sync_v5_6/pf_sync_pkg/rcm_upload.py (Practice Fusion) call the two
+`_run_*_job` functions below directly, right after a ZIP upload to
+`rcm-attachments` actually succeeds. The endpoints below just let them also
+be triggered on demand / for testing.
 """
 
 import os
@@ -27,8 +31,6 @@ from contextlib import asynccontextmanager
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
-from apscheduler.schedulers.background import BackgroundScheduler
-from apscheduler.triggers.cron import CronTrigger
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
@@ -59,24 +61,6 @@ def _docs_enabled() -> bool:
 
 CST = ZoneInfo("America/Chicago")
 
-# Cron schedule for the two PDF processor jobs, moved here from
-# intellibill-rpa's Azure Function App (see module docstring). Times are UTC,
-# offset an hour after the matching Loader's own schedule (still an
-# app.timer in intellibill-rpa) to give that scrape time to land ZIPs in blob
-# storage before the Processor scans it -- the Processor is idempotent and
-# picks up whatever is already there, so a miss just gets caught next run.
-#   DailyPracticeFusionPDFLoaderJob (VM scrape via /pf-sync/sync-schedules-by-date): 06:00 UTC
-#   DailyPdfLoaderJob (Tebra, still in intellibill-rpa):                              09:00 UTC
-PDF_PROCESSOR_CRON = os.environ.get("PDF_PROCESSOR_CRON_UTC", "0 10 * * *")
-PF_FACESHEET_PROCESSOR_CRON = os.environ.get("PF_FACESHEET_PROCESSOR_CRON_UTC", "0 7 * * *")
-
-_scheduler = BackgroundScheduler(timezone="UTC")
-
-
-def _cron_trigger(cron_expr: str) -> CronTrigger:
-    minute, hour, day, month, day_of_week = cron_expr.split()
-    return CronTrigger(minute=minute, hour=hour, day=day, month=month, day_of_week=day_of_week)
-
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
@@ -91,31 +75,7 @@ async def lifespan(_app: FastAPI):
         print("[STARTUP] ensure_appointments_schema OK", flush=True)
     except Exception as e:
         print(f"[STARTUP] schema migration skipped: {e!r}", flush=True)
-
-    _scheduler.add_job(
-        _run_daily_pdf_processor_job,
-        _cron_trigger(PDF_PROCESSOR_CRON),
-        id="daily_pdf_processor",
-        replace_existing=True,
-        max_instances=1,
-    )
-    _scheduler.add_job(
-        _run_pf_facesheet_processor_job,
-        _cron_trigger(PF_FACESHEET_PROCESSOR_CRON),
-        id="daily_pf_facesheet_processor",
-        replace_existing=True,
-        max_instances=1,
-    )
-    _scheduler.start()
-    print(
-        f"[STARTUP] scheduler started: daily_pdf_processor='{PDF_PROCESSOR_CRON}' UTC, "
-        f"daily_pf_facesheet_processor='{PF_FACESHEET_PROCESSOR_CRON}' UTC",
-        flush=True,
-    )
-
     yield
-
-    _scheduler.shutdown(wait=False)
 
 
 app = FastAPI(
@@ -519,7 +479,12 @@ def run_combined_daily(request: DailyRequest):
 
 
 # --------------------------------------------------------------------- #
-#  PDF processors (ported from intellibill-rpa, see module docstring)   #
+#  PDF processors (ported from intellibill-rpa, see module docstring).  #
+#  Event-triggered from ehr/zipbuild.py and                             #
+#  pf_sync_v5_6/pf_sync_pkg/rcm_upload.py right after a ZIP upload      #
+#  succeeds -- see _run_daily_pdf_processor_job/_run_pf_facesheet_      #
+#  processor_job's own docstrings for how those callers reach these.    #
+#  No fixed cron: nothing here runs on a timer.                         #
 # --------------------------------------------------------------------- #
 
 def _job_log(prefix):
@@ -530,7 +495,17 @@ def _job_log(prefix):
 
 
 def _run_daily_pdf_processor_job():
-    lock = _acquire_key_lock("__daily_pdf_processor__")
+    """Runs run_daily_pdf_processor with the same locking/logging every
+    caller gets, regardless of how it was reached: the /run-daily-pdf-processor
+    endpoint below, or ehr/zipbuild.py's post-upload trigger (imported and
+    called directly, in a background thread, since zipbuild.py lives in this
+    same ehr package -- no HTTP hop needed)."""
+    try:
+        lock = _acquire_key_lock("__daily_pdf_processor__")
+    except HTTPException:
+        _slog("daily_pdf_processor already running - skipping this trigger")
+        return
+
     run_start = datetime.now(CST)
     has_error, err = False, None
     try:
@@ -547,7 +522,19 @@ def _run_daily_pdf_processor_job():
 
 
 def _run_pf_facesheet_processor_job():
-    lock = _acquire_key_lock("__daily_pf_facesheet_processor__")
+    """Same pattern as _run_daily_pdf_processor_job above. Reached from the
+    /run-daily-practice-fusion-pdf-processor endpoint below, or from
+    pf_sync_v5_6/pf_sync_pkg/rcm_upload.py's post-upload trigger -- that
+    caller lives in a different top-level project, so it imports this
+    function via `ehr.pdf_processor`'s sibling module rather than reaching
+    into server.py, and only when it's actually running inside this combined
+    process (see rcm_upload.py's _trigger_pf_facesheet_processor)."""
+    try:
+        lock = _acquire_key_lock("__daily_pf_facesheet_processor__")
+    except HTTPException:
+        _slog("daily_pf_facesheet_processor already running - skipping this trigger")
+        return
+
     run_start = datetime.now(CST)
     has_error, err = False, None
     try:
@@ -565,13 +552,15 @@ def _run_pf_facesheet_processor_job():
 
 @app.post("/run-daily-pdf-processor")
 def run_daily_pdf_processor_endpoint():
-    """On-demand trigger for the cron job registered in `lifespan` above."""
+    """On-demand / manual-testing trigger -- the real trigger is
+    ehr/zipbuild.py, right after a ZIP upload succeeds."""
     threading.Thread(target=_run_daily_pdf_processor_job, daemon=True).start()
     return {"status": "started"}
 
 
 @app.post("/run-daily-practice-fusion-pdf-processor")
 def run_daily_practice_fusion_pdf_processor_endpoint():
-    """On-demand trigger for the cron job registered in `lifespan` above."""
+    """On-demand / manual-testing trigger -- the real trigger is
+    pf_sync_v5_6/pf_sync_pkg/rcm_upload.py, right after a ZIP upload succeeds."""
     threading.Thread(target=_run_pf_facesheet_processor_job, daemon=True).start()
     return {"status": "started"}
