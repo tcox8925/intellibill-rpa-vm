@@ -52,6 +52,7 @@ azure-keyvault-keys
 
 # Utils
 httpx==0.27.2   # for async requests (optional, testing or API calls)
+requests        # ehr/pdf_processor.py, ehr/pf_facesheet_processor.py -- RCM backend login/session
 sqlparse==0.5.5  # SQL parsing for JAI v2 validation tool
 PyMuPDF
 # pytesseract

@@ -51,6 +51,16 @@ POSTGRES_CONFIG_EHR = {
     "password": os.environ.get("RCM_DB_PASSWORD", "").strip(),
 }
 
+# ---- RCM backend (the Next.js/tRPC app the PDF processors log into) ----
+# Ported from intellibill-rpa's DailyPdfProcessorJob.js /
+# DailyPracticeFusionPdfProcessorJob.js -- see ehr/pdf_processor.py and
+# ehr/pf_facesheet_processor.py, which now own this scheduling instead of
+# that Azure Function App (its two Loader timers just kick off the scrape;
+# they no longer chain into a Processor).
+BACKEND_API_URL = os.environ.get("BACKEND_API_URL", "").strip()
+RCM_SYSTEM_EMAIL = os.environ.get("RCM_SYSTEM_EMAIL", "").strip()
+RCM_SYSTEM_PASSWORD = os.environ.get("RCM_SYSTEM_PASSWORD", "").strip()
+
 # ---- Tebra login ----
 LOGIN_URL = "https://app.kareo.com/v2/#/sign-in?"
 EMAIL = os.environ.get("TEBRA_EMAIL", "").strip()

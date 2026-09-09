@@ -4,10 +4,18 @@ OPS EMR RPA API
 FastAPI server on port 8010. Thin layer over ehr.pipeline.run — every Tebra
 endpoint now builds a WorkSelector and calls the one pipeline.
 
-- /run-tebra                    — ad-hoc Tebra RPA (single practice, date window)
-- /run-tebra-daily              — daily trigger for ALL Tebra practices
-- /run-patient-insurance-daily  — daily patient insurance scrape
-- /run-combined-daily           — patients, then Tebra daily (scheduled task)
+- /run-tebra                            — ad-hoc Tebra RPA (single practice, date window)
+- /run-tebra-daily                      — daily trigger for ALL Tebra practices
+- /run-patient-insurance-daily          — daily patient insurance scrape
+- /run-combined-daily                   — patients, then Tebra daily (scheduled task)
+- /run-daily-pdf-processor              — Tebra medical-extraction PDF processor (cron, see below)
+- /run-daily-practice-fusion-pdf-processor — Practice Fusion facesheet PDF processor (cron, see below)
+
+The last two are ports of intellibill-rpa's DailyPdfProcessorJob.js /
+DailyPracticeFusionPdfProcessorJob.js (see ehr/pdf_processor.py and
+ehr/pf_facesheet_processor.py) — that Azure Function App no longer schedules
+or runs them. This module's `_scheduler` fires them on cron instead; the
+endpoints below just let them also be triggered on demand / for testing.
 """
 
 import os
@@ -19,6 +27,8 @@ from contextlib import asynccontextmanager
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
+from apscheduler.schedulers.background import BackgroundScheduler
+from apscheduler.triggers.cron import CronTrigger
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
@@ -29,6 +39,8 @@ from ehr.db import log_run_event, ensure_appointments_schema
 from ehr.config import ENTITY, SUB_ENTITY, EHR_NAME
 from ehr.patients import run_patient_insurance_rpa
 from ehr.session import normalize_practice_compare
+from ehr.pdf_processor import run_daily_pdf_processor
+from ehr.pf_facesheet_processor import run_daily_practice_fusion_pdf_processor
 
 log = logging.getLogger(__name__)
 
@@ -47,6 +59,24 @@ def _docs_enabled() -> bool:
 
 CST = ZoneInfo("America/Chicago")
 
+# Cron schedule for the two PDF processor jobs, moved here from
+# intellibill-rpa's Azure Function App (see module docstring). Times are UTC,
+# offset an hour after the matching Loader's own schedule (still an
+# app.timer in intellibill-rpa) to give that scrape time to land ZIPs in blob
+# storage before the Processor scans it -- the Processor is idempotent and
+# picks up whatever is already there, so a miss just gets caught next run.
+#   DailyPracticeFusionPDFLoaderJob (VM scrape via /pf-sync/sync-schedules-by-date): 06:00 UTC
+#   DailyPdfLoaderJob (Tebra, still in intellibill-rpa):                              09:00 UTC
+PDF_PROCESSOR_CRON = os.environ.get("PDF_PROCESSOR_CRON_UTC", "0 10 * * *")
+PF_FACESHEET_PROCESSOR_CRON = os.environ.get("PF_FACESHEET_PROCESSOR_CRON_UTC", "0 7 * * *")
+
+_scheduler = BackgroundScheduler(timezone="UTC")
+
+
+def _cron_trigger(cron_expr: str) -> CronTrigger:
+    minute, hour, day, month, day_of_week = cron_expr.split()
+    return CronTrigger(minute=minute, hour=hour, day=day, month=month, day_of_week=day_of_week)
+
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
@@ -61,7 +91,31 @@ async def lifespan(_app: FastAPI):
         print("[STARTUP] ensure_appointments_schema OK", flush=True)
     except Exception as e:
         print(f"[STARTUP] schema migration skipped: {e!r}", flush=True)
+
+    _scheduler.add_job(
+        _run_daily_pdf_processor_job,
+        _cron_trigger(PDF_PROCESSOR_CRON),
+        id="daily_pdf_processor",
+        replace_existing=True,
+        max_instances=1,
+    )
+    _scheduler.add_job(
+        _run_pf_facesheet_processor_job,
+        _cron_trigger(PF_FACESHEET_PROCESSOR_CRON),
+        id="daily_pf_facesheet_processor",
+        replace_existing=True,
+        max_instances=1,
+    )
+    _scheduler.start()
+    print(
+        f"[STARTUP] scheduler started: daily_pdf_processor='{PDF_PROCESSOR_CRON}' UTC, "
+        f"daily_pf_facesheet_processor='{PF_FACESHEET_PROCESSOR_CRON}' UTC",
+        flush=True,
+    )
+
     yield
+
+    _scheduler.shutdown(wait=False)
 
 
 app = FastAPI(
@@ -462,3 +516,62 @@ def run_combined_daily(request: DailyRequest):
     return {"status": "started", "job_id": job_id,
             "date": str(datetime.now(CST).date()),
             "message": "Combined daily run started (patients first, then Tebra)"}
+
+
+# --------------------------------------------------------------------- #
+#  PDF processors (ported from intellibill-rpa, see module docstring)   #
+# --------------------------------------------------------------------- #
+
+def _job_log(prefix):
+    def log(*args):
+        message = " ".join(str(a) for a in args)
+        print(f"[{prefix}] [{datetime.now(CST).strftime('%Y-%m-%d %H:%M:%S %Z')}] {message}", flush=True)
+    return log
+
+
+def _run_daily_pdf_processor_job():
+    lock = _acquire_key_lock("__daily_pdf_processor__")
+    run_start = datetime.now(CST)
+    has_error, err = False, None
+    try:
+        run_daily_pdf_processor(_job_log("PDF-PROCESSOR"))
+    except Exception as e:
+        has_error, err = True, repr(e)
+    finally:
+        _log_rpa_run("DAILY_PDF_PROCESSOR", ENTITY, SUB_ENTITY, run_start,
+                     datetime.now(CST), has_error, error_message=err)
+        try:
+            lock.release()
+        except Exception:
+            pass
+
+
+def _run_pf_facesheet_processor_job():
+    lock = _acquire_key_lock("__daily_pf_facesheet_processor__")
+    run_start = datetime.now(CST)
+    has_error, err = False, None
+    try:
+        run_daily_practice_fusion_pdf_processor(_job_log("PF-FACESHEET-PROCESSOR"))
+    except Exception as e:
+        has_error, err = True, repr(e)
+    finally:
+        _log_rpa_run("DAILY_PF_FACESHEET_PROCESSOR", ENTITY, SUB_ENTITY, run_start,
+                     datetime.now(CST), has_error, error_message=err)
+        try:
+            lock.release()
+        except Exception:
+            pass
+
+
+@app.post("/run-daily-pdf-processor")
+def run_daily_pdf_processor_endpoint():
+    """On-demand trigger for the cron job registered in `lifespan` above."""
+    threading.Thread(target=_run_daily_pdf_processor_job, daemon=True).start()
+    return {"status": "started"}
+
+
+@app.post("/run-daily-practice-fusion-pdf-processor")
+def run_daily_practice_fusion_pdf_processor_endpoint():
+    """On-demand trigger for the cron job registered in `lifespan` above."""
+    threading.Thread(target=_run_pf_facesheet_processor_job, daemon=True).start()
+    return {"status": "started"}
