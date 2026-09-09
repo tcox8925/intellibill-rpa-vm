@@ -621,6 +621,15 @@ class ScheduleScrapeConfig:
     date_next_selector: str = "[data-element='btn-date-next']"
     date_previous_selector: str = "[data-element='btn-date-previous']"
 
+    # Confirmed live 2026-09-09. chk-all-statuses is a stable, non-Ember-numeric
+    # data-element wrapping the actual <input type=checkbox> -- the input's own
+    # id (e.g. 'ember145-input') IS Ember-generated/unstable, so the checkbox is
+    # always selected by descending from this wrapper, never by id. This is the
+    # left Filter panel's APPOINTMENT STATUS: All checkbox -- see
+    # patient_scraper.ensure_all_appointment_statuses_selected for why it must
+    # be force-checked before every range walk.
+    all_statuses_checkbox_selector: str = "[data-element='chk-all-statuses'] input[type='checkbox']"
+
     # The row DOM (cell-provider-name-N etc.) uses the same data-table__cell /
     # appointments-table__col--sm classes PF's Patient List Report and
     # Appointment Report tables use, and both of THOSE are confirmed to render
