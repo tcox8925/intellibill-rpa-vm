@@ -17,7 +17,7 @@ from datetime import timedelta
 
 from .db import get_ehr_connection
 from .query import select_appointments, NO_VISIT_STATUSES
-from .matching import name_key, find_name_match, to_date_obj
+from .matching import name_key, find_name_match, last_name_key, to_date_obj
 from .config import TABLE_NAME, PATIENTS_TABLE, DOWNLOAD_DIR
 from .browser import (
     apply_date_filter, wait_for_grid_settled,
@@ -254,6 +254,25 @@ def _mark_from_cards(cur, conn, collected, needed):
         if not needed:
             break
         matched_key = find_name_match(card_key, needed)
+        if not matched_key:
+            # Confirmed live 2026-09-11: Tebra's own Worklist grid and its
+            # Dashboard Finished-tab cards can disagree on a patient's first
+            # name for the exact same appointment (Worklist said "Beata
+            # Jasieniecki", the card said "Betty Jasieniecki") -- there's no
+            # shared ID between the two views to cross-reference instead, so
+            # a first-name mismatch alone would otherwise report a real,
+            # signed, charge-ready appointment as "no card found" and block
+            # its facesheet forever. Fall back to a last-name-only match,
+            # but only when it's unambiguous -- exactly one `needed` entry
+            # has that last name today -- so this can't misattribute a
+            # signed note to the wrong patient when two people share a
+            # surname in the same day's list.
+            last_name_candidates = [
+                key for key, entry in needed.items()
+                if last_name_key(entry[2]) and last_name_key(entry[2]).issubset(card_key)
+            ]
+            if len(last_name_candidates) == 1:
+                matched_key = last_name_candidates[0]
         if not matched_key:
             continue
 
@@ -615,7 +634,20 @@ def pass_appointments(page, sel, practice_name, from_date, to_date):
         # to the grid scrape below -- not blank, just never seen at all. See
         # ensure_worklist_filters_checked's docstring.
         ensure_worklist_filters_checked(page)
-        apply_date_filter(page, from_date, to_date)
+        # Padded by a day past to_date -- same Tebra-side single-day
+        # (start==end) Worklist filter bug already worked around in
+        # _process_by_patient (confirmed live 2026-09-02/2026-09-11): a
+        # single-day-wide date filter can silently drop real, in-range
+        # appointments from the grid. This ingest pass never had that
+        # padding, and it's exactly what let 4 real appointments vanish
+        # for PrePost+Tennessee 2026-05-21 (a single-day backfill request,
+        # from_date == to_date) even though pass_appointments ran and
+        # "succeeded" -- it just silently scraped an incomplete grid. Each
+        # scraped row's own appt_date (read straight off the grid, not
+        # derived from this filter) still upserts under its real date, so
+        # padding here can't miscategorize anything -- it only makes sure
+        # to_date's own appointments actually render.
+        apply_date_filter(page, from_date, to_date + timedelta(days=1))
 
         def extract(row):
             status = cell(row, "APPOINTMENT_STATUS")
@@ -648,7 +680,7 @@ def pass_appointments(page, sel, practice_name, from_date, to_date):
         # Missed Charges flagging (Tebra's own view).
         page.locator("[data-testid='tree-option-Missed Charges']").click()
         wait_for_grid_settled(page)
-        apply_date_filter(page, from_date, to_date)
+        apply_date_filter(page, from_date, to_date + timedelta(days=1))  # same padding, same reason
         missed = scrape_virtual_grid(page, lambda r: {"appt_id": cell(r, "APPOINTMENT_ID")})
         set_missed_charges(cur, list(missed.keys()), sel.entity, sel.sub_entity, sel.ehr_name)
         conn.commit()

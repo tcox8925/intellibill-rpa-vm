@@ -295,7 +295,7 @@ def scrape_tebra_patient_id(fs_page):
         return None
 
 
-def scrape_virtual_grid(page, extract_fn, max_scrolls=300, repair_passes=1):
+def scrape_virtual_grid(page, extract_fn, max_scrolls=300, repair_passes=2):
     """
     Scroll a MUI virtual DataGrid top-to-bottom, collecting extract_fn(row)
     keyed by appt_id.
@@ -309,6 +309,18 @@ def scrape_virtual_grid(page, extract_fn, max_scrolls=300, repair_passes=1):
     each independently re-reading every row and patching only fields that
     are still None/"" -- a field that already has a value is never
     overwritten, so a bad read on a later sweep can't clobber a good one.
+
+    Confirmed live (2026-09-11, PrePost+Tennessee 2026-05-28): the grid's
+    virtualization can also drop a row from the sweep ENTIRELY -- not just
+    blank a field on a row it did render -- when scroll timing races
+    Tebra's own render (13 real appointments on Tebra, only 9 captured by a
+    single sweep). A row that's simply never seen has no None/"" fields to
+    trigger a repair sweep, so the old "only repair if some field is
+    blank" gate could skip re-sweeping altogether and that row was gone for
+    good. Repair sweeps now always run (up to repair_passes) and only stop
+    early once BOTH the row count and every field have stopped improving --
+    each extra sweep is still independent and additive-only via _merge, so
+    it can only add missing rows/fields, never overwrite a good read.
     """
     seen = {}
 
@@ -362,9 +374,13 @@ def scrape_virtual_grid(page, extract_fn, max_scrolls=300, repair_passes=1):
             page.wait_for_timeout(150)
 
     _sweep()
+    prev_count = len(seen)
     for _ in range(repair_passes):
-        if not any(v in (None, "") for rec in seen.values() for v in rec.values()):
-            break  # every field on every row already has a value -- done early
         _sweep()
+        fields_incomplete = any(v in (None, "") for rec in seen.values() for v in rec.values())
+        new_count = len(seen)
+        if new_count == prev_count and not fields_incomplete:
+            break  # no new rows discovered AND every field already has a value -- done early
+        prev_count = new_count
 
     return seen
