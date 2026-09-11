@@ -23,12 +23,23 @@ from dataclasses import dataclass
 from datetime import date
 from typing import Optional
 
-from .config import ENTITY, SUB_ENTITY, EHR_NAME
+from .config import EHR_NAME
 
 
 @dataclass
 class WorkSelector:
     mode: str  # 'daily' | 'backfill' | 'target'
+    # Tenant identity — REQUIRED, no fallback. Confirmed live 2026-09-11: this
+    # used to default to a hardcoded config.ENTITY/SUB_ENTITY, and the one
+    # caller that never overrode it (patients.py's insurance RPA, triggered
+    # via server.py without an explicit entity in the payload) silently wrote
+    # 1710 real patient rows under a stale, unused tenant -- completely
+    # different from the entity every other pass actually runs under -- with
+    # no error, ever. A required field with no default fails loudly at
+    # construction instead of writing to the wrong tenant silently.
+    entity: str = None
+    sub_entity: str = None
+
     practice: Optional[str] = None          # None = all discovered practices
     folder_structure: Optional[str] = None  # Upload folder root from payload
     start_date: Optional[date] = None
@@ -45,12 +56,17 @@ class WorkSelector:
     # not done yet, never re-downloading ones already successfully processed.
     ungated_repull: bool = True
 
-    # Tenant identity — defaults from config, overridable for future tenants.
-    entity: str = ENTITY
-    sub_entity: str = SUB_ENTITY
+    # Not a tenant identity, just which EHR product this run is for -- fine
+    # to default (this package only ever talks to Tebra today).
     ehr_name: str = EHR_NAME
 
     def __post_init__(self):
+        if not self.entity or not self.sub_entity:
+            raise ValueError(
+                "WorkSelector requires an explicit entity and sub_entity -- "
+                "no default tenant is assumed. Pass them from the caller's "
+                "own request/payload, never a hardcoded fallback."
+            )
         self.validate()
 
     def validate(self):
@@ -75,38 +91,48 @@ class WorkSelector:
                 raise ValueError("daily mode takes no date/id/name filters")
 
     # ---- Convenience constructors ----
+    # entity/sub_entity are required on every one of these -- no default
+    # tenant. Pass through whatever the caller's own request/payload/CLI
+    # flag gave you.
 
     @classmethod
-    def daily(cls, practice=None, folder_structure=None):
-        return cls(mode="daily", practice=practice, folder_structure=folder_structure)
+    def daily(cls, entity, sub_entity, practice=None, folder_structure=None, ehr_name=EHR_NAME):
+        return cls(mode="daily", entity=entity, sub_entity=sub_entity,
+                    practice=practice, folder_structure=folder_structure, ehr_name=ehr_name)
 
     @classmethod
-    def backfill(cls, start_date, end_date, practice=None, folder_structure=None,
-                 ungated_repull=True):
+    def backfill(cls, start_date, end_date, entity, sub_entity, practice=None,
+                 folder_structure=None, ungated_repull=True, ehr_name=EHR_NAME):
         return cls(
             mode="backfill",
+            entity=entity,
+            sub_entity=sub_entity,
             start_date=start_date,
             end_date=end_date,
             practice=practice,
             folder_structure=folder_structure,
             ungated_repull=ungated_repull,
+            ehr_name=ehr_name,
         )
 
     @classmethod
-    def target(cls, appt_id=None, patient_name=None, on_date=None, practice=None,
-               folder_structure=None):
+    def target(cls, entity, sub_entity, appt_id=None, patient_name=None, on_date=None,
+               practice=None, folder_structure=None, ehr_name=EHR_NAME):
         return cls(
             mode="target",
+            entity=entity,
+            sub_entity=sub_entity,
             appt_id=appt_id,
             patient_name=patient_name,
             start_date=on_date,
             practice=practice,
             folder_structure=folder_structure,
+            ehr_name=ehr_name,
         )
 
     @classmethod
-    def from_args(cls, start_date=None, end_date=None, appt_id=None,
-                  patient_name=None, practice=None, folder_structure=None):
+    def from_args(cls, entity, sub_entity, start_date=None, end_date=None, appt_id=None,
+                  patient_name=None, practice=None, folder_structure=None, ehr_name=EHR_NAME):
         """
         Infer mode from whatever the caller supplied:
           nothing                          -> daily
@@ -117,15 +143,22 @@ class WorkSelector:
             return cls.backfill(
                 start_date,
                 end_date,
+                entity,
+                sub_entity,
                 practice=practice,
                 folder_structure=folder_structure,
+                ehr_name=ehr_name,
             )
         if appt_id or patient_name or start_date:
             return cls.target(
+                entity,
+                sub_entity,
                 appt_id=appt_id,
                 patient_name=patient_name,
                 on_date=start_date,
                 practice=practice,
                 folder_structure=folder_structure,
+                ehr_name=ehr_name,
             )
-        return cls.daily(practice=practice, folder_structure=folder_structure)
+        return cls.daily(entity, sub_entity, practice=practice,
+                          folder_structure=folder_structure, ehr_name=ehr_name)

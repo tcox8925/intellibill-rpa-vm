@@ -25,6 +25,8 @@ def _date(s):
 
 def main():
     ap = argparse.ArgumentParser(description="EHR scrape pipeline")
+    ap.add_argument("--entity", required=True, help="Tenant entity id (required, no default)")
+    ap.add_argument("--sub-entity", required=True, help="Tenant sub_entity id (required, no default)")
     ap.add_argument("--practice", default=None, help="Practice name (default: all)")
     ap.add_argument("--start", type=_date, default=None, help="Window start YYYY-MM-DD")
     ap.add_argument("--end", type=_date, default=None, help="Window end YYYY-MM-DD")
@@ -46,6 +48,8 @@ def main():
         start = args.date
 
     sel = WorkSelector.from_args(
+        args.entity,
+        args.sub_entity,
         start_date=start,
         end_date=args.end,
         appt_id=args.appt_id,

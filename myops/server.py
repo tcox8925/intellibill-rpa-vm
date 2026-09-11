@@ -38,7 +38,7 @@ from pydantic import BaseModel
 from ehr.pipeline import run
 from ehr.selector import WorkSelector
 from ehr.db import log_run_event, ensure_appointments_schema
-from ehr.config import ENTITY, SUB_ENTITY, EHR_NAME
+from ehr.config import EHR_NAME
 from ehr.patients import run_patient_insurance_rpa
 from ehr.session import normalize_practice_compare
 from ehr.pdf_processor import run_daily_pdf_processor
@@ -100,7 +100,15 @@ def _log_rpa_run(product_name, entity, sub_entity, start_dt, end_dt,
     )
 
 
-# ENTITY / SUB_ENTITY / EHR_NAME come from ehr.config (single source of truth).
+# entity/sub_entity are REQUIRED on every request below, no fallback default.
+# Confirmed live 2026-09-11: a silent `request.entity or ENTITY` fallback to
+# a hardcoded tenant is exactly how 1710 real ehr_patients rows ended up
+# permanently under the wrong, unused entity (270681372) while every
+# ehr_appointments row is under the real one (414584128) -- the caller that
+# never passed entity in its payload never got an error, it just silently
+# wrote to the wrong tenant. A required Pydantic field fails the request with
+# a 422 instead. EHR_NAME still defaults -- it's the EHR product, not tenant
+# identity, and this package only talks to Tebra today.
 MAX_DATE_RANGE_DAYS = 6  # 7 days inclusive
 _locks = {}
 _locks_guard = threading.Lock()
@@ -110,16 +118,16 @@ class TebraRequest(BaseModel):
     start_date: str
     end_date: str
     practice_name: str
+    entity: str
+    sub_entity: str
     folder_structure: str | None = None
     wait_for_completion: bool = True
-    entity: str | None = None
-    sub_entity: str | None = None
     ehr_name: str | None = None
 
 
 class DailyRequest(BaseModel):
-    entity: str | None = None
-    sub_entity: str | None = None
+    entity: str
+    sub_entity: str
     ehr_name: str | None = None
 
 
@@ -164,8 +172,8 @@ def run_tebra(request: TebraRequest):
     validate_dates(start_dt, end_dt)
 
     practice_name = _normalize_practice_name(request.practice_name)
-    entity = (request.entity or ENTITY).strip()
-    sub_entity = (request.sub_entity or SUB_ENTITY).strip()
+    entity = request.entity.strip()
+    sub_entity = request.sub_entity.strip()
     ehr_name = (request.ehr_name or EHR_NAME).strip()
 
     _slog(
@@ -179,10 +187,10 @@ def run_tebra(request: TebraRequest):
         _slog(f"run-tebra executing req_id={req_id}")
         sel = WorkSelector.backfill(
             start_date=start_dt.date(), end_date=end_dt.date(),
+            entity=entity, sub_entity=sub_entity, ehr_name=ehr_name,
             practice=practice_name,
             folder_structure=request.folder_structure,
         )
-        sel.entity, sel.sub_entity, sel.ehr_name = entity, sub_entity, ehr_name
         summary = run(sel, scrape_patients=False)
         _slog(f"run-tebra done req_id={req_id} summary={summary}")
         return summary
@@ -254,10 +262,10 @@ RECHECK_MAX_DATE_RANGE_DAYS = 365
 class RecheckRequest(BaseModel):
     start_date: str
     end_date: str
+    entity: str
+    sub_entity: str
     practice_name: str | None = None  # None = every discovered practice
     wait_for_completion: bool = True
-    entity: str | None = None
-    sub_entity: str | None = None
     ehr_name: str | None = None
 
 
@@ -277,8 +285,8 @@ def run_tebra_recheck(request: RecheckRequest):
         )
 
     practice_name = _normalize_practice_name(request.practice_name) if request.practice_name else None
-    entity = (request.entity or ENTITY).strip()
-    sub_entity = (request.sub_entity or SUB_ENTITY).strip()
+    entity = request.entity.strip()
+    sub_entity = request.sub_entity.strip()
     ehr_name = (request.ehr_name or EHR_NAME).strip()
 
     _slog(
@@ -292,6 +300,7 @@ def run_tebra_recheck(request: RecheckRequest):
         _slog(f"run-tebra-recheck executing req_id={req_id}")
         sel = WorkSelector.backfill(
             start_date=start_dt.date(), end_date=end_dt.date(),
+            entity=entity, sub_entity=sub_entity, ehr_name=ehr_name,
             practice=practice_name,
             # True (default): re-pull facesheets for every signed row in this
             # window regardless of prior process_status -- already-Processed
@@ -300,7 +309,6 @@ def run_tebra_recheck(request: RecheckRequest):
             # window since the live appointment scrape is skipped here.
             ungated_repull=True,
         )
-        sel.entity, sel.sub_entity, sel.ehr_name = entity, sub_entity, ehr_name
         summary = run(sel, scrape_patients=False, skip_appointment_scrape=True)
         _slog(f"run-tebra-recheck done req_id={req_id} summary={summary}")
         return summary
@@ -358,8 +366,8 @@ def run_tebra_recheck(request: RecheckRequest):
 
 @app.post("/run-tebra-daily")
 def run_tebra_daily(request: DailyRequest):
-    entity = (request.entity or ENTITY).strip()
-    sub_entity = (request.sub_entity or SUB_ENTITY).strip()
+    entity = request.entity.strip()
+    sub_entity = request.sub_entity.strip()
     ehr_name = (request.ehr_name or EHR_NAME).strip()
 
     lock = _acquire_key_lock("__tebra_daily__")
@@ -368,8 +376,7 @@ def run_tebra_daily(request: DailyRequest):
         run_start = datetime.now(CST)
         summary, has_error, err = None, False, None
         try:
-            sel = WorkSelector.daily()
-            sel.entity, sel.sub_entity, sel.ehr_name = entity, sub_entity, ehr_name
+            sel = WorkSelector.daily(entity=entity, sub_entity=sub_entity, ehr_name=ehr_name)
             summary = run(sel)
             has_error = bool(summary and summary.get("failed"))
             if has_error:
@@ -390,8 +397,8 @@ def run_tebra_daily(request: DailyRequest):
 
 @app.post("/run-patient-insurance-daily")
 def run_patient_insurance_daily(request: DailyRequest):
-    entity = (request.entity or ENTITY).strip()
-    sub_entity = (request.sub_entity or SUB_ENTITY).strip()
+    entity = request.entity.strip()
+    sub_entity = request.sub_entity.strip()
     ehr_name = (request.ehr_name or EHR_NAME).strip()
 
     lock = _acquire_key_lock("__patient_insurance_daily__")
@@ -417,8 +424,8 @@ def run_patient_insurance_daily(request: DailyRequest):
 
 @app.post("/run-combined-daily")
 def run_combined_daily(request: DailyRequest):
-    entity = (request.entity or ENTITY).strip()
-    sub_entity = (request.sub_entity or SUB_ENTITY).strip()
+    entity = request.entity.strip()
+    sub_entity = request.sub_entity.strip()
     ehr_name = (request.ehr_name or EHR_NAME).strip()
 
     job_id = str(uuid.uuid4())
@@ -441,8 +448,7 @@ def run_combined_daily(request: DailyRequest):
 
             print(f"[COMBINED] job_id={job_id} step=tebra starting", flush=True)
             try:
-                sel = WorkSelector.daily()
-                sel.entity, sel.sub_entity, sel.ehr_name = entity, sub_entity, ehr_name
+                sel = WorkSelector.daily(entity=entity, sub_entity=sub_entity, ehr_name=ehr_name)
                 summary = run(sel, scrape_patients=False)  # patients already done above
                 print(f"[COMBINED] job_id={job_id} step=tebra done "
                       f"completed={summary.get('completed')} failed={summary.get('failed')}",
@@ -513,7 +519,11 @@ def _run_daily_pdf_processor_job():
     except Exception as e:
         has_error, err = True, repr(e)
     finally:
-        _log_rpa_run("DAILY_PDF_PROCESSOR", ENTITY, SUB_ENTITY, run_start,
+        # Not entity-scoped -- run_daily_pdf_processor walks every tenant's
+        # blob folder in one pass, so there's no single entity to attribute
+        # this run to. company_id is informational only (log_run_event is a
+        # no-op today).
+        _log_rpa_run("DAILY_PDF_PROCESSOR", "ALL", "ALL", run_start,
                      datetime.now(CST), has_error, error_message=err)
         try:
             lock.release()
@@ -542,7 +552,9 @@ def _run_pf_facesheet_processor_job():
     except Exception as e:
         has_error, err = True, repr(e)
     finally:
-        _log_rpa_run("DAILY_PF_FACESHEET_PROCESSOR", ENTITY, SUB_ENTITY, run_start,
+        # Same reasoning as _run_daily_pdf_processor_job above -- this job is
+        # scoped to one fixed PF blob folder, not one entity.
+        _log_rpa_run("DAILY_PF_FACESHEET_PROCESSOR", "ALL", "ALL", run_start,
                      datetime.now(CST), has_error, error_message=err)
         try:
             lock.release()

@@ -7,11 +7,14 @@ WorkSelector differs.
 
 import os
 import time
-from datetime import date
+from datetime import date, timedelta
 
 from playwright.sync_api import sync_playwright
 
-from .config import DOWNLOAD_DIR, PLAYWRIGHT_HEADLESS, PLAYWRIGHT_LAUNCH_ARGS, PLAYWRIGHT_VIEWPORT
+from .config import (
+    DOWNLOAD_DIR, PLAYWRIGHT_HEADLESS, PLAYWRIGHT_LAUNCH_ARGS, PLAYWRIGHT_VIEWPORT,
+    DAILY_INGEST_LOOKBACK_DAYS,
+)
 from .selector import WorkSelector
 from .db import get_ehr_connection, log_run_event
 from .session import (
@@ -35,13 +38,17 @@ def _log(message: str):
 
 def _window(sel):
     """Resolve the [from, to] window used by passes that need explicit dates
-    (appointment scrape, patient-match). Daily = today; target = the date given
-    or today; backfill = the window."""
+    (appointment scrape, patient-match). Daily = the trailing
+    DAILY_INGEST_LOOKBACK_DAYS through today (a self-healing re-scrape, not
+    just today -- see DAILY_INGEST_LOOKBACK_DAYS in config.py for why); target
+    = the date given or today; backfill = the window."""
     if sel.mode == "backfill":
         return sel.start_date, sel.end_date
     if sel.mode == "target" and sel.start_date:
         return sel.start_date, sel.start_date
     today = now_cst().date()
+    if sel.mode == "daily":
+        return today - timedelta(days=DAILY_INGEST_LOOKBACK_DAYS), today
     return today, today
 
 

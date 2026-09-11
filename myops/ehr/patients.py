@@ -1196,12 +1196,15 @@ def scrape_practice_patients(
 
 # =========================================================
 # PRACTICES CONFIG
-# All practices share entity=270681372, sub_entity=270681372001.
 # PRACTICES dict controls per-practice test_limit (None = scrape all).
+# Entity/sub_entity are NOT configured here -- they come from whatever the
+# caller of run_patient_insurance_rpa() passed in (see that function), which
+# is what actually tags every upserted ehr_patients row. This dict used to
+# also hardcode entity=270681372/sub_entity=270681372001 into its returned
+# config and those two fields were never even read by the only caller
+# (run_patient_insurance_rpa never looked at cfg["entity"]) -- dead, stale
+# values sitting next to the real ones, removed to stop that confusion.
 # =========================================================
-
-ENTITY = "270681372"
-SUB_ENTITY = "270681372001"
 
 PRACTICES = {
     "PrePost+ Tennessee": {"test_limit": None},
@@ -1215,21 +1218,17 @@ PRACTICES = {
 def get_practice_config(ui_name: str) -> dict:
     """
     Look up test_limit for a practice name.
-    Returns { practice_name, entity, sub_entity, test_limit }.
+    Returns { practice_name, test_limit }.
     """
     for practice_name, cfg in PRACTICES.items():
         if practice_name.lower() in ui_name.lower() or ui_name.lower() in practice_name.lower():
             return {
                 "practice_name": practice_name,
-                "entity": ENTITY,
-                "sub_entity": SUB_ENTITY,
                 "test_limit": cfg.get("test_limit"),
             }
     # Fallback: practice not in config — no test_limit
     return {
         "practice_name": ui_name.strip(),
-        "entity": ENTITY,
-        "sub_entity": SUB_ENTITY,
         "test_limit": None,
     }
 
@@ -1247,8 +1246,8 @@ def is_practice_configured(ui_name: str) -> bool:
 # =========================================================
 
 def run_patient_insurance_rpa(
-    entity: str = ENTITY,
-    sub_entity: str = SUB_ENTITY,
+    entity: str,
+    sub_entity: str,
     ehr_name: str = EHR_NAME,
 ):
     """
@@ -1392,4 +1391,16 @@ def run_patient_insurance_rpa(
 # =========================================================
 
 if __name__ == "__main__":
-    run_patient_insurance_rpa()
+    import argparse
+
+    ap = argparse.ArgumentParser(description="Patient insurance RPA")
+    ap.add_argument("--entity", required=True, help="Tenant entity id (required, no default)")
+    ap.add_argument("--sub-entity", required=True, help="Tenant sub_entity id (required, no default)")
+    ap.add_argument("--ehr-name", default=EHR_NAME)
+    cli_args = ap.parse_args()
+
+    run_patient_insurance_rpa(
+        entity=cli_args.entity,
+        sub_entity=cli_args.sub_entity,
+        ehr_name=cli_args.ehr_name,
+    )
