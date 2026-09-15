@@ -1,4 +1,34 @@
 #!/usr/bin/env python3
+# ----------------------------------------------------------------------------
+# HOW TO RUN (recommended order -- this hits production PF + the RCM backend,
+# so go step by step rather than straight to a full range):
+#
+#   cd /Users/srinivasbodduru/projects/RPA-VM/intellibill-rpa-vm
+#   source .venv/bin/activate
+#
+#   # 1. Plan only -- read-only, just queries Postgres, no browser/PF/backend:
+#   python historical_diagnosis_backfill.py \
+#       --start-date 2026-01-01 --end-date 2026-09-15 --plan-only
+#
+#   # 2. Test on a single row before trusting it with more:
+#   python historical_diagnosis_backfill.py \
+#       --start-date 2026-01-01 --end-date 2026-09-15 --limit 1
+#
+#   # 3. Full range once step 2 looks right:
+#   python historical_diagnosis_backfill.py \
+#       --start-date 2026-01-01 --end-date 2026-09-15
+#
+# Other useful flags (combine with any of the above):
+#   --patient-guid <guid>        limit to one patient
+#   --statuses processed,review  widen beyond the "processed" default
+#   --no-backend-call            generate PDFs locally only, skip the RCM POST
+#                                 (pair with --keep-local-pdfs to inspect them)
+#   --dry-run                    log in and select sections/notes but skip
+#                                 PDF generation and the backend call entirely
+#   --limit N                    cap how many rows get reprocessed
+#
+# Full flag reference: python historical_diagnosis_backfill.py --help
+# ----------------------------------------------------------------------------
 """
 Manually-triggered, one-off backfill for the Diagnoses section.
 
@@ -47,6 +77,7 @@ re-delivery, not a reprocessing of the queue's own state machine.
 """
 
 import argparse
+import os
 import sys
 from pathlib import Path
 
@@ -59,7 +90,6 @@ MYOPS_DIR = REPO_ROOT / "myops"
 sys.path.insert(0, str(PF_SYNC_DIR))
 sys.path.insert(0, str(MYOPS_DIR))
 
-from pf_sync_pkg.browser import _default_chrome_user_data_dir  # noqa: E402
 from pf_sync_pkg.chart_ui import close_print_chart  # noqa: E402
 from pf_sync_pkg.cli import (  # noqa: E402
     add_browser_arguments,
@@ -76,6 +106,15 @@ from pf_sync_pkg.store import load_store, save_row, store_rows  # noqa: E402
 from pf_sync_pkg.utils import parse_date  # noqa: E402
 
 from ehr.pf_facesheet_processor import _call_facesheet_processing_api, _login  # noqa: E402
+
+
+def _default_chrome_user_data_dir() -> str:
+    """Same fallback pf_sync_v5_6/server.py's own _default_chrome_user_data_dir
+    uses -- duplicated here (rather than imported) so this script doesn't have
+    to load that whole FastAPI app module just for a two-line helper."""
+    if os.getenv("USERPROFILE"):
+        return os.path.join(os.getenv("USERPROFILE"), "pf_rpa_chrome")
+    return os.path.join(os.path.expanduser("~"), "pf_rpa_chrome")
 
 
 def parse_args() -> argparse.Namespace:

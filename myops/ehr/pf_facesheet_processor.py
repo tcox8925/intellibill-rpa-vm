@@ -285,7 +285,7 @@ def _call_facesheet_processing_api(
         # nightly/refresh delivery path -- e.g. to re-apply over an existing
         # already_processed row instead of skipping it. False on every
         # existing caller in this file, so normal delivery is unaffected.
-        "special_historical_diagnosis_run": special_historical_diagnosis_run,
+        "specialHistoricalDiagnosisRun": special_historical_diagnosis_run,
     }
 
     res = session.post(
