@@ -258,7 +258,9 @@ def _process_pdf(zf, file_name, session, log, manifest_entry):
 # ------------------------------------------------------------------------- #
 
 
-def _call_facesheet_processing_api(log, buffer, file_name, session, manifest_entry):
+def _call_facesheet_processing_api(
+    log, buffer, file_name, session, manifest_entry, special_historical_diagnosis_run=False
+):
     # Build the manifestEntry explicitly rather than passing the raw parsed
     # object through -- the backend's pfFacesheetManifestEntrySchema declares
     # patient_id as nullable-but-required (must be present even when null),
@@ -278,6 +280,12 @@ def _call_facesheet_processing_api(log, buffer, file_name, session, manifest_ent
             "service_location": manifest_entry.get("service_location"),
             "patient_id": manifest_entry.get("patient_id"),
         },
+        # Lets the backend tell a one-off historical diagnosis backfill call
+        # (see historical_diagnosis_backfill.py) apart from the normal
+        # nightly/refresh delivery path -- e.g. to re-apply over an existing
+        # already_processed row instead of skipping it. False on every
+        # existing caller in this file, so normal delivery is unaffected.
+        "special_historical_diagnosis_run": special_historical_diagnosis_run,
     }
 
     res = session.post(
