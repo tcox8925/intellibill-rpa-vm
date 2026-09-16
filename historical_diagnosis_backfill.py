@@ -6,6 +6,9 @@
 #   cd /Users/srinivasbodduru/projects/RPA-VM/intellibill-rpa-vm
 #   source .venv/bin/activate
 #
+# ---- mode 1: reprocess-queue (default) -- redeliver rows ALREADY in the
+#              local queue (visit-level: one row per appointment) ----
+#
 #   # 1. Plan only -- read-only, just queries Postgres, no browser/PF/backend:
 #   python historical_diagnosis_backfill.py \
 #       --start-date 2026-01-01 --end-date 2026-09-15 --plan-only
@@ -18,14 +21,35 @@
 #   python historical_diagnosis_backfill.py \
 #       --start-date 2026-01-01 --end-date 2026-09-15
 #
+# ---- mode 2: unique-patients -- discover every unique patient with a Seen
+#              appointment in a date range STRAIGHT FROM PRACTICE FUSION
+#              (ignores the local queue entirely) and pull exactly ONE
+#              facesheet per patient (their most recent Seen visit in range,
+#              which is the visit most likely to have a printable SOAP note
+#              and reflect their current diagnosis list) ----
+#
+#   # 1. Plan only -- still logs into PF (the patient list can only come from
+#   #    PF itself) but opens no chart and calls no backend; just prints the
+#   #    unique-patient count + list:
+#   python historical_diagnosis_backfill.py --mode unique-patients \
+#       --start-date 2026-06-02 --end-date 2026-09-16 --plan-only
+#
+#   # 2. Test on one patient:
+#   python historical_diagnosis_backfill.py --mode unique-patients \
+#       --start-date 2026-06-02 --end-date 2026-09-16 --limit 1
+#
+#   # 3. Full range once step 2 looks right:
+#   python historical_diagnosis_backfill.py --mode unique-patients \
+#       --start-date 2026-06-02 --end-date 2026-09-16
+#
 # Other useful flags (combine with any of the above):
 #   --patient-guid <guid>        limit to one patient
-#   --statuses processed,review  widen beyond the "processed" default
+#   --statuses processed,review  (reprocess-queue only) widen beyond "processed"
 #   --no-backend-call            generate PDFs locally only, skip the RCM POST
 #                                 (pair with --keep-local-pdfs to inspect them)
 #   --dry-run                    log in and select sections/notes but skip
 #                                 PDF generation and the backend call entirely
-#   --limit N                    cap how many rows get reprocessed
+#   --limit N                    cap how many patients/rows get reprocessed
 #
 # Full flag reference: python historical_diagnosis_backfill.py --help
 # ----------------------------------------------------------------------------
@@ -34,51 +58,49 @@ Manually-triggered, one-off backfill for the Diagnoses section.
 
 build_full_sync_by_date_config (pf_sync_v5_6/pf_sync_pkg/cli.py) now includes
 Diagnoses in every printed Practice Fusion chart, but every facesheet already
-delivered before that change is missing it. This script re-opens the chart
-for each already-processed queue row in the given range, reprints it with the
-current (Diagnoses-included) config, and forwards the fresh PDF straight to
-the RCM backend's pfFacesheetProcessing.processFacesheet mutation --
-bypassing the normal zip-and-upload-to-Azure delivery path
-(pf_sync_pkg/rcm_upload.py) entirely, exactly as instructed: call the backend
-directly from the just-downloaded PDF, before any zip step exists.
+delivered before that change is missing it. Two modes, selected with --mode:
 
-Every call is flagged special_historical_diagnosis_run=True (see
+--mode reprocess-queue (default): re-opens the chart for each already-
+processed row ALREADY IN THE LOCAL QUEUE (visit-level -- one row per
+appointment) within [--start-date, --end-date] and reprints it.
+
+--mode unique-patients: ignores the local queue entirely and discovers every
+unique patient with a Seen appointment in [--start-date, --end-date] straight
+from Practice Fusion's own Schedule, then pulls exactly ONE facesheet per
+patient (their most recent Seen visit in the range). Use this when you want
+"every patient we saw between two dates, one facesheet each" rather than one
+facesheet per visit -- see discover_unique_patients_from_schedule's docstring
+below for the dedup/representative-visit logic. These synthetic per-patient
+records are NOT written to the local queue (they don't fit its visit-level
+(guid, date) model) -- results are printed and saved to a JSON summary file
+in --downloads-dir instead.
+
+Both modes reprint with the current (Diagnoses-included) config and forward
+each fresh PDF straight to the RCM backend's
+pfFacesheetProcessing.processFacesheet mutation -- bypassing the normal
+zip-and-upload-to-Azure delivery path (pf_sync_pkg/rcm_upload.py) entirely,
+exactly as instructed: call the backend directly from the just-downloaded
+PDF, before any zip step exists.
+
+Every call is flagged specialHistoricalDiagnosisRun=True (see
 myops/ehr/pf_facesheet_processor.py's _call_facesheet_processing_api) so the
-backend can tell a deliberate re-delivery of an already-processed row apart
-from the normal nightly/refresh path -- IMPORTANT: this only has an effect
-once the backend itself is updated to read that field; until then it's
-accepted but ignored (or rejected with a 400 if the backend's schema
-validation there doesn't allow unknown/passthrough fields yet).
+backend can tell a deliberate re-delivery/historical pull apart from the
+normal nightly/refresh path -- IMPORTANT: this only has an effect once the
+backend itself is updated to read that field; until then it's accepted but
+ignored (or rejected with a 400 if the backend's schema validation there
+doesn't allow unknown/passthrough fields yet).
 
 This never touches Azure Blob Storage and never triggers
 myops/ehr/pf_facesheet_processor.py's normal blob-scanning job.
 
-Usage:
-    # See what would run, without opening a browser or touching PF/RCM:
-    python historical_diagnosis_backfill.py --start-date 2026-01-01 --end-date 2026-06-30 --plan-only
-
-    # Real run over a date range:
-    python historical_diagnosis_backfill.py --start-date 2026-01-01 --end-date 2026-06-30
-
-    # Small test batch first (strongly recommended before a full run):
-    python historical_diagnosis_backfill.py --start-date 2026-01-01 --end-date 2026-06-30 --limit 3
-
-    # One patient only:
-    python historical_diagnosis_backfill.py --patient-guid <ehr_patient_guid>
-
-    # Generate PDFs and inspect them locally without calling the backend:
-    python historical_diagnosis_backfill.py --start-date 2026-01-01 --end-date 2026-06-30 --no-backend-call --keep-local-pdfs
-
-Candidates default to queue rows already at status "processed" (i.e.
-successfully delivered under the old, Diagnoses-less config) within
-[--start-date, --end-date] -- pass --statuses to widen/narrow that set. This
-never changes a row's queue status: it's a side, direct-to-backend
-re-delivery, not a reprocessing of the queue's own state machine.
+See the HOW TO RUN comment block at the top of this file for full examples.
 """
 
 import argparse
+import json
 import os
 import sys
+import uuid
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent
@@ -96,6 +118,7 @@ from pf_sync_pkg.cli import (  # noqa: E402
     browser_command_wrapper,
     build_full_sync_by_date_config,
 )
+from pf_sync_pkg.models import QueueRecord, ScheduleScrapeConfig  # noqa: E402
 from pf_sync_pkg.pdf_pipeline import (  # noqa: E402
     appointment_metadata_row,
     handle_process_error,
@@ -103,7 +126,7 @@ from pf_sync_pkg.pdf_pipeline import (  # noqa: E402
     process_one_record,
 )
 from pf_sync_pkg.store import load_store, save_row, store_rows  # noqa: E402
-from pf_sync_pkg.utils import parse_date  # noqa: E402
+from pf_sync_pkg.utils import is_seen_status, now_iso, parse_date  # noqa: E402
 
 from ehr.pf_facesheet_processor import _call_facesheet_processing_api, _login  # noqa: E402
 
@@ -137,14 +160,38 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--downloads-dir", default=str(PF_SYNC_DIR / "pf_encounter_pdfs_historical")
     )
+    parser.add_argument(
+        "--schedule-config-json",
+        default=str(PF_SYNC_DIR / "config" / "pf_schedule_scrape_config.json"),
+        help="unique-patients mode only: ScheduleScrapeConfig used to walk the Schedule.",
+    )
     parser.add_argument("--practice", default="NWARK Internal Medicine")
-    parser.add_argument("--start-date", default="", help="Inclusive; blank = no lower bound.")
-    parser.add_argument("--end-date", default="", help="Inclusive; blank = no upper bound.")
+    parser.add_argument(
+        "--mode",
+        choices=("reprocess-queue", "unique-patients"),
+        default="reprocess-queue",
+        help=(
+            "reprocess-queue (default): redeliver rows already in the local queue "
+            "(visit-level). unique-patients: discover every unique patient with a "
+            "Seen appointment in [--start-date, --end-date] straight from PF's "
+            "Schedule and pull exactly one facesheet per patient."
+        ),
+    )
+    parser.add_argument(
+        "--start-date",
+        default="",
+        help="Inclusive; blank = no lower bound (required for --mode unique-patients).",
+    )
+    parser.add_argument(
+        "--end-date",
+        default="",
+        help="Inclusive; blank = no upper bound (required for --mode unique-patients).",
+    )
     parser.add_argument("--patient-guid", default="", help="Limit the run to one patient.")
     parser.add_argument(
         "--statuses",
         default="processed",
-        help="Comma-separated QueueRecord statuses to reprocess (default: processed).",
+        help="reprocess-queue mode only: comma-separated QueueRecord statuses to reprocess.",
     )
     parser.add_argument(
         "--limit", type=int, default=0, help="Cap the number of rows reprocessed (0 = no cap)."
@@ -169,7 +216,10 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Don't delete the local PDF after a successful backend call (dry-run/no-backend-call always keep it).",
     )
-    return parser.parse_args()
+    args = parser.parse_args()
+    if args.mode == "unique-patients" and not (args.start_date and args.end_date):
+        parser.error("--mode unique-patients requires both --start-date and --end-date.")
+    return args
 
 
 def select_candidates(args: argparse.Namespace) -> list:
@@ -196,6 +246,86 @@ def select_candidates(args: argparse.Namespace) -> list:
     if args.limit > 0:
         candidates = candidates[: args.limit]
     return candidates
+
+
+def discover_unique_patients_from_schedule(page, args: argparse.Namespace, config) -> tuple:
+    """Walk Practice Fusion's Schedule for [--start-date, --end-date] and
+    return (records, never_seen): one synthetic QueueRecord per UNIQUE
+    patient (by ehr_patient_guid) who had at least one Seen appointment in
+    that range, plus a list of patients the Schedule showed in range but who
+    were never actually marked Seen (cancelled/no-show/etc -- nothing to
+    print for them, reported so they're not silently missing from the count).
+
+    Representative visit per patient: the MOST RECENT Seen appointment date
+    in range. The Diagnoses/notes sections reflect the patient's chart as of
+    print time regardless of which visit's chart is open, so any Seen visit
+    would technically work -- most recent is the safest choice since it's
+    the visit most likely to already have a SOAP note on file.
+
+    These records are intentionally never written to the local queue (see
+    module docstring) -- a synthetic one-row-per-patient shape doesn't fit
+    its visit-level (guid, date) primary key, so this stays a side,
+    in-memory-only discovery.
+    """
+    from pf_sync_pkg import patient_scraper as ps
+
+    start_date = parse_date(args.start_date)
+    end_date = parse_date(args.end_date)
+    schedule_config = ScheduleScrapeConfig.load(args.schedule_config_json)
+
+    appointments = ps.discover_appointments_via_schedule_range(
+        page, start_date, end_date, config=schedule_config
+    )
+
+    by_guid: dict = {}
+    for appt in appointments:
+        guid = appt.patient.ehr_patient_guid
+        if not guid:
+            continue
+        by_guid.setdefault(guid, []).append(appt)
+
+    records: list = []
+    never_seen: list = []
+    for guid, visits in by_guid.items():
+        seen_visits = [v for v in visits if is_seen_status(v.patient.appointment_status, config)]
+        if not seen_visits:
+            rp = visits[0].patient
+            never_seen.append(
+                f"{rp.first_name} {rp.last_name} ({guid}) -- {len(visits)} visit(s) in range, "
+                f"none marked Seen"
+            )
+            continue
+
+        latest = max(seen_visits, key=lambda v: v.appointment_date)
+        rp = latest.patient
+        appt_date = latest.appointment_date.isoformat()
+        if rp.appointment_start_time:
+            appt_date = f"{appt_date} {rp.appointment_start_time}"
+
+        records.append(
+            QueueRecord(
+                row_id=str(uuid.uuid4()),
+                practice=args.practice,
+                ehr_patient_guid=rp.ehr_patient_guid,
+                patient_name=f"{rp.first_name} {rp.last_name}".strip(),
+                patient_dob=rp.dob,
+                appointment_date=appt_date,
+                appointment_status=rp.appointment_status or "seen",
+                appointment_type=rp.appointment_type,
+                provider=rp.provider_name,
+                service_location="",
+                patient_id=rp.patient_id,
+                patient_match_status="matched",
+                patient_match_method="discovered_from_schedule",
+                status="ready",
+                status_reason="unique_patient_historical_diagnosis_pull",
+                created_at=now_iso(),
+                updated_at=now_iso(),
+            )
+        )
+
+    records.sort(key=lambda r: r.patient_name or "")
+    return records, never_seen
 
 
 def process_candidate(page, record, config, args, session) -> str:
@@ -261,7 +391,7 @@ def process_candidate(page, record, config, args, session) -> str:
     return "sent_to_backend"
 
 
-def run(args: argparse.Namespace) -> dict:
+def run_reprocess_queue(args: argparse.Namespace) -> dict:
     candidates = select_candidates(args)
     print(
         f"[HISTORICAL-DIAGNOSIS-BACKFILL] {len(candidates)} candidate row(s) selected "
@@ -297,6 +427,92 @@ def run(args: argparse.Namespace) -> dict:
         return counts
 
     return browser_command_wrapper(args, callback)
+
+
+def run_unique_patients(args: argparse.Namespace) -> dict:
+    # Discovery itself requires a real PF session (the patient list can only
+    # come from PF's own Schedule), so -- unlike reprocess-queue mode --
+    # --plan-only still logs in here; it just stops before opening any chart
+    # or calling the backend.
+    config = build_full_sync_by_date_config(args)
+    session = None if (args.dry_run or args.no_backend_call or args.plan_only) else _login(print)
+
+    result: dict = {}
+
+    def callback(page):
+        records, never_seen = discover_unique_patients_from_schedule(page, args, config)
+        if args.limit > 0:
+            records = records[: args.limit]
+
+        print(
+            f"[HISTORICAL-DIAGNOSIS-BACKFILL] {len(records)} unique patient(s) with a Seen "
+            f"appointment between {args.start_date} and {args.end_date} "
+            f"({len(never_seen)} other patient(s) seen on the Schedule but never marked Seen):",
+            flush=True,
+        )
+        for record in records:
+            print(
+                f"  - {record.patient_name} | representative visit {record.appointment_date} "
+                f"| {record.ehr_patient_guid}",
+                flush=True,
+            )
+        if never_seen:
+            print("  Not Seen in range (skipped):", flush=True)
+            for line in never_seen:
+                print(f"    - {line}", flush=True)
+
+        summary = {
+            "start_date": args.start_date,
+            "end_date": args.end_date,
+            "unique_patient_count": len(records),
+            "patients": [
+                {
+                    "patient_name": r.patient_name,
+                    "ehr_patient_guid": r.ehr_patient_guid,
+                    "representative_appointment_date": r.appointment_date,
+                }
+                for r in records
+            ],
+            "not_seen_in_range": never_seen,
+        }
+
+        if args.plan_only or not records:
+            result.update({"unique_patient_count": len(records), "plan_only": args.plan_only})
+            return _write_unique_patients_summary(args, summary, result)
+
+        counts: dict = {"unique_patient_count": len(records)}
+        for index, record in enumerate(records, start=1):
+            print(
+                f"[{index}/{len(records)}] {record.patient_name} | "
+                f"{record.appointment_date} | {record.ehr_patient_guid}",
+                flush=True,
+            )
+            outcome = process_candidate(page, record, config, args, session)
+            counts[outcome] = counts.get(outcome, 0) + 1
+            summary["patients"][index - 1]["outcome"] = outcome
+            # No save_row here: these are synthetic, one-per-patient records
+            # that don't belong in the visit-level queue (see module
+            # docstring) -- the JSON summary file is their only record.
+
+        result.update(counts)
+        return _write_unique_patients_summary(args, summary, result)
+
+    return browser_command_wrapper(args, callback)
+
+
+def _write_unique_patients_summary(args: argparse.Namespace, summary: dict, result: dict) -> dict:
+    destination = Path(args.downloads_dir) / f"unique_patients_{args.start_date}_to_{args.end_date}.json"
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    destination.write_text(json.dumps(summary, indent=2, ensure_ascii=False), encoding="utf-8")
+    print(f"[HISTORICAL-DIAGNOSIS-BACKFILL] Summary written to {destination}", flush=True)
+    result["summary_path"] = str(destination)
+    return result
+
+
+def run(args: argparse.Namespace) -> dict:
+    if args.mode == "unique-patients":
+        return run_unique_patients(args)
+    return run_reprocess_queue(args)
 
 
 def main() -> None:
