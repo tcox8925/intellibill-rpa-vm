@@ -235,6 +235,14 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--redo",
+        action="store_true",
+        help=(
+            "unique-patients mode only: also reprocess patients already marked "
+            "sent_to_backend in the summary file (default: auto-skipped)."
+        ),
+    )
+    parser.add_argument(
         "--plan-only",
         action="store_true",
         help="Print the selected candidates and exit -- no browser, no PF login, no backend call.",
@@ -493,6 +501,19 @@ def run_unique_patients(args: argparse.Namespace) -> dict:
 
     def callback(page):
         all_records, never_seen = discover_unique_patients_from_schedule(page, args, config)
+
+        if not args.patient_guid and not args.redo:
+            done_guids = _completed_guids(args)
+            if done_guids:
+                before = len(all_records)
+                all_records = [r for r in all_records if r.ehr_patient_guid not in done_guids]
+                print(
+                    f"[HISTORICAL-DIAGNOSIS-BACKFILL] {before - len(all_records)} patient(s) already "
+                    f"delivered successfully in a prior run -- auto-skipped (pass --redo to reprocess "
+                    f"them anyway).",
+                    flush=True,
+                )
+
         batch = all_records[args.skip :]
         if args.limit > 0:
             batch = batch[: args.limit]
@@ -575,6 +596,29 @@ def run_unique_patients(args: argparse.Namespace) -> dict:
 
 def _unique_patients_summary_path(args: argparse.Namespace) -> Path:
     return Path(args.downloads_dir) / f"unique_patients_{args.start_date}_to_{args.end_date}.json"
+
+
+def _completed_guids(args: argparse.Namespace) -> set:
+    """GUIDs already marked "sent_to_backend" in the on-disk summary -- the
+    only outcome that means a facesheet genuinely reached the backend.
+    Everything else ("pending", "failed", "review", "needs_attention",
+    "backend_failed", "reprinted_only", "reprinted_dry_run", "ignored")
+    stays eligible for a future run: those either never finished or were
+    deliberately non-delivering runs (--dry-run/--no-backend-call), not a
+    real completion.
+    """
+    path = _unique_patients_summary_path(args)
+    if not path.exists():
+        return set()
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return set()
+    return {
+        p["ehr_patient_guid"]
+        for p in data.get("patients", [])
+        if p.get("outcome") == "sent_to_backend" and p.get("ehr_patient_guid")
+    }
 
 
 def _merge_unique_patients_summary(args: argparse.Namespace, never_seen: list, patient_updates: list) -> None:
