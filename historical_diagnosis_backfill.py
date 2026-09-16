@@ -221,7 +221,18 @@ def parse_args() -> argparse.Namespace:
         help="reprocess-queue mode only: comma-separated QueueRecord statuses to reprocess.",
     )
     parser.add_argument(
-        "--limit", type=int, default=0, help="Cap the number of rows reprocessed (0 = no cap)."
+        "--limit", type=int, default=0, help="Cap the number of rows/patients reprocessed (0 = no cap)."
+    )
+    parser.add_argument(
+        "--skip",
+        type=int,
+        default=0,
+        help=(
+            "unique-patients mode only: skip the first N patients (after sorting by name) "
+            "-- combine with --limit to run in batches, e.g. --skip 0 --limit 150, then "
+            "--skip 150 --limit 150, etc. Each batch merges into the same summary JSON "
+            "(keyed by ehr_patient_guid), so a crash partway only costs the in-flight patient."
+        ),
     )
     parser.add_argument(
         "--plan-only",
@@ -481,17 +492,19 @@ def run_unique_patients(args: argparse.Namespace) -> dict:
     result: dict = {}
 
     def callback(page):
-        records, never_seen = discover_unique_patients_from_schedule(page, args, config)
+        all_records, never_seen = discover_unique_patients_from_schedule(page, args, config)
+        batch = all_records[args.skip :]
         if args.limit > 0:
-            records = records[: args.limit]
+            batch = batch[: args.limit]
 
         print(
-            f"[HISTORICAL-DIAGNOSIS-BACKFILL] {len(records)} unique patient(s) with a Seen "
-            f"appointment between {args.start_date} and {args.end_date} "
-            f"({len(never_seen)} other patient(s) seen on the Schedule but never marked Seen):",
+            f"[HISTORICAL-DIAGNOSIS-BACKFILL] {len(all_records)} unique patient(s) total with a "
+            f"Seen appointment between {args.start_date} and {args.end_date} "
+            f"({len(never_seen)} other patient(s) seen on the Schedule but never marked Seen); "
+            f"this batch: {len(batch)} (skip={args.skip}, limit={args.limit or 'none'}).",
             flush=True,
         )
-        for record in records:
+        for record in batch:
             print(
                 f"  - {record.patient_name} | representative visit {record.appointment_date} "
                 f"| {record.ehr_patient_guid}",
@@ -502,52 +515,102 @@ def run_unique_patients(args: argparse.Namespace) -> dict:
             for line in never_seen:
                 print(f"    - {line}", flush=True)
 
-        summary = {
-            "start_date": args.start_date,
-            "end_date": args.end_date,
-            "unique_patient_count": len(records),
-            "patients": [
+        # Seed every patient in THIS batch as "pending" before processing
+        # starts, then overwrite each one's outcome as it completes (merged
+        # into the same file across batches, keyed by ehr_patient_guid) --
+        # so even a crash before the first patient finishes still leaves a
+        # readable record of what this batch was supposed to cover.
+        _merge_unique_patients_summary(
+            args,
+            never_seen,
+            [
                 {
                     "patient_name": r.patient_name,
                     "ehr_patient_guid": r.ehr_patient_guid,
                     "representative_appointment_date": r.appointment_date,
+                    "outcome": "pending",
                 }
-                for r in records
+                for r in batch
             ],
-            "not_seen_in_range": never_seen,
-        }
+        )
 
-        if args.plan_only or not records:
-            result.update({"unique_patient_count": len(records), "plan_only": args.plan_only})
-            return _write_unique_patients_summary(args, summary, result)
+        if args.plan_only or not batch:
+            result.update({"unique_patient_count": len(all_records), "batch_size": len(batch), "plan_only": args.plan_only})
+            return result
 
-        counts: dict = {"unique_patient_count": len(records)}
-        for index, record in enumerate(records, start=1):
+        counts: dict = {"unique_patient_count": len(all_records), "batch_size": len(batch)}
+        for index, record in enumerate(batch, start=1):
             print(
-                f"[{index}/{len(records)}] {record.patient_name} | "
+                f"[{index}/{len(batch)}] {record.patient_name} | "
                 f"{record.appointment_date} | {record.ehr_patient_guid}",
                 flush=True,
             )
             outcome = process_candidate(page, record, config, args, session)
             counts[outcome] = counts.get(outcome, 0) + 1
-            summary["patients"][index - 1]["outcome"] = outcome
+            # Write after EVERY patient, not just at the end -- a crash
+            # partway through this batch then only ever costs the one
+            # in-flight patient, not the whole batch.
+            _merge_unique_patients_summary(
+                args,
+                never_seen,
+                [
+                    {
+                        "patient_name": record.patient_name,
+                        "ehr_patient_guid": record.ehr_patient_guid,
+                        "representative_appointment_date": record.appointment_date,
+                        "outcome": outcome,
+                    }
+                ],
+            )
             # No save_row here: these are synthetic, one-per-patient records
             # that don't belong in the visit-level queue (see module
             # docstring) -- the JSON summary file is their only record.
 
         result.update(counts)
-        return _write_unique_patients_summary(args, summary, result)
+        result["summary_path"] = str(_unique_patients_summary_path(args))
+        return result
 
     return browser_command_wrapper(args, callback)
 
 
-def _write_unique_patients_summary(args: argparse.Namespace, summary: dict, result: dict) -> dict:
-    destination = Path(args.downloads_dir) / f"unique_patients_{args.start_date}_to_{args.end_date}.json"
+def _unique_patients_summary_path(args: argparse.Namespace) -> Path:
+    return Path(args.downloads_dir) / f"unique_patients_{args.start_date}_to_{args.end_date}.json"
+
+
+def _merge_unique_patients_summary(args: argparse.Namespace, never_seen: list, patient_updates: list) -> None:
+    """Merge `patient_updates` into the on-disk summary, keyed by
+    ehr_patient_guid, and rewrite it. Same "converge on one file no matter
+    how many calls it takes" pattern pdf_pipeline.write_appointments_
+    metadata_json uses for its manifest_run_id merging -- lets multiple
+    --skip/--limit batches (or a resumed run after a crash) accumulate into
+    one summary instead of each batch producing its own fragment.
+    """
+    destination = _unique_patients_summary_path(args)
     destination.parent.mkdir(parents=True, exist_ok=True)
+
+    if destination.exists():
+        try:
+            existing = json.loads(destination.read_text(encoding="utf-8"))
+        except Exception:
+            existing = {}
+    else:
+        existing = {}
+
+    by_guid = {p["ehr_patient_guid"]: p for p in existing.get("patients", []) if p.get("ehr_patient_guid")}
+    for update in patient_updates:
+        by_guid[update["ehr_patient_guid"]] = update
+
+    patients = sorted(by_guid.values(), key=lambda p: p.get("patient_name") or "")
+    summary = {
+        "start_date": args.start_date,
+        "end_date": args.end_date,
+        "unique_patient_count": len(patients),
+        "patients": patients,
+        # Overwritten with whatever the most recent discovery call found --
+        # informational only, not merged (discovery itself isn't batched).
+        "not_seen_in_range": never_seen if never_seen else existing.get("not_seen_in_range", []),
+    }
     destination.write_text(json.dumps(summary, indent=2, ensure_ascii=False), encoding="utf-8")
-    print(f"[HISTORICAL-DIAGNOSIS-BACKFILL] Summary written to {destination}", flush=True)
-    result["summary_path"] = str(destination)
-    return result
 
 
 def run(args: argparse.Namespace) -> dict:
