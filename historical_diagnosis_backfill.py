@@ -99,8 +99,10 @@ See the HOW TO RUN comment block at the top of this file for full examples.
 import argparse
 import json
 import os
+import subprocess
 import sys
 import uuid
+from datetime import datetime
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent
@@ -129,6 +131,31 @@ from pf_sync_pkg.store import load_store, save_row, store_rows  # noqa: E402
 from pf_sync_pkg.utils import is_seen_status, now_iso, parse_date  # noqa: E402
 
 from ehr.pf_facesheet_processor import _call_facesheet_processing_api, _login  # noqa: E402
+
+
+def _start_tee_logging(log_path: Path) -> None:
+    """Duplicate this process's stdout/stderr to `log_path`, in addition to
+    the terminal, at the OS file-descriptor level (like shell `| tee`) rather
+    than swapping Python's sys.stdout object.
+
+    The fd-level approach matters here specifically because build_browser
+    (pf_sync_pkg/browser.py) launches real Chrome as a subprocess
+    (subprocess.Popen), which inherits this process's stdout/stderr file
+    descriptors directly -- all of Chrome's own console noise (DevTools
+    listening on ws://..., the chrome/updater/* GoogleUpdater lines, etc.)
+    would never reach a log file if we only reassigned Python's sys.stdout;
+    it bypasses that object entirely. Redirecting the actual fd catches
+    Chrome's output too, exactly like `python script.py ... | tee file.log`
+    would from the shell -- this just does it automatically so nobody has to
+    remember the `| tee` themselves.
+    """
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    # Spawn tee BEFORE touching our own fds, so tee's own stdout still
+    # inherits the real terminal -- only OUR future writes get redirected
+    # into its stdin pipe below.
+    tee = subprocess.Popen(["tee", "-a", str(log_path)], stdin=subprocess.PIPE)
+    os.dup2(tee.stdin.fileno(), sys.stdout.fileno())
+    os.dup2(tee.stdin.fileno(), sys.stderr.fileno())
 
 
 def _default_chrome_user_data_dir() -> str:
@@ -215,6 +242,20 @@ def parse_args() -> argparse.Namespace:
         "--keep-local-pdfs",
         action="store_true",
         help="Don't delete the local PDF after a successful backend call (dry-run/no-backend-call always keep it).",
+    )
+    parser.add_argument(
+        "--log-file",
+        default="",
+        help=(
+            "Tee all console output to this file too (default: auto-generated "
+            "under ./logs/, named by mode and start time). Pass --no-log to "
+            "disable logging to a file entirely."
+        ),
+    )
+    parser.add_argument(
+        "--no-log",
+        action="store_true",
+        help="Don't write a log file -- console only.",
     )
     args = parser.parse_args()
     if args.mode == "unique-patients" and not (args.start_date and args.end_date):
@@ -517,6 +558,15 @@ def run(args: argparse.Namespace) -> dict:
 
 def main() -> None:
     args = parse_args()
+
+    if not args.no_log:
+        log_path = Path(args.log_file) if args.log_file else (
+            REPO_ROOT / "logs"
+            / f"historical_diagnosis_backfill_{args.mode}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
+        )
+        _start_tee_logging(log_path)
+        print(f"[HISTORICAL-DIAGNOSIS-BACKFILL] Logging this run to {log_path}", flush=True)
+
     result = run(args)
     print(f"\n[HISTORICAL-DIAGNOSIS-BACKFILL] Done: {result}", flush=True)
 
