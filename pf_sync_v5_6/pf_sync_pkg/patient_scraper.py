@@ -1438,6 +1438,7 @@ def discover_appointments_via_schedule_range(
     config: Optional[ScheduleScrapeConfig] = None,
     require_guid: bool = True,
     on_day_diagnostic=None,
+    stop_when=None,
 ) -> List[ScheduledAppointment]:
     """Walks the Schedule 'Appointments' view for every date in [start_date,
     end_date] and returns EVERY row scraped on EVERY day, each tagged with its
@@ -1454,6 +1455,17 @@ def discover_appointments_via_schedule_range(
     surface WHY a day came back empty (couldn't navigate there at all vs. PF's
     own header genuinely says 0 appointments vs. navigated fine and scraped
     fine) instead of a bare empty list that looks identical for all three.
+
+    stop_when(results) -> bool: optional, checked once after each day's rows
+    are appended (after on_day/on_day_diagnostic fire for that day) -- return
+    True to stop walking further days early and return whatever's accumulated
+    so far. None (default) walks the full range every time, unchanged from
+    every caller before this parameter existed. Exists for a caller like
+    historical_diagnosis_backfill.py's --limit, which wants "just enough days
+    to find N unique Seen patients" instead of always paying for the full
+    range before slicing down to N -- `results` is the real, full
+    ScheduledAppointment objects (not just a count), so the predicate can
+    apply whatever per-patient/status logic it needs.
 
     config: ScheduleScrapeConfig -- every selector this walk and scrape_schedule_day
     use comes from here, defaulting to ScheduleScrapeConfig()'s built-in confirmed
@@ -1511,6 +1523,10 @@ def discover_appointments_via_schedule_range(
             print(f"  [schedule {target.isoformat()}] {len(day_rows)} appointments, running total {len(results)}", flush=True)
         if on_day_diagnostic is not None:
             on_day_diagnostic(target, {"navigated": True, "header_count": expected, "scraped_count": len(day_rows)})
+        if stop_when is not None and stop_when(results):
+            print(f"  [schedule {target.isoformat()}] stop_when satisfied -- stopping the range walk early "
+                  f"({i + 1}/{day_count} day(s) scanned).", flush=True)
+            break
     return results
 
 

@@ -326,6 +326,16 @@ def discover_unique_patients_from_schedule(page, args: argparse.Namespace, confi
     module docstring) -- a synthetic one-row-per-patient shape doesn't fit
     its visit-level (guid, date) primary key, so this stays a side,
     in-memory-only discovery.
+
+    Stops scanning further days early once at least (--skip + --limit)
+    unique Seen patients have been found -- --limit alone isn't the right
+    threshold here: with --skip N set, the first N found get sliced away in
+    run_unique_patients, so stopping at exactly --limit would silently hand
+    back an empty (or too-small) batch. 0 (either flag unset) walks the full
+    range, same as before this existed. This only bounds how many DAYS get
+    scanned, not how many end up in the final batch -- run_unique_patients
+    still applies the real skip/limit slice (and the completed-guid filter)
+    to whatever this returns.
     """
     from pf_sync_pkg import patient_scraper as ps
 
@@ -333,8 +343,19 @@ def discover_unique_patients_from_schedule(page, args: argparse.Namespace, confi
     end_date = parse_date(args.end_date)
     schedule_config = ScheduleScrapeConfig.load(args.schedule_config_json)
 
+    stop_after = (args.skip + args.limit) if args.limit > 0 else 0
+    stop_when = None
+    if stop_after > 0:
+        def stop_when(results):  # noqa: F811
+            unique_seen = {
+                a.patient.ehr_patient_guid
+                for a in results
+                if a.patient.ehr_patient_guid and is_seen_status(a.patient.appointment_status, config)
+            }
+            return len(unique_seen) >= stop_after
+
     appointments = ps.discover_appointments_via_schedule_range(
-        page, start_date, end_date, config=schedule_config
+        page, start_date, end_date, config=schedule_config, stop_when=stop_when
     )
 
     by_guid: dict = {}
