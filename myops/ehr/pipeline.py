@@ -19,7 +19,7 @@ from .selector import WorkSelector
 from .db import get_ehr_connection, log_run_event
 from .session import (
     login_and_select_practice, discover_practices, resolve_practice_name,
-    now_cst, cleanup_acc_directory,
+    now_cst, cleanup_acc_directory, practice_download_dir, cleanup_practice_download_dir,
 )
 from .passes import (
     pass_appointments, pass_notes, pass_facesheets, pass_charges, pass_patient_match,
@@ -52,6 +52,16 @@ def _window(sel):
     return today, today
 
 
+# Practices now run fully in parallel again (DailyPdfLoaderJob.js fires every
+# practice's /run-tebra call as fire-and-forget instead of one-at-a-time) --
+# an earlier version of this file serialized every run behind one global slot
+# to work around the shared DOWNLOAD_DIR root (passes.py/zipbuild.py wrote
+# straight into it by bare filename, with no per-practice separation, so one
+# practice finishing and cleaning up mid-scrape could delete another
+# practice's just-downloaded file). That's fixed properly now instead:
+# practice_download_dir() (ehr/session.py) gives each practice its own
+# subfolder, threaded through pass_facesheets/pass_zip below, so concurrent
+# practices never share a path and no slot limit is needed here at all.
 def run(sel: WorkSelector, scrape_patients=None, no_upload=False, skip_appointment_scrape=False):
     if not DOWNLOAD_DIR:
         raise RuntimeError(
@@ -136,6 +146,7 @@ def run(sel: WorkSelector, scrape_patients=None, no_upload=False, skip_appointme
             ungated_repull=sel.ungated_repull,
         )
         from_date, to_date = _window(psel)
+        practice_dir = practice_download_dir(sel.entity, sel.sub_entity, practice)
 
         # Fresh browser + context PER PRACTICE. Tebra keeps a session logged in
         # to one practice; reusing the browser means the next practice's login
@@ -171,7 +182,7 @@ def run(sel: WorkSelector, scrape_patients=None, no_upload=False, skip_appointme
                 _log(f"Practice={practice} notes pass done elapsed={time.monotonic() - phase_clock:.1f}s")
 
                 phase_clock = time.monotonic()
-                pass_facesheets(page, context, psel)   # normal + missed-charges re-download
+                pass_facesheets(page, context, psel, download_dir=practice_dir)   # normal + missed-charges re-download
                 _log(f"Practice={practice} facesheets pass done elapsed={time.monotonic() - phase_clock:.1f}s")
 
                 phase_clock = time.monotonic()
@@ -179,7 +190,7 @@ def run(sel: WorkSelector, scrape_patients=None, no_upload=False, skip_appointme
                 _log(f"Practice={practice} charges pass done elapsed={time.monotonic() - phase_clock:.1f}s")
 
                 phase_clock = time.monotonic()
-                zip_result = pass_zip(psel, practice, no_upload=no_upload)  # one ZIP incl. charge_data
+                zip_result = pass_zip(psel, practice, no_upload=no_upload, download_dir=practice_dir)  # one ZIP incl. charge_data
                 zip_result = zip_result or {}
                 _log(
                     f"Practice={practice} zip/upload pass done elapsed={time.monotonic() - phase_clock:.1f}s "
@@ -209,8 +220,13 @@ def run(sel: WorkSelector, scrape_patients=None, no_upload=False, skip_appointme
                     browser.close()
                 except Exception:
                     pass
+                cleanup_practice_download_dir(practice_dir)
 
     _log_run(sel, run_start)
+    # Safety-net sweep of the shared DOWNLOAD_DIR root itself, kept for
+    # anything that might still land there directly - normal facesheet/zip
+    # traffic no longer does, now that it's all scoped under practice_dir
+    # above, so this is expected to be a no-op most of the time.
     cleanup_acc_directory()
     _log(
         f"Run finished completed={completed} failed={failed} "

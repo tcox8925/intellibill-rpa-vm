@@ -22,7 +22,6 @@ import random
 import re
 import string
 import sys
-import threading
 import zipfile
 from pathlib import Path
 from typing import Dict
@@ -38,8 +37,18 @@ def _trigger_pf_facesheet_processor():
     """Fires the Practice Fusion facesheet processor
     (myops/ehr/pf_facesheet_processor.py) right after a ZIP actually lands in
     `rcm-attachments` below -- event-driven, not a guessed cron delay after
-    the scrape. Runs in a background thread so the upload path never waits
-    on the processor's own blob scan + backend calls.
+    the scrape.
+
+    BLOCKING, not fire-and-forget: the pull (this upload) and the processing
+    that turns it into patient records are one unit of work, not two -- the
+    old background-thread version returned immediately, so a caller here
+    could report its own success while facesheet processing was still
+    running afterward, invisible to whoever's watching this job (same class
+    of bug fixed 2026-09-17 in ehr/zipbuild.py's Tebra equivalent). This now
+    blocks until the processor actually finishes and raises if it failed;
+    both call sites below already catch exceptions from this same line (see
+    each one's own try/except), so the failure surfaces as this zip's own
+    error instead of vanishing into a print() nobody's watching.
 
     pf_sync_v5_6 is otherwise deliberately self-contained (see this module's
     docstring) and normally wouldn't reach into myops -- but triggering the
@@ -51,22 +60,67 @@ def _trigger_pf_facesheet_processor():
     FastAPI app, its own run-lock dict) instead of reaching the one actually
     serving requests. If neither this process's combined server.py nor a
     standalone myops/server.py has been loaded (e.g. pf_sync_v5_6 run fully
-    standalone, its historical mode), this just logs and no-ops -- a missing
-    processor trigger must never break the upload it's piggybacking on.
+    standalone, its historical mode), this raises too -- a caller that can't
+    tell whether processing happened at all should not treat that as quiet
+    success either.
     """
-    def _run():
-        try:
-            server_module = sys.modules.get("tebra_server") or sys.modules.get("server")
-            if server_module is None:
-                print("[RCM-UPLOAD] myops server module not loaded in this process "
-                      "- skipping PF facesheet processor trigger (expected when "
-                      "pf_sync_v5_6 is run standalone, outside the combined server.py)", flush=True)
-                return
-            server_module._run_pf_facesheet_processor_job()
-        except Exception as e:
-            print(f"[RCM-UPLOAD] Failed to trigger PF facesheet processor: {e!r}", flush=True)
+    server_module = sys.modules.get("tebra_server") or sys.modules.get("server")
+    if server_module is None:
+        raise RuntimeError(
+            "myops server module not loaded in this process -- cannot trigger PF "
+            "facesheet processor (expected when pf_sync_v5_6 is run standalone, "
+            "outside the combined server.py)"
+        )
+    server_module._run_pf_facesheet_processor_job(blocking=True, raise_on_error=True)
 
-    threading.Thread(target=_run, daemon=True).start()
+
+# Confirmed live 2026-09-17: calling _trigger_pf_facesheet_processor() directly
+# from inside a callback that still holds a live Playwright session corrupts
+# that session's cleanup -- `greenlet.error: cannot switch to a different
+# thread (which happens to have exited)` at close_browser() time. Root cause:
+# PF's Chrome isn't a throwaway Playwright-launched browser like Tebra's --
+# it's a real Chrome subprocess with a persistent, reusable login profile,
+# attached over CDP and torn down with an explicit playwright.stop() (see
+# browser.py's build_browser/close_browser) specifically so the Practice
+# Fusion session survives between runs. That manual CDP lifecycle is far more
+# sensitive to other thread activity happening while it's still attached than
+# Tebra's standard launch/`with` pattern -- and the facesheet processor spins
+# up its own ThreadPoolExecutor (pf_facesheet_processor.py) to process PDFs,
+# right in the middle of that window if called too early.
+#
+# The pull and the processing are still one unit of work (see
+# _trigger_pf_facesheet_processor's own docstring) -- this just moves WHEN
+# that blocking call happens, not whether it blocks: callers below only mark
+# that a trigger is owed, and cli.py's browser_command_wrapper*/the
+# standalone zip-upload command call run_pending_pf_facesheet_trigger() once
+# Chrome has fully closed.
+_pending_pf_facesheet_trigger = False
+
+
+def _mark_pf_facesheet_trigger_pending() -> None:
+    global _pending_pf_facesheet_trigger
+    _pending_pf_facesheet_trigger = True
+
+
+def run_pending_pf_facesheet_trigger() -> dict | None:
+    """Fires the deferred trigger if one is owed; returns None if nothing
+    uploaded a ZIP this run. Caller must only invoke this after Chrome has
+    fully closed. Still blocks until extraction genuinely finishes; catches
+    (rather than raises) so a processing failure can't shadow a real
+    exception from whatever ran before it in the same finally block --
+    the failure is returned instead, for the caller to fold into its own
+    result/exit status."""
+    global _pending_pf_facesheet_trigger
+    if not _pending_pf_facesheet_trigger:
+        return None
+    _pending_pf_facesheet_trigger = False
+    try:
+        _trigger_pf_facesheet_processor()
+        return {"triggered": True}
+    except Exception as exc:
+        error = f"{type(exc).__name__}: {exc}"
+        print(f"[RCM-UPLOAD] PF facesheet processing FAILED (deferred trigger): {error}", flush=True)
+        return {"triggered": True, "error": error}
 
 
 def get_practice_abbr(practice_name: str) -> str:
@@ -184,8 +238,11 @@ def retry_orphaned_zips(downloads_dir: str, folder_structure: str = PF_RCM_FOLDE
             continue
 
         uploaded += 1
-        details.append({"zip_name": zip_name, "blob_path": blob_path})
-        _trigger_pf_facesheet_processor()
+        detail = {"zip_name": zip_name, "blob_path": blob_path}
+        details.append(detail)
+        # Deferred, not called directly -- see run_pending_pf_facesheet_trigger's
+        # docstring for why this must wait until Chrome has fully closed.
+        _mark_pf_facesheet_trigger_pending()
         local_paths = [str(directory / name) for name in pdf_names] + [str(zip_path)]
         cleanup = _delete_local_files(local_paths)
         if cleanup["errors"]:
@@ -290,7 +347,6 @@ def build_and_upload_zip(
         result["blob_path"] = upload_zip_to_rcm(zip_path, zip_name, folder_structure)
         result["container"] = RCM_ATTACHMENTS_CONTAINER
         result["uploaded"] = True
-        _trigger_pf_facesheet_processor()
     except Exception as exc:
         result["uploaded"] = False
         result["error"] = f"{type(exc).__name__}: {exc}"
@@ -304,6 +360,10 @@ def build_and_upload_zip(
         # Upload failed -- the zip/PDFs are the only copy of this work, so leave
         # them on disk for a retry instead of deleting anything.
         return result
+
+    # Deferred, not called directly -- see run_pending_pf_facesheet_trigger's
+    # docstring for why this must wait until Chrome has fully closed.
+    _mark_pf_facesheet_trigger_pending()
 
     if delete_local_after_upload:
         local_paths = [os.path.join(downloads_dir, name) for name in present] + [zip_path]

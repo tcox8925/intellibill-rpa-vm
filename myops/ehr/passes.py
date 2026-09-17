@@ -346,14 +346,15 @@ def _mark_from_cards(cur, conn, collected, needed):
 # Per-patient dedup: one download marks all of a patient's appointments.
 # Per-patient failure recovery: one bad patient never aborts the practice.
 
-def pass_facesheets(page, context, sel):
+def pass_facesheets(page, context, sel, download_dir=None):
     conn = get_ehr_connection()
     cur = conn.cursor()
     try:
         # ---- normal signed+unprocessed selection ----
         rows = select_appointments(cur, sel, "facesheets")
         print(f"[FS] {len(rows)} signed-note appointment rows need facesheets")
-        _process_by_patient(page, context, cur, conn, rows, "FS", keep_retry=False)
+        _process_by_patient(page, context, cur, conn, rows, "FS", keep_retry=False,
+                             download_dir=download_dir)
 
         # ---- Missed Charges re-download selection ----
         mc_rows = select_appointments(cur, sel, "missed_charges")
@@ -362,7 +363,8 @@ def pass_facesheets(page, context, sel):
         # unless this missed-charges pass itself handled it — we clear it
         # explicitly on success below.
         _process_by_patient(page, context, cur, conn, mc_rows, "MISSED_CHARGES",
-                             keep_retry=True, clear_on_success=True)
+                             keep_retry=True, clear_on_success=True,
+                             download_dir=download_dir)
     finally:
         cur.close()
         conn.close()
@@ -378,7 +380,7 @@ def _reset_to_grid(page):
 
 
 def _process_by_patient(page, context, cur, conn, rows, phase,
-                        keep_retry, clear_on_success=False):
+                        keep_retry, clear_on_success=False, download_dir=None):
     """
     Group `rows` by patient, download each patient's facesheet once, and mark
     every one of that patient's appointment rows Processed. `rows` columns:
@@ -434,6 +436,7 @@ def _process_by_patient(page, context, cur, conn, rows, phase,
                 ok = _download_and_mark(
                     page, context, cur, conn,
                     primary_appt_id, patient_name, all_db_ids, phase, keep_retry,
+                    download_dir=download_dir,
                 )
                 if ok and clear_on_success:
                     _clear_retry(cur, conn, all_db_ids)
@@ -471,7 +474,8 @@ def _process_by_patient(page, context, cur, conn, rows, phase,
 
 
 def _download_and_mark(page, context, cur, conn,
-                       appt_id, patient_name, all_db_ids, phase, keep_retry):
+                       appt_id, patient_name, all_db_ids, phase, keep_retry,
+                       download_dir=None):
     """
     Open one appointment for the patient, download the facesheet PDF once to
     local disk ({facesheet_id}_{last_name}.pdf), and mark every db_id Processed.
@@ -518,7 +522,7 @@ def _download_and_mark(page, context, cur, conn,
 
         pdf_url = f"https://app.kareo.com/patients/print/{facesheet_id}.pdf"
         last_name = patient_name.split(",")[0].strip().replace(" ", "_")
-        pdf_path = os.path.join(DOWNLOAD_DIR, f"{facesheet_id}_{last_name}.pdf")
+        pdf_path = os.path.join(download_dir or DOWNLOAD_DIR, f"{facesheet_id}_{last_name}.pdf")
 
         resp = context.request.get(pdf_url)
         if resp.status != 200:
