@@ -43,5 +43,14 @@ def pull_patient_demographics(practice_name: str = "") -> dict:
             json.dump(patients, f, indent=2)
         return patients
     except Exception as e:
+        # Confirmed live 2026-09-17: this used to swallow the error and
+        # return {} -- app_tebra.py's _run_sync() would then see a normal
+        # (empty) return, not an exception, and go on to run
+        # run_load_patient_header/run_load_patient_coverages against
+        # whatever PATIENTS_JSON_PATH already held from a PREVIOUS
+        # successful pull, then report the whole sync as success even
+        # though this SOAP call genuinely failed. Re-raising lets
+        # /tebra/sync's own try/except (see app_tebra.py) correctly mark
+        # the execution failed instead of silently syncing stale data.
         print("Error calling GetPatients:", repr(e), type(e))
-        return {}
+        raise
