@@ -15,6 +15,7 @@ from .config import (
     DOWNLOAD_DIR, PLAYWRIGHT_HEADLESS, PLAYWRIGHT_LAUNCH_ARGS, PLAYWRIGHT_VIEWPORT,
     DAILY_INGEST_LOOKBACK_DAYS,
 )
+from .browser import BROWSER_LAUNCH_LOCK
 from .selector import WorkSelector
 from .db import get_ehr_connection, log_run_event
 from .session import (
@@ -52,16 +53,26 @@ def _window(sel):
     return today, today
 
 
-# Practices now run fully in parallel again (DailyPdfLoaderJob.js fires every
-# practice's /run-tebra call as fire-and-forget instead of one-at-a-time) --
-# an earlier version of this file serialized every run behind one global slot
-# to work around the shared DOWNLOAD_DIR root (passes.py/zipbuild.py wrote
-# straight into it by bare filename, with no per-practice separation, so one
-# practice finishing and cleaning up mid-scrape could delete another
-# practice's just-downloaded file). That's fixed properly now instead:
-# practice_download_dir() (ehr/session.py) gives each practice its own
-# subfolder, threaded through pass_facesheets/pass_zip below, so concurrent
-# practices never share a path and no slot limit is needed here at all.
+# Practices are still requested fully in parallel (DailyPdfLoaderJob.js fires
+# every practice's /run-tebra call as fire-and-forget instead of
+# one-at-a-time). An earlier version of this file serialized every run behind
+# one global slot to work around the shared DOWNLOAD_DIR root
+# (passes.py/zipbuild.py wrote straight into it by bare filename, with no
+# per-practice separation, so one practice finishing and cleaning up
+# mid-scrape could delete another practice's just-downloaded file). That
+# file-collision issue is fixed properly now: practice_download_dir()
+# (ehr/session.py) gives each practice its own subfolder, threaded through
+# pass_facesheets/pass_zip below, so concurrent practices never share a path.
+#
+# But a *separate* problem showed up once that removed the old serialization:
+# concurrent Chromium instances (confirmed live 2026-09-17, rotating
+# ".MuiDataGrid-virtualScroller" timeouts across different practices run by
+# the same DailyPdfLoaderJob.js fan-out -- PrePost+ Tennessee, then
+# PrePostPlus Germantown) starve each other of CPU/RAM/`/dev/shm` on the VM.
+# BROWSER_LAUNCH_LOCK (ehr/browser.py) below re-serializes only the browser
+# lifetime itself (not the whole practice's DB/upload work), so at most one
+# Chromium instance runs at a time process-wide while still keeping the
+# per-practice download-dir isolation above.
 def run(sel: WorkSelector, scrape_patients=None, no_upload=False, skip_appointment_scrape=False):
     if not DOWNLOAD_DIR:
         raise RuntimeError(
@@ -99,7 +110,10 @@ def run(sel: WorkSelector, scrape_patients=None, no_upload=False, skip_appointme
 
     # First, discover practices with a short-lived browser so a normalized API
     # payload can be resolved back to the canonical Tebra practice name.
-    with sync_playwright() as p:
+    # BROWSER_LAUNCH_LOCK (ehr/browser.py): only one Chromium instance runs at
+    # a time process-wide, so concurrent /run-tebra calls for different
+    # practices don't starve each other's grid renders.
+    with BROWSER_LAUNCH_LOCK, sync_playwright() as p:
         browser = p.chromium.launch(
             headless=PLAYWRIGHT_HEADLESS,
             args=PLAYWRIGHT_LAUNCH_ARGS,
@@ -152,7 +166,10 @@ def run(sel: WorkSelector, scrape_patients=None, no_upload=False, skip_appointme
         # to one practice; reusing the browser means the next practice's login
         # bounces straight to the dashboard and #sign-in never appears. A clean
         # browser guarantees the sign-in screen every time.
-        with sync_playwright() as p:
+        # BROWSER_LAUNCH_LOCK held for this practice's whole browser lifetime,
+        # so a concurrently-running practice from another /run-tebra call
+        # waits its turn instead of rendering at the same time.
+        with BROWSER_LAUNCH_LOCK, sync_playwright() as p:
             browser = p.chromium.launch(
                 headless=PLAYWRIGHT_HEADLESS,
                 args=PLAYWRIGHT_LAUNCH_ARGS,

@@ -28,6 +28,7 @@ import psycopg2
 
 from otp_info import handle_tebra_otp_if_present
 from email_read import fetch_latest_tebra_otp_code
+from .browser import BROWSER_LAUNCH_LOCK
 from .config import (
     EHR_NAME,
     LOGIN_URL,
@@ -1269,34 +1270,42 @@ def run_patient_insurance_rpa(
       4. Close browser
     """
     with sync_playwright() as p:
-        browser = p.chromium.launch(
-            headless=PLAYWRIGHT_HEADLESS,
-            args=PLAYWRIGHT_LAUNCH_ARGS,
-        )
-        context = browser.new_context(
-            no_viewport=(PLAYWRIGHT_VIEWPORT is None), viewport=PLAYWRIGHT_VIEWPORT,
-        )
-        page = context.new_page()
+        # BROWSER_LAUNCH_LOCK (ehr/browser.py): held for each browser's own
+        # lifetime only, so this discovery browser doesn't run at the same
+        # time as a concurrent /run-tebra practice's browser and starve it of
+        # CPU/RAM/`/dev/shm`.
+        BROWSER_LAUNCH_LOCK.acquire()
+        try:
+            browser = p.chromium.launch(
+                headless=PLAYWRIGHT_HEADLESS,
+                args=PLAYWRIGHT_LAUNCH_ARGS,
+            )
+            context = browser.new_context(
+                no_viewport=(PLAYWRIGHT_VIEWPORT is None), viewport=PLAYWRIGHT_VIEWPORT,
+            )
+            page = context.new_page()
 
-        # ── Discover practices — login once to get the list ──
-        page.goto(LOGIN_URL)
-        page.fill("#userName", EMAIL)
-        page.fill("#password", PASSWORD)
-        page.click("#sign-in")
+            # ── Discover practices — login once to get the list ──
+            page.goto(LOGIN_URL)
+            page.fill("#userName", EMAIL)
+            page.fill("#password", PASSWORD)
+            page.click("#sign-in")
 
-        page.wait_for_selector("h3:has-text('Practice select')")
-        page.wait_for_timeout(2000)  # let all practice tiles render
+            page.wait_for_selector("h3:has-text('Practice select')")
+            page.wait_for_timeout(2000)  # let all practice tiles render
 
-        practice_elements = page.locator("h6.MuiTypography-subtitle2")
-        all_ui_practices = []
-        for i in range(practice_elements.count()):
-            name = practice_elements.nth(i).inner_text().strip()
-            if name:
-                all_ui_practices.append(name)
-                print(f"[DISCOVER]   {i}: '{name}'")
+            practice_elements = page.locator("h6.MuiTypography-subtitle2")
+            all_ui_practices = []
+            for i in range(practice_elements.count()):
+                name = practice_elements.nth(i).inner_text().strip()
+                if name:
+                    all_ui_practices.append(name)
+                    print(f"[DISCOVER]   {i}: '{name}'")
 
-        print(f"[DISCOVER] Found {len(all_ui_practices)} practices in Tebra UI")
-        browser.close()
+            print(f"[DISCOVER] Found {len(all_ui_practices)} practices in Tebra UI")
+            browser.close()
+        finally:
+            BROWSER_LAUNCH_LOCK.release()
 
         # ── Loop through practices (fresh browser each time) ──
         completed = []
@@ -1312,14 +1321,22 @@ def run_patient_insurance_rpa(
             print(f"{'='*60}")
 
             # ── Fresh browser for each practice ──
-            browser = p.chromium.launch(
-                headless=PLAYWRIGHT_HEADLESS,
-                args=PLAYWRIGHT_LAUNCH_ARGS,
-            )
-            context = browser.new_context(
-                no_viewport=(PLAYWRIGHT_VIEWPORT is None), viewport=PLAYWRIGHT_VIEWPORT,
-            )
-            page = context.new_page()
+            BROWSER_LAUNCH_LOCK.acquire()
+            try:
+                browser = p.chromium.launch(
+                    headless=PLAYWRIGHT_HEADLESS,
+                    args=PLAYWRIGHT_LAUNCH_ARGS,
+                )
+                context = browser.new_context(
+                    no_viewport=(PLAYWRIGHT_VIEWPORT is None), viewport=PLAYWRIGHT_VIEWPORT,
+                )
+                page = context.new_page()
+            except Exception:
+                # launch/context/page creation itself failed -- release before
+                # re-raising, or this lock never gets freed and every future
+                # browser launch process-wide hangs forever.
+                BROWSER_LAUNCH_LOCK.release()
+                raise
 
             start_dt = _now_cst()
             error_msg = None
@@ -1369,6 +1386,7 @@ def run_patient_insurance_rpa(
 
             finally:
                 browser.close()
+                BROWSER_LAUNCH_LOCK.release()
 
             # ── Log run ──
             log_run_event(

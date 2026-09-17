@@ -6,6 +6,24 @@ virtual-scroll row lookup, patient-row -> facesheet navigation, and the
 Tebra Patient ID scrape. No pipeline logic lives here.
 """
 
+import threading
+
+# Confirmed live 2026-09-17: with DailyPdfLoaderJob.js firing every practice's
+# /run-tebra call as fire-and-forget instead of one-at-a-time, multiple
+# practices' pipeline.run() calls land in this process at once, each launching
+# its own headless Chromium (pipeline.py's discovery browser + per-practice
+# browser, patients.py's roster-scrape browsers). Several concurrent Chromium
+# instances on the same VM starve each other of CPU/RAM/`/dev/shm`, which
+# shows up as an intermittent, rotating "waiting for locator
+# ('.MuiDataGrid-virtualScroller') to be visible" timeout on whichever
+# practice's grid happens to be rendering when the VM is most contended (e.g.
+# PrePost+ Tennessee, then PrePostPlus Germantown on a later run) -- not a
+# per-practice bug. Every `p.chromium.launch(...)` call site in pipeline.py
+# and patients.py holds this lock for the browser's full lifetime so only one
+# Chromium instance runs at a time process-wide, trading away some wall-clock
+# parallelism for reliability.
+BROWSER_LAUNCH_LOCK = threading.Lock()
+
 
 def slow_fill(locator, text):
     locator.click()
