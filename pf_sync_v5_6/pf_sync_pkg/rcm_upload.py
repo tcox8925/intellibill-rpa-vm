@@ -366,7 +366,17 @@ def build_and_upload_zip(
     _mark_pf_facesheet_trigger_pending()
 
     if delete_local_after_upload:
-        local_paths = [os.path.join(downloads_dir, name) for name in present] + [zip_path]
+        # manifest_path (the appointments_*.json this function reads its
+        # records from, written earlier by process_records_on_page into
+        # pf_encounter_pdfs/) is included here too -- its content is already
+        # fully embedded in the zip above (z.writestr(json_name, ...)) and
+        # already uploaded, so the standalone copy on disk serves no purpose
+        # after this point. It was never in this cleanup list before, so one
+        # of these was left behind in pf_encounter_pdfs/ on every single
+        # successful run, forever, with nothing ever deleting them -- same
+        # class of bug already fixed 2026-09-17 in myops/ehr/zipbuild.py's
+        # Tebra equivalent (json_path there).
+        local_paths = [os.path.join(downloads_dir, name) for name in present] + [zip_path, manifest_path]
         cleanup = _delete_local_files(local_paths)
         result["local_cleanup"] = {
             "deleted_count": len(cleanup["deleted"]),
@@ -381,7 +391,7 @@ def build_and_upload_zip(
         else:
             print(
                 f"[RCM-UPLOAD] Deleted {len(cleanup['deleted'])} local file(s) "
-                f"({len(present)} PDF(s) + the zip) after a confirmed upload.",
+                f"({len(present)} PDF(s) + the zip + the manifest) after a confirmed upload.",
                 flush=True,
             )
 
