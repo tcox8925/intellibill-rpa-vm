@@ -43,6 +43,9 @@
 #       --start-date 2026-06-02 --end-date 2026-09-16
 #
 # Other useful flags (combine with any of the above):
+#   --headless                    no visible Chrome window for this run (safe once
+#                                  your profile has already done PF's one-time OTP
+#                                  login headed; --headed forces a window back on)
 #   --patient-guid <guid>        limit to one patient
 #   --statuses processed,review  (reprocess-queue only) widen beyond "processed"
 #   --no-backend-call            generate PDFs locally only, skip the RCM POST
@@ -193,6 +196,23 @@ def parse_args() -> argparse.Namespace:
         help="unique-patients mode only: ScheduleScrapeConfig used to walk the Schedule.",
     )
     parser.add_argument("--practice", default="NWARK Internal Medicine")
+    headless_group = parser.add_mutually_exclusive_group()
+    headless_group.add_argument(
+        "--headless",
+        action="store_true",
+        help=(
+            "Run Chrome headless (no visible window) for this run only -- overrides "
+            "PF_PLAYWRIGHT_HEADLESS from .env without changing it. Safe once your "
+            "chrome_user_data_dir profile has already completed PF's one-time OTP "
+            "login in headed mode; if PF ever challenges for OTP again, re-run headed "
+            "(--headed, or drop both flags) to solve it."
+        ),
+    )
+    headless_group.add_argument(
+        "--headed",
+        action="store_true",
+        help="Force a visible Chrome window for this run, overriding .env the other way.",
+    )
     parser.add_argument(
         "--mode",
         choices=("reprocess-queue", "unique-patients"),
@@ -686,6 +706,16 @@ def run(args: argparse.Namespace) -> dict:
 
 def main() -> None:
     args = parse_args()
+
+    # Must happen before anything imports/calls into build_browser --
+    # pf_sync_pkg.browser._pf_headless() reads this env var fresh at launch
+    # time, so setting it here (rather than editing .env) scopes the
+    # override to this process only, leaving other PF automation's default
+    # (headed, for OTP) untouched.
+    if args.headless:
+        os.environ["PF_PLAYWRIGHT_HEADLESS"] = "true"
+    elif args.headed:
+        os.environ["PF_PLAYWRIGHT_HEADLESS"] = "false"
 
     if not args.no_log:
         log_path = Path(args.log_file) if args.log_file else (
