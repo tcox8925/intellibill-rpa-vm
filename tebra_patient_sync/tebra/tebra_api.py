@@ -31,12 +31,26 @@ TEBRA_PASSWORD = os.getenv("TEBRA_PASSWORD")
 # with 409 "already_running" even though nothing was actually deadlocked.
 # An explicit operation_timeout + a few automatic retries on transient
 # connection resets turns that into a fast, predictable failure instead.
+#
+# Confirmed live 2026-09-21: 120s wasn't enough headroom -- GetPatients
+# against a practice with a large patient list can legitimately take longer
+# than that to respond, so the 120s budget was firing as a genuine
+# ReadTimeoutError rather than catching a black-holed connection. Bumped to
+# 300s, and the retry policy now also covers read timeouts/connection resets
+# on POST (urllib3's default allowed_methods excludes POST since it isn't
+# normally safe to auto-replay a non-idempotent request, but GetPatients is
+# read-only so retrying it is safe).
 _session = Session()
-_retries = Retry(total=3, backoff_factor=1, status_forcelist=[502, 503, 504])
+_retries = Retry(
+    total=3,
+    backoff_factor=2,
+    status_forcelist=[502, 503, 504],
+    allowed_methods=frozenset(["POST", "GET", "HEAD", "PUT", "DELETE", "OPTIONS", "TRACE"]),
+)
 _session.mount("https://", HTTPAdapter(max_retries=_retries))
 _session.mount("http://", HTTPAdapter(max_retries=_retries))
 
-_transport = Transport(session=_session, timeout=30, operation_timeout=120)
+_transport = Transport(session=_session, timeout=30, operation_timeout=300)
 client = Client(wsdl=TEBRA_WSDL_URL, transport=_transport)
 
 
