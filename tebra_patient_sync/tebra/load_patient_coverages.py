@@ -33,6 +33,7 @@ from utils.coverage_rules import (
     first_day_of_month,
     format_date,
     is_same_coverage,
+    normalize_subscriber_id,
     parse_date,
     terminate_end_date,
 )
@@ -42,6 +43,12 @@ from utils.payer_lookup import carrier_key, find_payer
 BATCH_SIZE = 100
 
 COVERAGE_TYPES = [("P", "Primary"), ("S", "Secondary")]
+
+# The other cov_type slot(s) to check for a cross-type identity match - see
+# find_cross_type_active_match below. Only P/S exist in this sync (Tebra's
+# Patients.json only carries Primary/Secondary policy fields), so each type
+# has exactly one "other" to check.
+_OTHER_COVERAGE_TYPES = {"P": ("S",), "S": ("P",)}
 
 # Columns copied wholesale from an incoming coverage dict onto an existing
 # PatientCoverage row when decide_coverage_action says ACTION_UPDATE.
@@ -374,6 +381,87 @@ def _reactivate_candidate(
     }
 
 
+def find_cross_type_active_match(
+    active_coverage_map: dict,
+    patient_header_id,
+    own_type: str,
+    incoming_carrier_key: str,
+    incoming_subscriber_id: object,
+    active_payers: list,
+) -> tuple:
+    """Looks for the SAME real coverage (carrier + subscriber) sitting
+    active under a DIFFERENT cov_type slot for this patient - e.g. the
+    payer that was Secondary last run is now reported as Primary.
+
+    Ported from Practice Fusion's coverageRuleHelper.ts
+    (decidePfFacesheetCoveragePlan), which matches identity across a
+    patient's whole P/S/T history on purpose rather than scoping only to
+    the incoming type's own slot. Without this, active_coverage_map is
+    keyed strictly by (patient_header_id, cov_type), so a rank change
+    leaves the old-type row active forever - nothing in this sync ever
+    revisits a type slot once it stops matching new incoming data for that
+    same slot - while a brand-new row gets inserted under the new type,
+    leaving the patient with two simultaneously active rows for what's
+    really one policy.
+
+    Returns (other_type, candidate_dict) or (None, None). Only ever called
+    when the incoming record did NOT match its own type's existing active
+    row (see process_coverage) - if it already matched same-type, there's
+    nothing to reconcile.
+    """
+    normalized_incoming_sub = normalize_subscriber_id(incoming_subscriber_id)
+    for other_type in _OTHER_COVERAGE_TYPES.get(own_type, ()):
+        candidate = active_coverage_map.get((patient_header_id, other_type))
+        if candidate is None:
+            continue
+        candidate_payer = find_payer(candidate["cov_car_nam"], "", active_payers)
+        candidate_key = carrier_key(candidate_payer, candidate["cov_car_nam"], stored_id=candidate["cov_car_id"] or "")
+        if candidate_key == incoming_carrier_key and normalize_subscriber_id(candidate["cov_sub_id"]) == normalized_incoming_sub:
+            return other_type, candidate
+    return None, None
+
+
+def _terminate_cross_type_match(
+    active_coverage_map: dict,
+    patient_header_id,
+    own_type: str,
+    incoming_carrier_key: str,
+    incoming_subscriber_id: object,
+    active_payers: list,
+    update_payload: list,
+    now: datetime,
+    new_start: date,
+) -> str | None:
+    """Terminates the other-type active row found by
+    find_cross_type_active_match, if any, and drops it from
+    active_coverage_map so a later duplicate patient entry later in this
+    same run doesn't see it as still active under its old type. Returns the
+    terminated row's cov_type, or None if there was nothing to terminate -
+    callers use this to say what happened in their own log message."""
+    other_type, candidate = find_cross_type_active_match(
+        active_coverage_map, patient_header_id, own_type, incoming_carrier_key, incoming_subscriber_id, active_payers,
+    )
+    if candidate is None:
+        return None
+
+    existing_start = parse_date(candidate["effective_start_date"])
+    terminate_end = format_date(terminate_end_date(new_start, existing_start))
+
+    if candidate["id"] is None:
+        candidate["_pending_row"]["effective_end_date"] = terminate_end
+        candidate["_pending_row"]["active"] = False
+    else:
+        update_payload.append({
+            "id": candidate["id"],
+            "effective_end_date": terminate_end,
+            "active": False,
+            "updated_at": now,
+        })
+
+    del active_coverage_map[(patient_header_id, other_type)]
+    return other_type
+
+
 def process_coverage(
     patient: dict,
     pat_header: PatientHeader,
@@ -422,7 +510,36 @@ def process_coverage(
                 candidate["id"], incoming, new_start, new_end, now, map_key, pat_header, coverage_type,
                 update_payload, active_coverage_map,
             )
+            # Same pre-existing-duplicate cleanup as the ACTION_UPDATE branch
+            # below - reactivating this type's own history is still "this
+            # type's own slot already resolved", so it would otherwise skip
+            # ever checking whether the other type also already holds this
+            # same coverage active from before this run.
+            cleaned_up_type = _terminate_cross_type_match(
+                active_coverage_map, pat_header.patient_header_id, coverage_type,
+                carrier_key(payer, company_name or ""), incoming["cov_sub_id"], active_payers,
+                update_payload, now, new_start,
+            )
+            if cleaned_up_type:
+                return (
+                    f"  ✓ Reactivated {coverage_type} coverage for patient {pat_header.source_id}: {company_name} "
+                    f"(also closed a duplicate {cleaned_up_type} row for the same coverage)"
+                )
             return f"  ✓ Reactivated {coverage_type} coverage for patient {pat_header.source_id}: {company_name}"
+
+        # No history to reactivate under this type either - before inserting
+        # a brand-new row, check whether this exact coverage is sitting
+        # ACTIVE under a different type right now (e.g. it was Secondary
+        # last run, this run's Patients.json reports it as Primary). If so,
+        # that old-type row is the same real policy moving rank, not a
+        # separate coverage - terminate it so it doesn't stay active
+        # forever alongside the new row (see find_cross_type_active_match).
+        cross_type_incoming_key = carrier_key(payer, company_name or "")
+        _terminate_cross_type_match(
+            active_coverage_map, pat_header.patient_header_id, coverage_type,
+            cross_type_incoming_key, incoming["cov_sub_id"], active_payers,
+            update_payload, now, new_start,
+        )
 
         incoming["effective_start_date"] = format_date(new_start)
         incoming["effective_end_date"] = format_date(new_end)
@@ -505,6 +622,23 @@ def process_coverage(
         for tracked in ("cov_car_id", "cov_car_nam", "cov_sub_id", "effective_start_date", "effective_end_date"):
             existing[tracked] = update_values[tracked]
 
+        # This type's own row already matched, so find_cross_type_active_match
+        # was never reached via the insert/terminate-and-insert branches
+        # below - but a pre-existing data-quality issue (the SAME carrier +
+        # subscriber already sitting active under BOTH types at once, from
+        # before this run) would otherwise never get cleaned up, since
+        # nothing else in this function revisits an already-matching type.
+        # Clean it up here too.
+        cleaned_up_type = _terminate_cross_type_match(
+            active_coverage_map, pat_header.patient_header_id, coverage_type,
+            incoming_key, incoming["cov_sub_id"], active_payers,
+            update_payload, now, new_start,
+        )
+        if cleaned_up_type:
+            return (
+                f"  ✓ Updated existing {coverage_type} coverage for patient {pat_header.source_id}: {company_name} "
+                f"(also closed a duplicate {cleaned_up_type} row for the same coverage)"
+            )
         return f"  ✓ Updated existing {coverage_type} coverage for patient {pat_header.source_id}: {company_name}"
 
     # ACTION_TERMINATE_AND_INSERT: a patient never has two active coverages
@@ -526,6 +660,17 @@ def process_coverage(
             "active": False,
             "updated_at": now,
         })
+
+    # This coverage didn't match its own type's existing active row - before
+    # treating it as a brand-new/replacement policy, check whether it's
+    # sitting ACTIVE under a different type right now (a rank change, same
+    # as the "existing is None" branch above handles - see
+    # find_cross_type_active_match).
+    _terminate_cross_type_match(
+        active_coverage_map, pat_header.patient_header_id, coverage_type,
+        incoming_key, incoming["cov_sub_id"], active_payers,
+        update_payload, now, normalized_new_start,
+    )
 
     # The currently-active row is terminated either way (a patient never has
     # two active coverages of the same type at once) - but the replacement
