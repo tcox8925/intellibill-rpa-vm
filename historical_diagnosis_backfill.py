@@ -57,11 +57,14 @@
 #   --include-not-seen / --only-not-seen (mutually exclusive)
 #                                  attempt patients with NO Seen visit in range
 #                                  (Cancelled/No-show/etc) using their latest visit
-#                                  overall -- some will still have a printable prior
-#                                  note (allow_most_recent_note_fallback), others
-#                                  honestly end up "review". --include-not-seen adds
-#                                  them alongside Seen patients; --only-not-seen
-#                                  excludes Seen patients from the batch entirely.
+#                                  overall as the chart-open anchor -- Notes is never
+#                                  touched either way, so this just needs the chart to
+#                                  exist at all. --include-not-seen adds them alongside
+#                                  Seen patients; --only-not-seen excludes Seen
+#                                  patients from the batch entirely. Either way, the
+#                                  summary JSON's "totals" always counts the FULL
+#                                  seen+not-seen population for the range, regardless
+#                                  of which of these two flags (if any) is passed.
 #   --headless                    no visible Chrome window for this run (safe once
 #                                  your profile has already done PF's one-time OTP
 #                                  login headed; --headed forces a window back on)
@@ -97,8 +100,10 @@ records are NOT written to the local queue (they don't fit its visit-level
 (guid, date) model) -- results are printed and saved to a JSON summary file
 in --downloads-dir instead.
 
-Both modes reprint with the current (Diagnoses-included) config and forward
-each fresh PDF straight to the RCM backend's
+Both modes reprint with only Demographics/Insurance/Diagnoses checked (Print
+Chart's Notes panel is never opened or touched at all -- Facesheet content is
+patient-level, not tied to any one visit's SOAP note, and this run doesn't
+need one) and forward each fresh PDF straight to the RCM backend's
 pfFacesheetProcessing.processFacesheet mutation -- bypassing the normal
 zip-and-upload-to-Azure delivery path (pf_sync_pkg/rcm_upload.py) entirely,
 exactly as instructed: call the backend directly from the just-downloaded
@@ -106,14 +111,24 @@ PDF, before any zip step exists.
 
 Every call is flagged specialHistoricalDiagnosisRun=True (see
 myops/ehr/pf_facesheet_processor.py's _call_facesheet_processing_api) so the
-backend can tell a deliberate re-delivery/historical pull apart from the
-normal nightly/refresh path -- IMPORTANT: this only has an effect once the
-backend itself is updated to read that field; until then it's accepted but
-ignored (or rejected with a 400 if the backend's schema validation there
-doesn't allow unknown/passthrough fields yet).
+backend can tell this apart from the normal nightly/refresh path -- confirmed
+live: the backend responds with either {"status": "special_run_updated",
+historicalDiagnosesSaved, visitsUpdated, entriesRefreshed} when it actually
+saved something, or {"status": "skipped", "reason": ...} (extraction_empty,
+facility_not_resolved, ocr_extraction_failed, patient_header_not_resolved)
+when it received the file but declined to.
 
 This never touches Azure Blob Storage and never triggers
 myops/ehr/pf_facesheet_processor.py's normal blob-scanning job.
+
+--mode unique-patients ALWAYS classifies and counts the full Seen + not-Seen
+population for [--start-date, --end-date] regardless of --include-not-seen/
+--only-not-seen (those two only decide who gets a chart actually opened this
+run) -- the summary JSON's top-level "totals" (total_patients/seen/not_seen/
+success/failure/not_yet_attempted) and each patient's own entry (seen flag,
+outcome, and the backend's full response detail when reached) are always
+kept current for the whole range, seeded immediately at the start of every
+run and never clobbered for a GUID that's already been processed.
 
 See the HOW TO RUN comment block at the top of this file for full examples.
 """
@@ -153,6 +168,12 @@ from pf_sync_pkg.store import load_store, save_row, store_rows  # noqa: E402
 from pf_sync_pkg.utils import is_seen_status, now_iso, parse_date  # noqa: E402
 
 from ehr.pf_facesheet_processor import _call_facesheet_processing_api, _login  # noqa: E402
+
+# QueueRecord.status_reason marker set on synthetic records built from a
+# patient with NO Seen visit in range (discover_unique_patients_from_schedule)
+# -- checked wherever behavior needs to differ for a forced not-seen pull vs a
+# normal Seen one (is_ignored bypass, batch counts, backend "seen" flag).
+NOT_SEEN_STATUS_REASON = "unique_patient_historical_diagnosis_pull_not_seen"
 
 
 def _start_tee_logging(log_path: Path) -> None:
@@ -278,7 +299,21 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help=(
             "unique-patients mode only: also reprocess patients already marked "
-            "sent_to_backend in the summary file (default: auto-skipped)."
+            "special_run_updated/already_in_db in the summary file (default: "
+            "auto-skipped -- everyone else, including every skipped_<reason> "
+            "outcome, is already retried on a plain rerun with no flags at "
+            "all), and skip the DB pre-check too -- pull from PF regardless "
+            "of what's already on file."
+        ),
+    )
+    parser.add_argument(
+        "--skip-db-check",
+        action="store_true",
+        help=(
+            "unique-patients mode only: don't check EDI_Tebra.patient_header for "
+            "an existing historical_diagnosis before pulling from PF (default: "
+            "checked, and any patient who already has one there is skipped "
+            "entirely -- no chart opened, no backend call)."
         ),
     )
     not_seen_group = parser.add_mutually_exclusive_group()
@@ -378,16 +413,22 @@ def select_candidates(args: argparse.Namespace) -> list:
 def discover_unique_patients_from_schedule(page, args: argparse.Namespace, config) -> tuple:
     """Walk Practice Fusion's Schedule for [--start-date, --end-date] and
     return (records, never_seen): one synthetic QueueRecord per UNIQUE
-    patient (by ehr_patient_guid) who had at least one Seen appointment in
-    that range, plus a list of patients the Schedule showed in range but who
-    were never actually marked Seen (cancelled/no-show/etc -- nothing to
-    print for them, reported so they're not silently missing from the count).
+    patient (by ehr_patient_guid) found in that range -- ALWAYS both those
+    with at least one Seen appointment AND those with none (Cancelled/
+    No-show/Rescheduled/etc), each tagged via status_reason so callers can
+    tell them apart. Every patient is classified regardless of
+    --include-not-seen/--only-not-seen -- those two flags decide who
+    run_unique_patients actually opens a chart for this run, not who gets
+    counted; the seen/not-seen population total needs everyone either way.
+    `never_seen` is the same not-seen set again, as human-readable strings
+    for the console printout.
 
     Representative visit per patient: the MOST RECENT Seen appointment date
-    in range. The Diagnoses/notes sections reflect the patient's chart as of
-    print time regardless of which visit's chart is open, so any Seen visit
-    would technically work -- most recent is the safest choice since it's
-    the visit most likely to already have a SOAP note on file.
+    in range for a Seen patient, or the latest visit overall (whatever its
+    real status) for a not-seen one. The Diagnoses/notes sections reflect
+    the patient's chart as of print time regardless of which visit's chart
+    is open, so any visit would technically work -- most recent is the
+    safest choice since it's likeliest to have a SOAP note on file.
 
     These records are intentionally never written to the local queue (see
     module docstring) -- a synthetic one-row-per-patient shape doesn't fit
@@ -405,12 +446,16 @@ def discover_unique_patients_from_schedule(page, args: argparse.Namespace, confi
     to whatever this returns.
 
     This early-stop is disabled entirely (full range always scanned) under
-    --only-not-seen: "never marked Seen" can only be confirmed once every
-    visit for that GUID in the whole range has been seen -- a patient with
-    a non-Seen visit on day 1 and a Seen one on day 50 would be
-    misclassified as not-seen if we stopped after day 1's count looked
-    sufficient. No such risk on the Seen side: one Seen visit anywhere
-    settles that GUID for good, regardless of what's scanned afterward.
+    --only-not-seen/--include-not-seen: "never marked Seen" can only be
+    confirmed once every visit for that GUID in the whole range has been
+    seen -- a patient with a non-Seen visit on day 1 and a Seen one on day
+    50 would be misclassified as not-seen if we stopped after day 1's count
+    looked sufficient. No such risk on the Seen side: one Seen visit
+    anywhere settles that GUID for good, regardless of what's scanned
+    afterward. A plain --limit test with neither flag set still early-stops
+    on Seen count alone (fast smoke-testing stays fast); its seen/not-seen
+    population TOTALS just won't be accurate off a truncated scan -- only a
+    full, no-limit run's totals should be trusted for reporting.
     """
     from pf_sync_pkg import patient_scraper as ps
 
@@ -418,7 +463,9 @@ def discover_unique_patients_from_schedule(page, args: argparse.Namespace, confi
     end_date = parse_date(args.end_date)
     schedule_config = ScheduleScrapeConfig.load(args.schedule_config_json)
 
-    stop_after = 0 if args.only_not_seen else ((args.skip + args.limit) if args.limit > 0 else 0)
+    stop_after = 0 if (args.only_not_seen or args.include_not_seen) else (
+        (args.skip + args.limit) if args.limit > 0 else 0
+    )
     stop_when = None
     if stop_after > 0:
         def stop_when(results):  # noqa: F811
@@ -453,16 +500,16 @@ def discover_unique_patients_from_schedule(page, args: argparse.Namespace, confi
                 f"{rp.first_name} {rp.last_name} ({guid}) -- {len(visits)} visit(s) in range, "
                 f"none marked Seen"
             )
-            if not (args.include_not_seen or args.only_not_seen):
-                continue
-            # No Seen visit anywhere in range -- fall back to this patient's
-            # latest visit overall (whatever its real status is: Cancelled,
-            # No-show, Confirmed, ...) as the chart-open anchor. There's
-            # often still a printable note here: process_one_record already
-            # runs with allow_most_recent_note_fallback=True, so a patient
-            # with ANY prior SOAP note gets it printed regardless of what
-            # this particular appointment's status was; one with truly none
-            # ends up "review", which is an honest result, not a bug.
+            # No Seen visit anywhere in range -- always classify and build a
+            # record for this patient too (regardless of --include-not-seen/
+            # --only-not-seen: those two flags decide who actually gets
+            # PROCESSED this run, not who gets counted -- run_unique_patients
+            # needs the full seen+not-seen population to report accurate
+            # totals). Falls back to this patient's latest visit overall
+            # (whatever its real status is: Cancelled, No-show, Confirmed,
+            # ...) as the chart-open anchor -- process_candidate's
+            # skip_note_selection=True means no note is ever selected here
+            # anyway, so what matters is just that the chart itself exists.
             latest = max(visits, key=lambda v: v.appointment_date)
             not_seen = True
 
@@ -495,7 +542,7 @@ def discover_unique_patients_from_schedule(page, args: argparse.Namespace, confi
                 # tells process_candidate to bypass that check for exactly
                 # (and only) these records.
                 status_reason=(
-                    "unique_patient_historical_diagnosis_pull_not_seen"
+                    NOT_SEEN_STATUS_REASON
                     if not_seen else "unique_patient_historical_diagnosis_pull"
                 ),
                 created_at=now_iso(),
@@ -507,9 +554,35 @@ def discover_unique_patients_from_schedule(page, args: argparse.Namespace, confi
     return records, never_seen
 
 
-def process_candidate(page, record, config, args, session, force_process: bool = False) -> str:
+def derive_outcome_from_backend_status(backend_response: dict) -> str:
+    """The stored outcome for a delivered facesheet IS the backend's own
+    verdict, not a generic "the POST succeeded" label -- see
+    runPfFacesheetSpecialHistoricalDiagnosisRun's return shape:
+      - {"status": "special_run_updated", ...}      -> real save
+      - {"status": "skipped", "reason": "..."}       -> declined, not saved
+    A single "sent_to_backend" outcome used to cover both, which made
+    _completed_records treat a declined delivery as permanently done --
+    confirmed live 2026-09-22: 209+21 patients stuck that way, never
+    retried, with no record of which kind of decline it even was.
+    Encoding the reason directly into the outcome string (skipped_<reason>)
+    means a plain future run -- no special flags -- automatically retries
+    anyone who wasn't a real save, since _completed_records only recognizes
+    "special_run_updated"/"already_in_db" as done.
+    """
+    status = backend_response.get("status") if backend_response else None
+    if status == "special_run_updated":
+        return "special_run_updated"
+    if status == "skipped":
+        return f"skipped_{backend_response.get('reason') or 'unknown'}"
+    return f"backend_unexpected_status_{status or 'none'}"
+
+
+def process_candidate(page, record, config, args, session, force_process: bool = False) -> tuple:
     """Reprint one chart and, unless disabled, deliver it straight to the
-    backend. Returns a short outcome label for the run summary.
+    backend. Returns (outcome, backend_response) -- backend_response is the
+    raw dict runPfFacesheetSpecialHistoricalDiagnosisRun returned (status,
+    reason, historicalDiagnosesSaved, visitsUpdated, entriesRefreshed,
+    logFile) when the backend was actually called and responded, else None.
 
     force_process=True skips the is_ignored check -- used only for
     --include-not-seen records (status_reason ends in "_not_seen"), whose
@@ -521,10 +594,10 @@ def process_candidate(page, record, config, args, session, force_process: bool =
     """
     if not force_process and is_ignored(record, config):
         print("  ignored", flush=True)
-        return "ignored"
+        return "ignored", None
     if record.patient_match_status != "matched" or not record.ehr_patient_guid:
         print("  needs_attention: patient not resolved", flush=True)
-        return "needs_attention"
+        return "needs_attention", None
 
     try:
         process_one_record(
@@ -538,20 +611,24 @@ def process_candidate(page, record, config, args, session, force_process: bool =
             all_rows=(),
             use_timeline_fallback=False,
             skip_encounter_lookup=True,
-            allow_most_recent_note_fallback=True,
+            # allow_most_recent_note_fallback is irrelevant here -- left at its
+            # default (False); skip_note_selection=True below means
+            # process_one_record never reaches note selection at all.
+            #
             # This whole tool only cares about Demographics/Insurance/Diagnoses
             # for historical-diagnosis extraction -- the SOAP note is never
-            # needed. Also sidesteps PRINT_DOCUMENT_NOT_FOUND false rejections
-            # on forced not-seen pulls, where the only available note (via the
-            # most-recent-on-or-before fallback) is dated earlier than this
-            # record's appointment_date and could never satisfy a note-aware
-            # print-document check anyway.
+            # needed, and Practice Fusion's Notes panel is never opened,
+            # selected, or cleared; Print Chart fires with whatever its own
+            # default note-selection state already is. Also sidesteps
+            # PRINT_DOCUMENT_NOT_FOUND false rejections that would otherwise
+            # hit on forced not-seen pulls whose only available note is dated
+            # earlier than this record's appointment_date.
             skip_note_selection=True,
         )
     except Exception as exc:
         state = handle_process_error(record, config, exc)
         print(f"  {state}: {record.error_message}", flush=True)
-        return state
+        return state, None
     finally:
         # Always tear the Print Chart modal down, success or failure, so it
         # can't be left open over the next patient's chart (same rule
@@ -561,10 +638,10 @@ def process_candidate(page, record, config, args, session, force_process: bool =
     print(f"  reprinted in {record.elapsed_seconds:.3f}s -> {record.pdf_path}", flush=True)
 
     if args.dry_run:
-        return "reprinted_dry_run"
+        return "reprinted_dry_run", None
 
     if args.no_backend_call:
-        return "reprinted_only"
+        return "reprinted_only", None
 
     manifest_entry = appointment_metadata_row(record)
     pdf_path = Path(record.pdf_path)
@@ -580,11 +657,17 @@ def process_candidate(page, record, config, args, session, force_process: bool =
         print(f"  backend response: {result}", flush=True)
     except Exception as exc:
         print(f"  backend call FAILED, leaving local PDF in place: {exc}", flush=True)
-        return "backend_failed"
+        return "backend_failed", None
 
     if not args.keep_local_pdfs:
         pdf_path.unlink(missing_ok=True)
-    return "sent_to_backend"
+    # The outcome IS the backend's own verdict, not a generic "we POSTed
+    # successfully" label -- a delivered-but-declined response used to be
+    # stored as the same "sent_to_backend" outcome as a real save, which
+    # made the auto-skip logic treat both as permanently done and never
+    # retry the declined ones. See derive_outcome_from_backend_status's
+    # docstring for the exact mapping.
+    return derive_outcome_from_backend_status(result), result
 
 
 def run_reprocess_queue(args: argparse.Namespace) -> dict:
@@ -613,7 +696,7 @@ def run_reprocess_queue(args: argparse.Namespace) -> dict:
                 f"{record.appointment_date} | {record.ehr_patient_guid}",
                 flush=True,
             )
-            outcome = process_candidate(page, record, config, args, session)
+            outcome, _backend_response = process_candidate(page, record, config, args, session)
             counts[outcome] = counts.get(outcome, 0) + 1
             # Side, direct-to-backend delivery -- record.status is left exactly
             # as process_one_record/handle_process_error set it (normally
@@ -626,6 +709,16 @@ def run_reprocess_queue(args: argparse.Namespace) -> dict:
 
 
 def run_unique_patients(args: argparse.Namespace) -> dict:
+    # Printed up front, same as _start_tee_logging's log-path line in main() --
+    # this file is where every patient's outcome/backend detail actually
+    # lands, so it should be exactly as discoverable as the console log path,
+    # not something only visible buried in the final "Done: {...}" summary.
+    print(
+        f"[HISTORICAL-DIAGNOSIS-BACKFILL] Manifest for this run: "
+        f"{_unique_patients_summary_path(args)}",
+        flush=True,
+    )
+
     # Discovery itself requires a real PF session (the patient list can only
     # come from PF's own Schedule), so -- unlike reprocess-queue mode --
     # --plan-only still logs in here; it just stops before opening any chart
@@ -637,107 +730,138 @@ def run_unique_patients(args: argparse.Namespace) -> dict:
 
     def callback(page):
         all_records, never_seen = discover_unique_patients_from_schedule(page, args, config)
+        seen_records = [r for r in all_records if r.status_reason != NOT_SEEN_STATUS_REASON]
+        not_seen_records = [r for r in all_records if r.status_reason == NOT_SEEN_STATUS_REASON]
 
+        print(
+            f"[HISTORICAL-DIAGNOSIS-BACKFILL] {len(all_records)} unique patient(s) total between "
+            f"{args.start_date} and {args.end_date} -- {len(seen_records)} Seen, "
+            f"{len(not_seen_records)} not Seen.",
+            flush=True,
+        )
+
+        # Seed EVERY discovered patient into the summary right away, never
+        # overwriting an existing entry -- so the file always reflects the
+        # full July-September population (with its seen/not-seen split) even
+        # for patients this particular run's mode won't attempt at all.
         if args.only_not_seen:
-            before = len(all_records)
-            all_records = [
-                r for r in all_records
-                if r.status_reason == "unique_patient_historical_diagnosis_pull_not_seen"
-            ]
-            print(
-                f"[HISTORICAL-DIAGNOSIS-BACKFILL] --only-not-seen: excluded {before - len(all_records)} "
-                f"Seen patient(s), keeping {len(all_records)} not-seen patient(s).",
-                flush=True,
+            to_consider = not_seen_records
+        elif args.include_not_seen:
+            to_consider = all_records
+        else:
+            to_consider = seen_records
+        to_consider_guids = {r.ehr_patient_guid for r in to_consider}
+        _apply_patient_updates(
+            args, never_seen,
+            [
+                _pending_entry(r, in_scope=r.ehr_patient_guid in to_consider_guids)
+                for r in all_records
+            ],
+            overwrite=False,
+        )
+
+        # Check the RCM DB before ever touching PF: a patient whose
+        # historical_diagnosis is already on file needs neither a chart
+        # opened nor a backend call this run. One batched query for the
+        # whole population, not one per patient.
+        if not args.redo and not args.skip_db_check:
+            already_in_db = _fetch_existing_historical_diagnosis(
+                [r.ehr_patient_guid for r in to_consider]
             )
+            if already_in_db:
+                print(
+                    f"[HISTORICAL-DIAGNOSIS-BACKFILL] {len(already_in_db)} patient(s) already have "
+                    f"historical_diagnosis on file in the DB -- skipping the PF pull for them "
+                    f"(pass --skip-db-check or --redo to force a real pull anyway).",
+                    flush=True,
+                )
+                _apply_patient_updates(
+                    args, never_seen,
+                    [
+                        _already_in_db_entry(r, already_in_db[r.ehr_patient_guid])
+                        for r in to_consider if r.ehr_patient_guid in already_in_db
+                    ],
+                )
+                to_consider = [r for r in to_consider if r.ehr_patient_guid not in already_in_db]
 
         if not args.patient_guid and not args.redo:
-            done_guids = _completed_guids(args)
-            if done_guids:
-                before = len(all_records)
-                all_records = [r for r in all_records if r.ehr_patient_guid not in done_guids]
+            done_records = _completed_records(args)
+            if done_records:
+                carried = [r for r in to_consider if r.ehr_patient_guid in done_records]
+                to_consider = [r for r in to_consider if r.ehr_patient_guid not in done_records]
                 print(
-                    f"[HISTORICAL-DIAGNOSIS-BACKFILL] {before - len(all_records)} patient(s) already "
+                    f"[HISTORICAL-DIAGNOSIS-BACKFILL] {len(carried)} patient(s) already "
                     f"delivered successfully in a prior run -- auto-skipped (pass --redo to reprocess "
                     f"them anyway).",
                     flush=True,
                 )
+                if carried:
+                    # Carry the real prior result into THIS file too -- see
+                    # _completed_records' docstring for why skipping alone
+                    # (without this) left a permanently wrong "pending"
+                    # placeholder behind for every patient resolved this way.
+                    _apply_patient_updates(
+                        args, never_seen,
+                        [
+                            _carry_forward_entry(r, done_records[r.ehr_patient_guid])
+                            for r in carried
+                        ],
+                    )
 
-        batch = all_records[args.skip :]
+        batch = to_consider[args.skip :]
         if args.limit > 0:
             batch = batch[: args.limit]
 
         print(
-            f"[HISTORICAL-DIAGNOSIS-BACKFILL] {len(all_records)} unique patient(s) total with a "
-            f"Seen appointment between {args.start_date} and {args.end_date} "
-            f"({len(never_seen)} other patient(s) seen on the Schedule but never marked Seen); "
+            f"[HISTORICAL-DIAGNOSIS-BACKFILL] {len(to_consider)} patient(s) eligible for this run's mode; "
             f"this batch: {len(batch)} (skip={args.skip}, limit={args.limit or 'none'}).",
             flush=True,
         )
         for record in batch:
+            tag = " (not seen -- forced attempt)" if record.status_reason == NOT_SEEN_STATUS_REASON else ""
             print(
                 f"  - {record.patient_name} | representative visit {record.appointment_date} "
-                f"| {record.ehr_patient_guid}",
+                f"| {record.ehr_patient_guid}{tag}",
                 flush=True,
             )
-        if never_seen:
-            print("  Not Seen in range (skipped):", flush=True)
-            for line in never_seen:
-                print(f"    - {line}", flush=True)
-
-        # Seed every patient in THIS batch as "pending" before processing
-        # starts, then overwrite each one's outcome as it completes (merged
-        # into the same file across batches, keyed by ehr_patient_guid) --
-        # so even a crash before the first patient finishes still leaves a
-        # readable record of what this batch was supposed to cover.
-        _merge_unique_patients_summary(
-            args,
-            never_seen,
-            [
-                {
-                    "patient_name": r.patient_name,
-                    "ehr_patient_guid": r.ehr_patient_guid,
-                    "representative_appointment_date": r.appointment_date,
-                    "outcome": "pending",
-                }
-                for r in batch
-            ],
-        )
 
         if args.plan_only or not batch:
-            result.update({"unique_patient_count": len(all_records), "batch_size": len(batch), "plan_only": args.plan_only})
+            totals = _apply_patient_updates(args, never_seen, [], overwrite=False)
+            result.update({
+                "batch_size": len(batch), "plan_only": args.plan_only, "totals": totals,
+                "summary_path": str(_unique_patients_summary_path(args)),
+            })
             return result
 
-        counts: dict = {"unique_patient_count": len(all_records), "batch_size": len(batch)}
+        # Mark this batch "pending" right before working through it.
+        _apply_patient_updates(args, never_seen, [_pending_entry(r, in_scope=True) for r in batch])
+
+        counts: dict = {"batch_size": len(batch)}
+        totals: dict = {}
         for index, record in enumerate(batch, start=1):
-            forced = record.status_reason == "unique_patient_historical_diagnosis_pull_not_seen"
+            forced = record.status_reason == NOT_SEEN_STATUS_REASON
             print(
                 f"[{index}/{len(batch)}] {record.patient_name} | "
                 f"{record.appointment_date} | {record.ehr_patient_guid}"
                 f"{' (not seen -- forced attempt)' if forced else ''}",
                 flush=True,
             )
-            outcome = process_candidate(page, record, config, args, session, force_process=forced)
+            outcome, backend_response = process_candidate(
+                page, record, config, args, session, force_process=forced
+            )
             counts[outcome] = counts.get(outcome, 0) + 1
             # Write after EVERY patient, not just at the end -- a crash
             # partway through this batch then only ever costs the one
             # in-flight patient, not the whole batch.
-            _merge_unique_patients_summary(
-                args,
-                never_seen,
-                [
-                    {
-                        "patient_name": record.patient_name,
-                        "ehr_patient_guid": record.ehr_patient_guid,
-                        "representative_appointment_date": record.appointment_date,
-                        "outcome": outcome,
-                    }
-                ],
+            totals = _apply_patient_updates(
+                args, never_seen, [_patient_entry(record, outcome, backend_response)]
             )
             # No save_row here: these are synthetic, one-per-patient records
             # that don't belong in the visit-level queue (see module
             # docstring) -- the JSON summary file is their only record.
 
         result.update(counts)
+        result["totals"] = totals
         result["summary_path"] = str(_unique_patients_summary_path(args))
         return result
 
@@ -748,15 +872,21 @@ def _unique_patients_summary_path(args: argparse.Namespace) -> Path:
     return Path(args.downloads_dir) / f"unique_patients_{args.start_date}_to_{args.end_date}.json"
 
 
-def _completed_guids(args: argparse.Namespace) -> set:
-    """GUIDs already marked "sent_to_backend" in ANY unique_patients_*.json
-    summary file under --downloads-dir -- the only outcome that means a
-    facesheet genuinely reached the backend. Everything else ("pending",
-    "failed", "review", "needs_attention", "backend_failed",
-    "reprinted_only", "reprinted_dry_run", "ignored") stays eligible for a
-    future run: those either never finished or were deliberately
-    non-delivering runs (--dry-run/--no-backend-call), not a real
-    completion.
+def _completed_records(args: argparse.Namespace) -> dict:
+    """The FULL prior patient entry (not just the GUID) for every GUID
+    already marked "special_run_updated" or "already_in_db" in ANY
+    unique_patients_*.json summary file under --downloads-dir -- those are
+    the only two outcomes that mean historical_diagnosis was actually saved.
+    Everything else ("pending", "not_processed_this_run", "failed",
+    "review", "needs_attention", "backend_failed", "reprinted_only",
+    "reprinted_dry_run", "ignored", and every "skipped_<reason>" a declined
+    backend response produces) stays eligible for a future run -- including
+    a plain rerun with no special flags, since none of those count as done
+    here. Confirmed live 2026-09-22: storing every delivered-but-declined
+    response under one generic "sent_to_backend" outcome made this function
+    treat a real save and a permanent decline as equally "complete", so
+    230+ declined/unconfirmed patients were never retried and nobody
+    noticed until the backend detail was actually inspected.
 
     Pools across EVERY summary file, not just the one matching this run's
     exact --start-date/--end-date -- confirmed live 2026-09-21: July and
@@ -768,8 +898,17 @@ def _completed_guids(args: argparse.Namespace) -> set:
     reprocessed all ~780 already-delivered patients from scratch before
     anyone noticed. A patient delivered under any date range must stay
     skipped regardless of what range a later call happens to use.
+
+    Returning the full entry (not just a membership set) lets the caller
+    carry the real prior result into THIS run's own summary file too --
+    confirmed live 2026-09-22: returning only a set correctly skipped
+    reprocessing these patients, but left them stuck at "pending" in this
+    file forever (never updated to reflect that they're actually done),
+    so this file's own "not_yet_attempted" total stayed permanently wrong
+    for every patient resolved this way, even though nothing was actually
+    left to do for them.
     """
-    completed: set = set()
+    completed: dict = {}
     downloads_dir = Path(args.downloads_dir)
     if not downloads_dir.is_dir():
         return completed
@@ -778,48 +917,237 @@ def _completed_guids(args: argparse.Namespace) -> set:
             data = json.loads(path.read_text(encoding="utf-8"))
         except Exception:
             continue
-        completed.update(
-            p["ehr_patient_guid"]
-            for p in data.get("patients", [])
-            if p.get("outcome") == "sent_to_backend" and p.get("ehr_patient_guid")
-        )
+        for p in data.get("patients", []):
+            guid = p.get("ehr_patient_guid")
+            if guid and p.get("outcome") in ("special_run_updated", "already_in_db"):
+                completed.setdefault(guid, p)
     return completed
 
 
-def _merge_unique_patients_summary(args: argparse.Namespace, never_seen: list, patient_updates: list) -> None:
-    """Merge `patient_updates` into the on-disk summary, keyed by
-    ehr_patient_guid, and rewrite it. Same "converge on one file no matter
-    how many calls it takes" pattern pdf_pipeline.write_appointments_
-    metadata_json uses for its manifest_run_id merging -- lets multiple
-    --skip/--limit batches (or a resumed run after a crash) accumulate into
-    one summary instead of each batch producing its own fragment.
+def _fetch_existing_historical_diagnosis(guids: list) -> dict:
+    """Batched pre-check against the RCM database's own EDI_Tebra.patient_header
+    table (same RCM_DB_* credentials pf_sync_pkg/store.py uses for the queue
+    tables, connected with the same connect_timeout/statement_timeout guard --
+    see that module's _connect docstring for why an unbounded connection to
+    this shared Azure Postgres instance is dangerous). One row per Practice
+    Fusion patient already has historical_diagnosis written by an earlier
+    successful special run: source='practice_fusion', source_id=<the same
+    ehr_patient_guid this script already uses> -- confirmed live against real
+    patientHeaderId values from prior 'special_run_updated' backend
+    responses (Adam Guzman/Adam Sigle, 2026-09-22).
+
+    Runs ONE query for the whole discovered population, not one per patient --
+    this is meant to replace hundreds of PF chart-opens with a single cheap
+    lookup, not add hundreds of small ones.
+
+    Returns {guid: {"patient_header_id": ..., "historical_diagnosis_count": N}}
+    for only the GUIDs that already have a non-empty historical_diagnosis; a
+    GUID missing from the result still needs a real PF pull. Any DB error
+    (network hiccup, credentials, schema drift) is swallowed and treated as
+    "unknown" -- the safe default is falling through to a real PF pull for
+    everyone, never silently skipping someone we couldn't actually confirm.
+    """
+    if not guids:
+        return {}
+    try:
+        import psycopg2
+
+        conn = psycopg2.connect(
+            host=os.environ.get("RCM_DB_HOST", "").strip(),
+            dbname=os.environ.get("RCM_DB_NAME", "").strip(),
+            user=os.environ.get("RCM_DB_USER", "").strip(),
+            password=os.environ.get("RCM_DB_PASSWORD", "").strip(),
+            sslmode="require",
+            connect_timeout=10,
+            options="-c statement_timeout=20000",
+        )
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT TRIM(source_id) AS guid, patient_header_id,
+                           jsonb_array_length(historical_diagnosis) AS diag_count
+                    FROM "EDI_Tebra".patient_header
+                    WHERE source = 'practice_fusion'
+                      AND TRIM(source_id) = ANY(%s)
+                      AND historical_diagnosis IS NOT NULL
+                      AND jsonb_array_length(historical_diagnosis) > 0
+                    """,
+                    (list(guids),),
+                )
+                rows = cur.fetchall()
+        finally:
+            conn.close()
+    except Exception as exc:
+        print(
+            f"[HISTORICAL-DIAGNOSIS-BACKFILL] DB pre-check failed ({exc}) -- "
+            f"falling back to a real PF pull for everyone this run.",
+            flush=True,
+        )
+        return {}
+
+    return {
+        guid: {"patient_header_id": str(patient_header_id), "historical_diagnosis_count": diag_count}
+        for guid, patient_header_id, diag_count in rows
+    }
+
+
+def _pending_entry(record, in_scope: bool) -> dict:
+    """Placeholder patient entry: known to exist, not yet (re)attempted this
+    run. in_scope=False marks a patient this run's --mode/--only-not-seen/
+    --include-not-seen selection doesn't even consider (e.g. a Seen patient
+    during an --only-not-seen run) -- distinct from "pending" (queued, just
+    not gotten to yet) so the report can tell "haven't tried" apart from
+    "this run was never going to try". Both are overwrite=False seeds: never
+    clobbers an existing (possibly already-successful) entry for that GUID.
+    """
+    return {
+        "patient_name": record.patient_name,
+        "ehr_patient_guid": record.ehr_patient_guid,
+        "representative_appointment_date": record.appointment_date,
+        "seen": record.status_reason != NOT_SEEN_STATUS_REASON,
+        "outcome": "pending" if in_scope else "not_processed_this_run",
+        "success": None,
+        "backend_status": None,
+        "backend_reason": None,
+        "historical_diagnoses_saved": None,
+        "visits_updated": None,
+        "entries_refreshed": None,
+        "backend_log_file": None,
+        "error_message": "",
+    }
+
+
+def _compute_success(outcome: str) -> "bool | None":
+    """None = not a real attempt yet (pending/not attempted/deliberately
+    non-delivering test run) -- neither success nor failure. True only for
+    "special_run_updated" (the backend actually saved historicalDiagnoses)
+    or "already_in_db" (the DB pre-check already found data on file, no PF
+    pull or backend call needed). Everything else -- including every
+    "skipped_<reason>" outcome derive_outcome_from_backend_status produces
+    for a delivered-but-declined response -- is a real failure for this
+    report's purposes, even though our own POST succeeded.
+    """
+    if outcome in ("pending", "not_processed_this_run", "reprinted_only", "reprinted_dry_run"):
+        return None
+    return outcome in ("already_in_db", "special_run_updated")
+
+
+def _already_in_db_entry(record, db_info: dict) -> dict:
+    """Real, final result for a patient the DB pre-check found already has
+    historical_diagnosis on file -- no PF chart was opened and no backend
+    call was made this run, so backend_status is 'already_in_db' (not one of
+    the real API's own status values) to make that visible in the report.
+    """
+    entry = _pending_entry(record, in_scope=True)
+    entry["outcome"] = "already_in_db"
+    entry["backend_status"] = "already_in_db"
+    entry["historical_diagnoses_saved"] = db_info.get("historical_diagnosis_count")
+    entry["error_message"] = (
+        f"Skipped PF pull -- historical_diagnosis already on file "
+        f"(patient_header_id={db_info.get('patient_header_id')})."
+    )
+    entry["success"] = True
+    return entry
+
+
+def _carry_forward_entry(record, prior: dict) -> dict:
+    """Reuse a prior run's real result for this GUID found in a DIFFERENT
+    summary file (via _completed_records) inside THIS file too -- keeps
+    THIS run's own identity/date fields (representative_appointment_date
+    can legitimately differ file to file; historical_diagnosis is
+    patient-level, not tied to which visit anchored the pull) but copies
+    every outcome-related field across so this file's own totals reflect
+    reality instead of leaving a phantom "pending" placeholder for a
+    patient who's actually already done.
+    """
+    entry = _pending_entry(record, in_scope=True)
+    for key in (
+        "outcome", "success", "backend_status", "backend_reason",
+        "historical_diagnoses_saved", "visits_updated", "entries_refreshed",
+        "backend_log_file", "error_message",
+    ):
+        entry[key] = prior.get(key)
+    return entry
+
+
+def _patient_entry(record, outcome: str, backend_response) -> dict:
+    """Real per-patient result after process_candidate runs: our own outcome
+    plus, when the backend was actually reached, its full response detail --
+    see runPfFacesheetSpecialHistoricalDiagnosisRun's return shape
+    (status/reason/historicalDiagnosesSaved/visitsUpdated/entriesRefreshed/
+    logFile).
+    """
+    entry = _pending_entry(record, in_scope=True)
+    entry["outcome"] = outcome
+    entry["error_message"] = record.error_message or ""
+    if backend_response:
+        entry["backend_status"] = backend_response.get("status")
+        entry["backend_reason"] = backend_response.get("reason")
+        entry["historical_diagnoses_saved"] = backend_response.get("historicalDiagnosesSaved")
+        entry["visits_updated"] = backend_response.get("visitsUpdated")
+        entry["entries_refreshed"] = backend_response.get("entriesRefreshed")
+        entry["backend_log_file"] = backend_response.get("logFile")
+    entry["success"] = _compute_success(outcome)
+    return entry
+
+
+def _compute_totals(patients: list) -> dict:
+    return {
+        "total_patients": len(patients),
+        "seen": sum(1 for p in patients if p.get("seen")),
+        "not_seen": sum(1 for p in patients if not p.get("seen")),
+        "success": sum(1 for p in patients if p.get("success") is True),
+        "failure": sum(1 for p in patients if p.get("success") is False),
+        "not_yet_attempted": sum(1 for p in patients if p.get("success") is None),
+    }
+
+
+def _apply_patient_updates(
+    args: argparse.Namespace, never_seen: list, patient_updates: list, overwrite: bool = True
+) -> dict:
+    """Read-modify-write the summary file and return the freshly recomputed
+    totals. Same "converge on one file no matter how many calls it takes"
+    pattern pdf_pipeline.write_appointments_metadata_json uses for its
+    manifest_run_id merging -- lets multiple --skip/--limit batches (or a
+    resumed run after a crash) accumulate into one summary instead of each
+    batch producing its own fragment.
+
+    overwrite=True (the normal per-patient-result path): a fresher entry for
+    a GUID always replaces the old one. overwrite=False (used once per run
+    to seed the full discovered population): only inserts entries for GUIDs
+    not already present, so seeding never clobbers an existing, possibly
+    already-successful result.
     """
     destination = _unique_patients_summary_path(args)
     destination.parent.mkdir(parents=True, exist_ok=True)
 
+    existing: dict = {}
     if destination.exists():
         try:
             existing = json.loads(destination.read_text(encoding="utf-8"))
         except Exception:
             existing = {}
-    else:
-        existing = {}
 
     by_guid = {p["ehr_patient_guid"]: p for p in existing.get("patients", []) if p.get("ehr_patient_guid")}
     for update in patient_updates:
-        by_guid[update["ehr_patient_guid"]] = update
+        guid = update["ehr_patient_guid"]
+        if overwrite or guid not in by_guid:
+            by_guid[guid] = update
 
     patients = sorted(by_guid.values(), key=lambda p: p.get("patient_name") or "")
+    totals = _compute_totals(patients)
     summary = {
         "start_date": args.start_date,
         "end_date": args.end_date,
-        "unique_patient_count": len(patients),
+        "totals": totals,
         "patients": patients,
         # Overwritten with whatever the most recent discovery call found --
         # informational only, not merged (discovery itself isn't batched).
         "not_seen_in_range": never_seen if never_seen else existing.get("not_seen_in_range", []),
     }
     destination.write_text(json.dumps(summary, indent=2, ensure_ascii=False), encoding="utf-8")
+    return totals
 
 
 def run(args: argparse.Namespace) -> dict:
