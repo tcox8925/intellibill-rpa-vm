@@ -307,26 +307,26 @@ def process_one_record(
         if config.insurance_section_data_element in "".join(record.selected_sections)
         else ""
     )
-    # skip_note_selection (historical_diagnosis_backfill.py's special run) does
-    # NOT mean "select zero notes" -- confirmed live: clearing every note left
-    # Practice Fusion's own print mechanism with nothing to print at all
-    # (TimeoutError: "Printable chart preview did not appear", well before
-    # generate_pdf's own document-content check ever runs). PF's Print Chart
-    # flow apparently requires a note to be selected for the print action to
-    # fire in the first place, Facesheet sections alone are not enough. So a
-    # note still gets selected exactly as every other command does (via the
-    # existing fallback logic) -- skip_note_selection only relaxes what
-    # generate_pdf's content validation REQUIRES to appear (see notes_expected
-    # below): not demanding this record's own SOAP-note markers/date fixes the
-    # real bug (a fallback note dated earlier than record.appointment_date
-    # could never satisfy that date check), without touching PF's actual
-    # click-through flow. Whatever note rides along in the final PDF is
-    # harmless here -- the backend's diagnosis extraction reads the Diagnoses
-    # section, not the note text.
-    notes_mode, record.selected_soap_note_text = select_notes_for_record(
-        page, config, record, all_rows, allow_most_recent_note_fallback
-    )
-    record.notes_selection_mode = notes_mode
+    if skip_note_selection:
+        # historical_diagnosis_backfill.py's special run: click straight
+        # through to Print with whatever the Notes panel's own default state
+        # already is -- never opens that dropdown, never selects a specific
+        # note, never clears it. Demographics/Insurance/Diagnoses (already
+        # checked above) are all this run needs; requiring/selecting a
+        # date-matched SOAP note is unnecessary for it. NOTE: an earlier
+        # attempt at this explicitly cleared every note first
+        # (chart_ui.clear_all_notes) and that broke PF's print mechanism
+        # entirely (TimeoutError: "Printable chart preview did not appear") --
+        # leaving the panel untouched is different from forcing it empty and
+        # is what's actually being used here.
+        record.notes_selection_mode = "untouched"
+        record.selected_soap_note_text = ""
+        record.soap_note_match_mode = ""
+    else:
+        notes_mode, record.selected_soap_note_text = select_notes_for_record(
+            page, config, record, all_rows, allow_most_recent_note_fallback
+        )
+        record.notes_selection_mode = notes_mode
     record.pdf_path = generate_pdf(
         page, config, record, downloads_dir, dry_run, notes_expected=not skip_note_selection
     )
