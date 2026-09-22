@@ -190,6 +190,151 @@ class ExistingActiveRowTests(unittest.TestCase):
         self.assertTrue(reactivate_row["active"])
 
 
+class PreExistingCrossTypeDuplicateCleanupTests(unittest.TestCase):
+    """Both type slots ALREADY hold the exact same carrier+subscriber active
+    at once (bad data from before this fix existed - a pre-existing
+    duplicate, not something this run's incoming data caused). Since the
+    incoming record matches its OWN type's row immediately (ACTION_UPDATE or
+    a same-type reactivate), find_cross_type_active_match would otherwise
+    never run at all - this is the gap flagged after CrossTypeRankChangeTests
+    shipped: those tests only cover a duplicate created going FORWARD, not
+    one already sitting there. process_coverage must also clean this up when
+    it notices, not just avoid creating new ones."""
+
+    def setUp(self):
+        self.header = FakeHeader("55555555-5555-5555-5555-555555555555", "P5")
+        # Aetna/POL1 already active under BOTH Primary and Secondary at once.
+        self.active_coverage_map = {
+            (self.header.patient_header_id, "P"): {
+                "id": 100, "patient_header_id": self.header.patient_header_id, "cov_type": "P",
+                "cov_car_id": None, "cov_car_nam": "Aetna", "cov_sub_id": "POL1",
+                "effective_start_date": "2025-01-01", "effective_end_date": None,
+            },
+            (self.header.patient_header_id, "S"): {
+                "id": 300, "patient_header_id": self.header.patient_header_id, "cov_type": "S",
+                "cov_car_id": None, "cov_car_nam": "Aetna", "cov_sub_id": "POL1",
+                "effective_start_date": "2025-01-01", "effective_end_date": None,
+            },
+        }
+        self.inactive_candidates = {}
+        self.insert_payload = []
+        self.update_payload = []
+
+    def test_update_of_matching_own_type_also_closes_the_other_type_s_duplicate(self):
+        # Incoming Primary matches the existing Primary row exactly ->
+        # ACTION_UPDATE for id=100 - but the identical Aetna/POL1 sitting
+        # active under Secondary (id=300) is the same real coverage and
+        # must be closed too, not left duplicated forever.
+        msg = process_coverage(
+            make_patient("P5", "Aetna", "POL1"), self.header, "P", "Primary",
+            [], self.active_coverage_map, self.inactive_candidates, self.insert_payload, self.update_payload,
+        )
+        self.assertIn("Updated", msg)
+        self.assertIn("duplicate", msg)
+        self.assertEqual(self.insert_payload, [])
+        ids = {row["id"] for row in self.update_payload}
+        self.assertIn(300, ids)
+        duplicate_row = next(r for r in self.update_payload if r["id"] == 300)
+        self.assertFalse(duplicate_row["active"])
+        # id=100 itself was refreshed too (ACTION_UPDATE's own write).
+        self.assertIn(100, ids)
+        self.assertNotIn((self.header.patient_header_id, "S"), self.active_coverage_map)
+
+
+class CrossTypeRankChangeTests(unittest.TestCase):
+    """The same real policy (same carrier + subscriber) reported under a
+    DIFFERENT cov_type slot than where it's currently active - e.g. a payer
+    that was Secondary last run is now reported as Primary this run. Ported
+    from Practice Fusion's cross-type identity matching (see
+    coverageRuleHelper.ts's decidePfFacesheetCoveragePlan) - without it,
+    the old-type row would stay active forever (nothing in this sync
+    revisits a type slot once it stops getting matching incoming data for
+    that exact slot) while a second, brand-new active row gets inserted
+    under the new type - the same policy counted twice."""
+
+    def setUp(self):
+        self.header = FakeHeader("44444444-4444-4444-4444-444444444444", "P4")
+        # An active Secondary Aetna/POL1 row already in the DB.
+        self.active_coverage_map = {
+            (self.header.patient_header_id, "S"): {
+                "id": 300, "patient_header_id": self.header.patient_header_id, "cov_type": "S",
+                "cov_car_id": None, "cov_car_nam": "Aetna", "cov_sub_id": "POL1",
+                "effective_start_date": "2025-01-01", "effective_end_date": None,
+            }
+        }
+        self.inactive_candidates = {}
+        self.insert_payload = []
+        self.update_payload = []
+
+    def _run_primary(self, company_name, policy_number):
+        return process_coverage(
+            make_patient("P4", company_name, policy_number), self.header, "P", "Primary",
+            [], self.active_coverage_map, self.inactive_candidates, self.insert_payload, self.update_payload,
+        )
+
+    def test_same_carrier_and_subscriber_under_new_type_terminates_old_type_row(self):
+        # Aetna/POL1 now comes in as Primary - the old active Secondary
+        # Aetna/POL1 row is the same policy moving rank, not a separate
+        # coverage, so it gets terminated (never left active alongside the
+        # new Primary row).
+        msg = self._run_primary("Aetna", "POL1")
+        self.assertIn("Inserted", msg)
+        self.assertEqual(len(self.insert_payload), 1)
+        self.assertEqual(self.insert_payload[0]["cov_type"], "P")
+        self.assertTrue(self.insert_payload[0]["active"])
+        # The old Secondary row was terminated (not deleted, not left active).
+        self.assertEqual(len(self.update_payload), 1)
+        self.assertEqual(self.update_payload[0]["id"], 300)
+        self.assertFalse(self.update_payload[0]["active"])
+        self.assertIsNotNone(self.update_payload[0]["effective_end_date"])
+        # The map no longer thinks a Secondary row is active for this patient.
+        self.assertNotIn((self.header.patient_header_id, "S"), self.active_coverage_map)
+
+    def test_different_carrier_under_new_type_does_not_touch_unrelated_row(self):
+        # A genuinely different Primary policy - the unrelated active
+        # Secondary Aetna row must be left untouched.
+        msg = self._run_primary("Cigna", "POL9")
+        self.assertIn("Inserted", msg)
+        self.assertEqual(len(self.insert_payload), 1)
+        self.assertEqual(self.update_payload, [])  # Secondary row untouched
+        self.assertIn((self.header.patient_header_id, "S"), self.active_coverage_map)
+
+    def test_same_carrier_but_different_subscriber_under_new_type_does_not_touch_unrelated_row(self):
+        # SAME payer (Aetna) but a DIFFERENT subscriber id - a genuinely
+        # separate plan under the same carrier (e.g. two different real
+        # policies, or two family members each with their own Aetna plan),
+        # not the same policy moving rank. The cross-type match requires
+        # BOTH carrier AND subscriber id to match - carrier alone is never
+        # enough - so the existing Secondary Aetna/POL1 row must be left
+        # completely untouched here.
+        msg = self._run_primary("Aetna", "DIFFERENT-SUBID")
+        self.assertIn("Inserted", msg)
+        self.assertEqual(len(self.insert_payload), 1)
+        self.assertEqual(self.insert_payload[0]["cov_sub_id"], "DIFFERENT-SUBID")
+        self.assertEqual(self.update_payload, [])  # Secondary Aetna/POL1 row untouched
+        self.assertIn((self.header.patient_header_id, "S"), self.active_coverage_map)
+        self.assertEqual(self.active_coverage_map[(self.header.patient_header_id, "S")]["id"], 300)
+
+    def test_rank_change_also_terminates_own_type_s_conflicting_active_row(self):
+        # Primary already has its OWN active row (a different carrier) at
+        # the same time the real rank-change candidate sits active under
+        # Secondary - both get terminated, and the new Primary row is
+        # inserted as the sole active Primary row.
+        self.active_coverage_map[(self.header.patient_header_id, "P")] = {
+            "id": 301, "patient_header_id": self.header.patient_header_id, "cov_type": "P",
+            "cov_car_id": None, "cov_car_nam": "BCBS", "cov_sub_id": "OLDPRIMARY",
+            "effective_start_date": "2024-01-01", "effective_end_date": None,
+        }
+        msg = self._run_primary("Aetna", "POL1")
+        self.assertIn("terminated", msg)
+        self.assertEqual(len(self.insert_payload), 1)
+        self.assertEqual(self.insert_payload[0]["cov_type"], "P")
+        terminated_ids = {row["id"] for row in self.update_payload}
+        self.assertEqual(terminated_ids, {300, 301})
+        for row in self.update_payload:
+            self.assertFalse(row["active"])
+
+
 class SameBatchDuplicatePatientTests(unittest.TestCase):
     """The source file lists the same patient/coverage type twice in one
     run. active_coverage_map's entry for the first occurrence is still
