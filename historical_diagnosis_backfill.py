@@ -42,7 +42,26 @@
 #   python historical_diagnosis_backfill.py --mode unique-patients \
 #       --start-date 2026-06-02 --end-date 2026-09-16
 #
+#   # 4. Cover everyone else too (Cancelled/No-show/Rescheduled/etc --
+#   #    normally skipped), IN ADDITION TO the normal Seen patients:
+#   python historical_diagnosis_backfill.py --mode unique-patients \
+#       --start-date 2026-06-02 --end-date 2026-09-16 --include-not-seen
+#
+#   # 5. Once the Seen patients for a range are already fully done, mop up
+#   #    ONLY the not-seen ones -- Seen patients are excluded from the batch
+#   #    entirely (not just auto-skipped-if-already-done):
+#   python historical_diagnosis_backfill.py --mode unique-patients \
+#       --start-date 2026-06-02 --end-date 2026-09-16 --only-not-seen
+#
 # Other useful flags (combine with any of the above):
+#   --include-not-seen / --only-not-seen (mutually exclusive)
+#                                  attempt patients with NO Seen visit in range
+#                                  (Cancelled/No-show/etc) using their latest visit
+#                                  overall -- some will still have a printable prior
+#                                  note (allow_most_recent_note_fallback), others
+#                                  honestly end up "review". --include-not-seen adds
+#                                  them alongside Seen patients; --only-not-seen
+#                                  excludes Seen patients from the batch entirely.
 #   --headless                    no visible Chrome window for this run (safe once
 #                                  your profile has already done PF's one-time OTP
 #                                  login headed; --headed forces a window back on)
@@ -262,6 +281,34 @@ def parse_args() -> argparse.Namespace:
             "sent_to_backend in the summary file (default: auto-skipped)."
         ),
     )
+    not_seen_group = parser.add_mutually_exclusive_group()
+    not_seen_group.add_argument(
+        "--include-not-seen",
+        action="store_true",
+        help=(
+            "unique-patients mode only: attempt patients who had NO Seen visit in "
+            "range (Cancelled/No-show/etc, normally reported in not_seen_in_range "
+            "and skipped) IN ADDITION TO the normal Seen patients. Uses their "
+            "latest visit overall as the chart-open anchor; process_one_record's "
+            "existing most-recent-note fallback still decides whether anything is "
+            "actually printable -- a patient with a genuinely empty chart correctly "
+            "ends up 'review', not a crash. Bypasses is_ignored for exactly these "
+            "records (their real appointment status is very likely in "
+            "DEFAULT_IGNORED_STATUSES, which would otherwise skip them before ever "
+            "opening the chart)."
+        ),
+    )
+    not_seen_group.add_argument(
+        "--only-not-seen",
+        action="store_true",
+        help=(
+            "unique-patients mode only: same not-seen handling as "
+            "--include-not-seen, but the batch is restricted to ONLY those "
+            "patients -- normal Seen patients are excluded entirely, even if "
+            "they haven't been delivered yet. Use once the Seen patients for a "
+            "range are already done and you just want to mop up the rest."
+        ),
+    )
     parser.add_argument(
         "--plan-only",
         action="store_true",
@@ -356,6 +403,14 @@ def discover_unique_patients_from_schedule(page, args: argparse.Namespace, confi
     scanned, not how many end up in the final batch -- run_unique_patients
     still applies the real skip/limit slice (and the completed-guid filter)
     to whatever this returns.
+
+    This early-stop is disabled entirely (full range always scanned) under
+    --only-not-seen: "never marked Seen" can only be confirmed once every
+    visit for that GUID in the whole range has been seen -- a patient with
+    a non-Seen visit on day 1 and a Seen one on day 50 would be
+    misclassified as not-seen if we stopped after day 1's count looked
+    sufficient. No such risk on the Seen side: one Seen visit anywhere
+    settles that GUID for good, regardless of what's scanned afterward.
     """
     from pf_sync_pkg import patient_scraper as ps
 
@@ -363,7 +418,7 @@ def discover_unique_patients_from_schedule(page, args: argparse.Namespace, confi
     end_date = parse_date(args.end_date)
     schedule_config = ScheduleScrapeConfig.load(args.schedule_config_json)
 
-    stop_after = (args.skip + args.limit) if args.limit > 0 else 0
+    stop_after = 0 if args.only_not_seen else ((args.skip + args.limit) if args.limit > 0 else 0)
     stop_when = None
     if stop_after > 0:
         def stop_when(results):  # noqa: F811
@@ -389,15 +444,28 @@ def discover_unique_patients_from_schedule(page, args: argparse.Namespace, confi
     never_seen: list = []
     for guid, visits in by_guid.items():
         seen_visits = [v for v in visits if is_seen_status(v.patient.appointment_status, config)]
-        if not seen_visits:
+        if seen_visits:
+            latest = max(seen_visits, key=lambda v: v.appointment_date)
+            not_seen = False
+        else:
             rp = visits[0].patient
             never_seen.append(
                 f"{rp.first_name} {rp.last_name} ({guid}) -- {len(visits)} visit(s) in range, "
                 f"none marked Seen"
             )
-            continue
+            if not (args.include_not_seen or args.only_not_seen):
+                continue
+            # No Seen visit anywhere in range -- fall back to this patient's
+            # latest visit overall (whatever its real status is: Cancelled,
+            # No-show, Confirmed, ...) as the chart-open anchor. There's
+            # often still a printable note here: process_one_record already
+            # runs with allow_most_recent_note_fallback=True, so a patient
+            # with ANY prior SOAP note gets it printed regardless of what
+            # this particular appointment's status was; one with truly none
+            # ends up "review", which is an honest result, not a bug.
+            latest = max(visits, key=lambda v: v.appointment_date)
+            not_seen = True
 
-        latest = max(seen_visits, key=lambda v: v.appointment_date)
         rp = latest.patient
         appt_date = latest.appointment_date.isoformat()
         if rp.appointment_start_time:
@@ -419,7 +487,17 @@ def discover_unique_patients_from_schedule(page, args: argparse.Namespace, confi
                 patient_match_status="matched",
                 patient_match_method="discovered_from_schedule",
                 status="ready",
-                status_reason="unique_patient_historical_diagnosis_pull",
+                # is_ignored(record, config) in process_candidate would
+                # otherwise skip these before ever opening the chart --
+                # Cancelled/No-show/Rescheduled are all in
+                # DEFAULT_IGNORED_STATUSES. This status_reason is how
+                # run_unique_patients's loop recognizes a forced pull and
+                # tells process_candidate to bypass that check for exactly
+                # (and only) these records.
+                status_reason=(
+                    "unique_patient_historical_diagnosis_pull_not_seen"
+                    if not_seen else "unique_patient_historical_diagnosis_pull"
+                ),
                 created_at=now_iso(),
                 updated_at=now_iso(),
             )
@@ -429,10 +507,19 @@ def discover_unique_patients_from_schedule(page, args: argparse.Namespace, confi
     return records, never_seen
 
 
-def process_candidate(page, record, config, args, session) -> str:
+def process_candidate(page, record, config, args, session, force_process: bool = False) -> str:
     """Reprint one chart and, unless disabled, deliver it straight to the
-    backend. Returns a short outcome label for the run summary."""
-    if is_ignored(record, config):
+    backend. Returns a short outcome label for the run summary.
+
+    force_process=True skips the is_ignored check -- used only for
+    --include-not-seen records (status_reason ends in "_not_seen"), whose
+    whole point is to attempt a chart despite a Cancelled/No-show/etc
+    status that DEFAULT_IGNORED_STATUSES would otherwise skip outright.
+    Identity resolution (patient_match_status/ehr_patient_guid) is still
+    required either way -- that's about whether we can open the right
+    chart at all, not about the appointment's status.
+    """
+    if not force_process and is_ignored(record, config):
         print("  ignored", flush=True)
         return "ignored"
     if record.patient_match_status != "matched" or not record.ehr_patient_guid:
@@ -452,6 +539,14 @@ def process_candidate(page, record, config, args, session) -> str:
             use_timeline_fallback=False,
             skip_encounter_lookup=True,
             allow_most_recent_note_fallback=True,
+            # This whole tool only cares about Demographics/Insurance/Diagnoses
+            # for historical-diagnosis extraction -- the SOAP note is never
+            # needed. Also sidesteps PRINT_DOCUMENT_NOT_FOUND false rejections
+            # on forced not-seen pulls, where the only available note (via the
+            # most-recent-on-or-before fallback) is dated earlier than this
+            # record's appointment_date and could never satisfy a note-aware
+            # print-document check anyway.
+            skip_note_selection=True,
         )
     except Exception as exc:
         state = handle_process_error(record, config, exc)
@@ -543,6 +638,18 @@ def run_unique_patients(args: argparse.Namespace) -> dict:
     def callback(page):
         all_records, never_seen = discover_unique_patients_from_schedule(page, args, config)
 
+        if args.only_not_seen:
+            before = len(all_records)
+            all_records = [
+                r for r in all_records
+                if r.status_reason == "unique_patient_historical_diagnosis_pull_not_seen"
+            ]
+            print(
+                f"[HISTORICAL-DIAGNOSIS-BACKFILL] --only-not-seen: excluded {before - len(all_records)} "
+                f"Seen patient(s), keeping {len(all_records)} not-seen patient(s).",
+                flush=True,
+            )
+
         if not args.patient_guid and not args.redo:
             done_guids = _completed_guids(args)
             if done_guids:
@@ -602,12 +709,14 @@ def run_unique_patients(args: argparse.Namespace) -> dict:
 
         counts: dict = {"unique_patient_count": len(all_records), "batch_size": len(batch)}
         for index, record in enumerate(batch, start=1):
+            forced = record.status_reason == "unique_patient_historical_diagnosis_pull_not_seen"
             print(
                 f"[{index}/{len(batch)}] {record.patient_name} | "
-                f"{record.appointment_date} | {record.ehr_patient_guid}",
+                f"{record.appointment_date} | {record.ehr_patient_guid}"
+                f"{' (not seen -- forced attempt)' if forced else ''}",
                 flush=True,
             )
-            outcome = process_candidate(page, record, config, args, session)
+            outcome = process_candidate(page, record, config, args, session, force_process=forced)
             counts[outcome] = counts.get(outcome, 0) + 1
             # Write after EVERY patient, not just at the end -- a crash
             # partway through this batch then only ever costs the one
@@ -640,26 +749,41 @@ def _unique_patients_summary_path(args: argparse.Namespace) -> Path:
 
 
 def _completed_guids(args: argparse.Namespace) -> set:
-    """GUIDs already marked "sent_to_backend" in the on-disk summary -- the
-    only outcome that means a facesheet genuinely reached the backend.
-    Everything else ("pending", "failed", "review", "needs_attention",
-    "backend_failed", "reprinted_only", "reprinted_dry_run", "ignored")
-    stays eligible for a future run: those either never finished or were
-    deliberately non-delivering runs (--dry-run/--no-backend-call), not a
-    real completion.
+    """GUIDs already marked "sent_to_backend" in ANY unique_patients_*.json
+    summary file under --downloads-dir -- the only outcome that means a
+    facesheet genuinely reached the backend. Everything else ("pending",
+    "failed", "review", "needs_attention", "backend_failed",
+    "reprinted_only", "reprinted_dry_run", "ignored") stays eligible for a
+    future run: those either never finished or were deliberately
+    non-delivering runs (--dry-run/--no-backend-call), not a real
+    completion.
+
+    Pools across EVERY summary file, not just the one matching this run's
+    exact --start-date/--end-date -- confirmed live 2026-09-21: July and
+    August were each already fully delivered under their own per-month
+    date ranges (unique_patients_2026-07-01_to_2026-07-31.json,
+    unique_patients_2026-08-01_to_2026-08-31.json), then a later run
+    spanning --start-date 2026-07-01 --end-date 2026-09-21 looked only for
+    a summary file named after THAT exact range, found none, and
+    reprocessed all ~780 already-delivered patients from scratch before
+    anyone noticed. A patient delivered under any date range must stay
+    skipped regardless of what range a later call happens to use.
     """
-    path = _unique_patients_summary_path(args)
-    if not path.exists():
-        return set()
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except Exception:
-        return set()
-    return {
-        p["ehr_patient_guid"]
-        for p in data.get("patients", [])
-        if p.get("outcome") == "sent_to_backend" and p.get("ehr_patient_guid")
-    }
+    completed: set = set()
+    downloads_dir = Path(args.downloads_dir)
+    if not downloads_dir.is_dir():
+        return completed
+    for path in downloads_dir.glob("unique_patients_*.json"):
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        completed.update(
+            p["ehr_patient_guid"]
+            for p in data.get("patients", [])
+            if p.get("outcome") == "sent_to_backend" and p.get("ehr_patient_guid")
+        )
+    return completed
 
 
 def _merge_unique_patients_summary(args: argparse.Namespace, never_seen: list, patient_updates: list) -> None:
