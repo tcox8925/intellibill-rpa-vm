@@ -38,11 +38,61 @@ from pydantic import BaseModel
 from ehr.pipeline import run
 from ehr.selector import WorkSelector
 from ehr.db import log_run_event, ensure_appointments_schema
-from ehr.config import ENTITY, SUB_ENTITY, EHR_NAME
+from ehr.config import EHR_NAME
 from ehr.patients import run_patient_insurance_rpa
 from ehr.session import normalize_practice_compare
 from ehr.pdf_processor import run_daily_pdf_processor
 from ehr.pf_facesheet_processor import run_daily_practice_fusion_pdf_processor
+
+try:
+    # Lives at the repo root, one level up -- only importable when this
+    # module is loaded as part of the combined server.py process (repo root
+    # is on sys.path there). Fall back to no-ops so this file still runs
+    # standalone (`python -m uvicorn server:app` from inside myops/), which
+    # has no "EDI_Tebra".cron_jobs row to look up / DB creds configured for
+    # anyway in a bare standalone run.
+    from cron_execution_log import start_execution, finish_execution, mark_processing
+except ImportError:
+    def start_execution(job_setting: str, response: dict | None = None) -> str:
+        return ""
+
+    def finish_execution(execution_id: str, success: bool, error_description: str | None = None, response: dict | None = None) -> None:
+        pass
+
+    def mark_processing(execution_id: str, response: dict | None = None) -> None:
+        pass
+
+
+def _summary_outcome(summary: dict) -> tuple[bool, str | None]:
+    """A pipeline summary can carry per-practice failures (summary['failed'])
+    without ever raising a Python exception -- run() catches those itself so
+    one bad practice doesn't take the rest of the batch down. Confirmed live
+    2026-09-17: that meant finish_execution(success=True) below fired
+    unconditionally whenever _execute_run() merely returned, so a row with
+    "failed": ["PrePostPlus Germantown"] in its own response still showed
+    status='success' in cron_job_executions -- there was no way to tell a
+    real failure from a clean run without opening the JSON response
+    yourself. Returns (success, error_description)."""
+    summary = summary or {}
+    failed = summary.get("failed") or []
+    if failed:
+        # run() already records *why* each practice failed in
+        # failed_details ({practice: repr(exception)}) -- surface that
+        # instead of just the bare list of names, so error_description
+        # actually tells you the reason without having to go dig through
+        # the JSON response separately.
+        failed_details = summary.get("failed_details") or {}
+        reasons = "; ".join(
+            f"{practice}: {failed_details[practice]}" if practice in failed_details else practice
+            for practice in failed
+        )
+        return False, reasons
+    return True, None
+
+# job_setting value for this job's row in "EDI_Tebra".cron_jobs (already
+# seeded manually) -- every /run-tebra call, across every practice, logs its
+# execution under this same cron_job_id.
+_TEBRA_FACESHEET_PULL_JOB_SETTING = "TEBRA_FACESHEET_PULL"
 
 log = logging.getLogger(__name__)
 
@@ -100,7 +150,15 @@ def _log_rpa_run(product_name, entity, sub_entity, start_dt, end_dt,
     )
 
 
-# ENTITY / SUB_ENTITY / EHR_NAME come from ehr.config (single source of truth).
+# entity/sub_entity are REQUIRED on every request below, no fallback default.
+# Confirmed live 2026-09-11: a silent `request.entity or ENTITY` fallback to
+# a hardcoded tenant is exactly how 1710 real ehr_patients rows ended up
+# permanently under the wrong, unused entity (270681372) while every
+# ehr_appointments row is under the real one (414584128) -- the caller that
+# never passed entity in its payload never got an error, it just silently
+# wrote to the wrong tenant. A required Pydantic field fails the request with
+# a 422 instead. EHR_NAME still defaults -- it's the EHR product, not tenant
+# identity, and this package only talks to Tebra today.
 MAX_DATE_RANGE_DAYS = 6  # 7 days inclusive
 _locks = {}
 _locks_guard = threading.Lock()
@@ -110,16 +168,16 @@ class TebraRequest(BaseModel):
     start_date: str
     end_date: str
     practice_name: str
+    entity: str
+    sub_entity: str
     folder_structure: str | None = None
     wait_for_completion: bool = True
-    entity: str | None = None
-    sub_entity: str | None = None
     ehr_name: str | None = None
 
 
 class DailyRequest(BaseModel):
-    entity: str | None = None
-    sub_entity: str | None = None
+    entity: str
+    sub_entity: str
     ehr_name: str | None = None
 
 
@@ -164,8 +222,8 @@ def run_tebra(request: TebraRequest):
     validate_dates(start_dt, end_dt)
 
     practice_name = _normalize_practice_name(request.practice_name)
-    entity = (request.entity or ENTITY).strip()
-    sub_entity = (request.sub_entity or SUB_ENTITY).strip()
+    entity = request.entity.strip()
+    sub_entity = request.sub_entity.strip()
     ehr_name = (request.ehr_name or EHR_NAME).strip()
 
     _slog(
@@ -175,23 +233,57 @@ def run_tebra(request: TebraRequest):
 
     lock = _acquire_key_lock(f"tebra::{entity}::{practice_name}")
 
+    _execution_response = {
+        "request_id": req_id,
+        "practice": practice_name,
+        "entity": entity,
+        "sub_entity": sub_entity,
+        "start_date": request.start_date,
+        "end_date": request.end_date,
+    }
+
     def _execute_run():
         _slog(f"run-tebra executing req_id={req_id}")
         sel = WorkSelector.backfill(
             start_date=start_dt.date(), end_date=end_dt.date(),
+            entity=entity, sub_entity=sub_entity, ehr_name=ehr_name,
             practice=practice_name,
             folder_structure=request.folder_structure,
         )
-        sel.entity, sel.sub_entity, sel.ehr_name = entity, sub_entity, ehr_name
         summary = run(sel, scrape_patients=False)
         _slog(f"run-tebra done req_id={req_id} summary={summary}")
         return summary
 
     def _runner():
+        # start_execution() (a Postgres round-trip) deliberately happens in
+        # here, not on the request thread before threading.Thread(...).start()
+        # below -- this whole background path only exists so the HTTP
+        # response can return the instant the run is accepted. A DB write
+        # before that point would put the exact same kind of open-ended wait
+        # back in front of the response that wait_for_completion=False was
+        # built to remove in the first place (confirmed 2026-09-17 on
+        # TebraPatientSyncJob's equivalent: a slow/unreachable DB hung
+        # start_execution() past the caller's 30s trigger timeout, looking
+        # identical to the original blocking-sync timeout bug, and logged
+        # nothing since the INSERT never got a chance to run).
+        execution_id = None
         try:
-            _execute_run()
+            execution_id = start_execution(_TEBRA_FACESHEET_PULL_JOB_SETTING, response=_execution_response)
+            if execution_id:
+                mark_processing(execution_id)
+        except Exception as e:
+            _slog(f"run-tebra req_id={req_id} failed to start execution logging: {e!r}")
+
+        try:
+            summary = _execute_run()
+            if execution_id:
+                success, error_description = _summary_outcome(summary)
+                finish_execution(execution_id, success=success, error_description=error_description,
+                                  response={"summary": summary})
         except Exception as e:
             _slog(f"run-tebra failed req_id={req_id} error={e!r}")
+            if execution_id:
+                finish_execution(execution_id, success=False, error_description=repr(e))
         finally:
             try:
                 lock.release()
@@ -203,8 +295,23 @@ def run_tebra(request: TebraRequest):
             )
 
     if request.wait_for_completion:
+        # This branch already blocks the caller for the run's full duration
+        # by design, so a synchronous start_execution() here doesn't
+        # reintroduce the bug above -- it's still guarded only so a DB
+        # hiccup can't take the actual scrape down with it.
+        execution_id = None
+        try:
+            execution_id = start_execution(_TEBRA_FACESHEET_PULL_JOB_SETTING, response=_execution_response)
+            if execution_id:
+                mark_processing(execution_id)
+        except Exception as e:
+            _slog(f"run-tebra req_id={req_id} failed to start execution logging: {e!r}")
         try:
             summary = _execute_run()
+            if execution_id:
+                success, error_description = _summary_outcome(summary)
+                finish_execution(execution_id, success=success, error_description=error_description,
+                                  response={"summary": summary})
             _slog(
                 f"run-tebra response completed req_id={req_id} "
                 f"elapsed={time.monotonic() - request_clock:.1f}s"
@@ -217,6 +324,10 @@ def run_tebra(request: TebraRequest):
                 "end_date": request.end_date,
                 "summary": summary,
             }
+        except Exception as e:
+            if execution_id:
+                finish_execution(execution_id, success=False, error_description=repr(e))
+            raise
         finally:
             try:
                 lock.release()
@@ -233,7 +344,7 @@ def run_tebra(request: TebraRequest):
             "practice": practice_name,
             "start_date": request.start_date,
             "end_date": request.end_date,
-            "message": "Run accepted and executing in background. Set wait_for_completion=true to wait for completion.",
+            "message": "Run accepted and executing in background. Logged to EDI_Tebra.cron_job_executions.",
         },
     )
 
@@ -254,10 +365,10 @@ RECHECK_MAX_DATE_RANGE_DAYS = 365
 class RecheckRequest(BaseModel):
     start_date: str
     end_date: str
+    entity: str
+    sub_entity: str
     practice_name: str | None = None  # None = every discovered practice
     wait_for_completion: bool = True
-    entity: str | None = None
-    sub_entity: str | None = None
     ehr_name: str | None = None
 
 
@@ -277,8 +388,8 @@ def run_tebra_recheck(request: RecheckRequest):
         )
 
     practice_name = _normalize_practice_name(request.practice_name) if request.practice_name else None
-    entity = (request.entity or ENTITY).strip()
-    sub_entity = (request.sub_entity or SUB_ENTITY).strip()
+    entity = request.entity.strip()
+    sub_entity = request.sub_entity.strip()
     ehr_name = (request.ehr_name or EHR_NAME).strip()
 
     _slog(
@@ -292,6 +403,7 @@ def run_tebra_recheck(request: RecheckRequest):
         _slog(f"run-tebra-recheck executing req_id={req_id}")
         sel = WorkSelector.backfill(
             start_date=start_dt.date(), end_date=end_dt.date(),
+            entity=entity, sub_entity=sub_entity, ehr_name=ehr_name,
             practice=practice_name,
             # True (default): re-pull facesheets for every signed row in this
             # window regardless of prior process_status -- already-Processed
@@ -300,7 +412,6 @@ def run_tebra_recheck(request: RecheckRequest):
             # window since the live appointment scrape is skipped here.
             ungated_repull=True,
         )
-        sel.entity, sel.sub_entity, sel.ehr_name = entity, sub_entity, ehr_name
         summary = run(sel, scrape_patients=False, skip_appointment_scrape=True)
         _slog(f"run-tebra-recheck done req_id={req_id} summary={summary}")
         return summary
@@ -358,8 +469,8 @@ def run_tebra_recheck(request: RecheckRequest):
 
 @app.post("/run-tebra-daily")
 def run_tebra_daily(request: DailyRequest):
-    entity = (request.entity or ENTITY).strip()
-    sub_entity = (request.sub_entity or SUB_ENTITY).strip()
+    entity = request.entity.strip()
+    sub_entity = request.sub_entity.strip()
     ehr_name = (request.ehr_name or EHR_NAME).strip()
 
     lock = _acquire_key_lock("__tebra_daily__")
@@ -368,8 +479,7 @@ def run_tebra_daily(request: DailyRequest):
         run_start = datetime.now(CST)
         summary, has_error, err = None, False, None
         try:
-            sel = WorkSelector.daily()
-            sel.entity, sel.sub_entity, sel.ehr_name = entity, sub_entity, ehr_name
+            sel = WorkSelector.daily(entity=entity, sub_entity=sub_entity, ehr_name=ehr_name)
             summary = run(sel)
             has_error = bool(summary and summary.get("failed"))
             if has_error:
@@ -390,8 +500,8 @@ def run_tebra_daily(request: DailyRequest):
 
 @app.post("/run-patient-insurance-daily")
 def run_patient_insurance_daily(request: DailyRequest):
-    entity = (request.entity or ENTITY).strip()
-    sub_entity = (request.sub_entity or SUB_ENTITY).strip()
+    entity = request.entity.strip()
+    sub_entity = request.sub_entity.strip()
     ehr_name = (request.ehr_name or EHR_NAME).strip()
 
     lock = _acquire_key_lock("__patient_insurance_daily__")
@@ -417,8 +527,8 @@ def run_patient_insurance_daily(request: DailyRequest):
 
 @app.post("/run-combined-daily")
 def run_combined_daily(request: DailyRequest):
-    entity = (request.entity or ENTITY).strip()
-    sub_entity = (request.sub_entity or SUB_ENTITY).strip()
+    entity = request.entity.strip()
+    sub_entity = request.sub_entity.strip()
     ehr_name = (request.ehr_name or EHR_NAME).strip()
 
     job_id = str(uuid.uuid4())
@@ -441,8 +551,7 @@ def run_combined_daily(request: DailyRequest):
 
             print(f"[COMBINED] job_id={job_id} step=tebra starting", flush=True)
             try:
-                sel = WorkSelector.daily()
-                sel.entity, sel.sub_entity, sel.ehr_name = entity, sub_entity, ehr_name
+                sel = WorkSelector.daily(entity=entity, sub_entity=sub_entity, ehr_name=ehr_name)
                 summary = run(sel, scrape_patients=False)  # patients already done above
                 print(f"[COMBINED] job_id={job_id} step=tebra done "
                       f"completed={summary.get('completed')} failed={summary.get('failed')}",
@@ -494,34 +603,62 @@ def _job_log(prefix):
     return log
 
 
-def _run_daily_pdf_processor_job():
-    """Runs run_daily_pdf_processor with the same locking/logging every
-    caller gets, regardless of how it was reached: the /run-daily-pdf-processor
-    endpoint below, or ehr/zipbuild.py's post-upload trigger (imported and
-    called directly, in a background thread, since zipbuild.py lives in this
-    same ehr package -- no HTTP hop needed)."""
-    try:
-        lock = _acquire_key_lock("__daily_pdf_processor__")
-    except HTTPException:
-        _slog("daily_pdf_processor already running - skipping this trigger")
+def _run_job_with_lock(lock_key, run_fn, log_product_name, blocking, raise_on_error):
+    """Shared body for both PDF-processor jobs below. `blocking` controls
+    whether a concurrent run is waited out (True -- used by the synchronous
+    post-ZIP-upload trigger, which must not silently skip a practice's own
+    extraction) or skipped (False -- the on-demand HTTP endpoints' original
+    behavior, unchanged). `raise_on_error` re-raises the underlying failure
+    instead of only logging it, so a caller chaining this synchronously
+    (zipbuild.py/rcm_upload.py) can propagate it into its own practice's
+    failure instead of it vanishing into a log line nobody's watching."""
+    with _locks_guard:
+        lock = _locks.setdefault(lock_key, threading.Lock())
+    if not lock.acquire(blocking=blocking):
+        _slog(f"{log_product_name.lower()} already running - skipping this trigger")
+        if raise_on_error:
+            raise RuntimeError(f"{log_product_name}: a previous run is already in progress")
         return
 
     run_start = datetime.now(CST)
     has_error, err = False, None
     try:
-        run_daily_pdf_processor(_job_log("PDF-PROCESSOR"))
+        run_fn()
     except Exception as e:
         has_error, err = True, repr(e)
     finally:
-        _log_rpa_run("DAILY_PDF_PROCESSOR", ENTITY, SUB_ENTITY, run_start,
+        # Not entity-scoped -- these processors walk every tenant's/one fixed
+        # blob folder in one pass, so there's no single entity to attribute
+        # this run to. company_id is informational only (log_run_event is a
+        # no-op today).
+        _log_rpa_run(log_product_name, "ALL", "ALL", run_start,
                      datetime.now(CST), has_error, error_message=err)
         try:
             lock.release()
         except Exception:
             pass
 
+    if has_error and raise_on_error:
+        raise RuntimeError(f"{log_product_name} failed: {err}")
 
-def _run_pf_facesheet_processor_job():
+
+def _run_daily_pdf_processor_job(blocking=False, raise_on_error=False):
+    """Runs run_daily_pdf_processor with the same locking/logging every
+    caller gets, regardless of how it was reached: the /run-daily-pdf-processor
+    endpoint below (blocking=False, raise_on_error=False -- unchanged, fire
+    on demand, skip if already running), or ehr/zipbuild.py's post-upload
+    trigger (blocking=True, raise_on_error=True -- called directly and
+    synchronously now, since zipbuild.py lives in this same ehr package, no
+    HTTP hop needed -- see that call site's docstring for why it must block
+    and raise rather than skip/swallow)."""
+    _run_job_with_lock(
+        "__daily_pdf_processor__",
+        lambda: run_daily_pdf_processor(_job_log("PDF-PROCESSOR")),
+        "DAILY_PDF_PROCESSOR", blocking, raise_on_error,
+    )
+
+
+def _run_pf_facesheet_processor_job(blocking=False, raise_on_error=False):
     """Same pattern as _run_daily_pdf_processor_job above. Reached from the
     /run-daily-practice-fusion-pdf-processor endpoint below, or from
     pf_sync_v5_6/pf_sync_pkg/rcm_upload.py's post-upload trigger -- that
@@ -529,25 +666,11 @@ def _run_pf_facesheet_processor_job():
     function via `ehr.pdf_processor`'s sibling module rather than reaching
     into server.py, and only when it's actually running inside this combined
     process (see rcm_upload.py's _trigger_pf_facesheet_processor)."""
-    try:
-        lock = _acquire_key_lock("__daily_pf_facesheet_processor__")
-    except HTTPException:
-        _slog("daily_pf_facesheet_processor already running - skipping this trigger")
-        return
-
-    run_start = datetime.now(CST)
-    has_error, err = False, None
-    try:
-        run_daily_practice_fusion_pdf_processor(_job_log("PF-FACESHEET-PROCESSOR"))
-    except Exception as e:
-        has_error, err = True, repr(e)
-    finally:
-        _log_rpa_run("DAILY_PF_FACESHEET_PROCESSOR", ENTITY, SUB_ENTITY, run_start,
-                     datetime.now(CST), has_error, error_message=err)
-        try:
-            lock.release()
-        except Exception:
-            pass
+    _run_job_with_lock(
+        "__daily_pf_facesheet_processor__",
+        lambda: run_daily_practice_fusion_pdf_processor(_job_log("PF-FACESHEET-PROCESSOR")),
+        "DAILY_PF_FACESHEET_PROCESSOR", blocking, raise_on_error,
+    )
 
 
 @app.post("/run-daily-pdf-processor")

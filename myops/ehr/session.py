@@ -5,6 +5,8 @@ how we get an authenticated Playwright page on a given practice.
 """
 
 import os
+import re
+import shutil
 from datetime import datetime, timezone
 
 from .config import (
@@ -140,3 +142,47 @@ def cleanup_acc_directory():
                 os.remove(full_path)
             except Exception as e:
                 print(f"[CLEANUP ERROR] {item}: {e}")
+
+
+_UNSAFE_PATH_CHARS = re.compile(r"[^A-Za-z0-9._-]+")
+
+
+def practice_download_dir(entity: str, sub_entity: str, practice_name: str) -> str:
+    """A per-(entity, sub_entity, practice) subfolder under DOWNLOAD_DIR.
+
+    Confirmed live 2026-09-17: with DailyPdfLoaderJob.js now firing every
+    practice's /run-tebra call as fire-and-forget instead of one-at-a-time,
+    multiple practices' pipeline.run() calls can be mid-flight at once (the
+    per-practice lock in myops/server.py only ever prevents the SAME
+    practice from double-running). Every consumer of the shared DOWNLOAD_DIR
+    root (this module's cleanup_acc_directory, passes.py's facesheet PDF
+    writes, zipbuild.py's zip staging + PDF reads/removes) assumed exactly
+    one run ever touched it at a time -- with two practices running
+    concurrently, one finishing and cleaning up mid-scrape could silently
+    delete another practice's just-downloaded, not-yet-zipped file. This
+    gives each practice its own isolated folder instead, so pipeline.py can
+    let practices run fully in parallel again (see cleanup_practice_download_dir
+    below for how that folder gets torn down afterward) without reintroducing
+    that race. Distinct (entity, sub_entity, practice_name) is enough to be
+    unique even under full concurrency -- the SAME practice can't run twice
+    at once regardless (see _acquire_key_lock in myops/server.py), so this
+    never needs a run id/uuid on top.
+    """
+    slug = _UNSAFE_PATH_CHARS.sub("_", f"{entity}_{sub_entity}_{practice_name}").strip("_")
+    path = os.path.join(DOWNLOAD_DIR, slug or "unknown_practice")
+    os.makedirs(path, exist_ok=True)
+    return path
+
+
+def cleanup_practice_download_dir(dir_path: str) -> None:
+    """Removes a practice_download_dir() folder entirely (files + the folder
+    itself) once that practice's run is done. Safe to fully remove, unlike
+    cleanup_acc_directory()'s shared-root sweep above -- nothing else shares
+    this path across concurrent runs."""
+    if not dir_path or not os.path.isdir(dir_path):
+        return
+    print(f"[CLEANUP] Removing practice download folder {dir_path}")
+    try:
+        shutil.rmtree(dir_path, ignore_errors=True)
+    except Exception as e:
+        print(f"[CLEANUP ERROR] {dir_path}: {e}")

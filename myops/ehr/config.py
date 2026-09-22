@@ -32,6 +32,21 @@ EHR_NAME = "Tebra"
 TABLE_NAME = "ehr.ehr_appointments"
 PATIENTS_TABLE = "ehr.ehr_patients"
 
+# How many days back of the appointments WORKLIST GRID daily mode re-scrapes
+# every run, in addition to today. Originally 3 days to compensate for
+# scrape_virtual_grid's one-shot sweep silently missing real rows (confirmed
+# live 2026-09-11, PrePost+Tennessee 2026-05-26/05-28) -- since fixed at the
+# source: that scraper now checks its own result against Tebra's own
+# aria-rowcount and forces more sweeps until it matches (or logs a loud
+# WARNING if it genuinely can't), so a single day's ingest is self-verifying
+# within its own run and no longer needs a later day to come back and catch
+# what it missed. Kept at 1 (not 0) purely as a thin safety margin for that
+# WARNING case -- a page that never settles even after 8 forced sweeps --
+# not as the primary defense it used to be. Re-scraping is still idempotent
+# (upserts are keyed by each row's own appt_date, never by this window),
+# so it's still free/harmless to keep a small margin here.
+DAILY_INGEST_LOOKBACK_DAYS = 1
+
 # ---- Local download dir ----
 # Set this in .env for each runtime environment.
 _env_download_dir = os.environ.get("EHR_DOWNLOAD_DIR", "").strip()

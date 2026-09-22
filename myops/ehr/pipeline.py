@@ -7,16 +7,20 @@ WorkSelector differs.
 
 import os
 import time
-from datetime import date
+from datetime import date, timedelta
 
 from playwright.sync_api import sync_playwright
 
-from .config import DOWNLOAD_DIR, PLAYWRIGHT_HEADLESS, PLAYWRIGHT_LAUNCH_ARGS, PLAYWRIGHT_VIEWPORT
+from .config import (
+    DOWNLOAD_DIR, PLAYWRIGHT_HEADLESS, PLAYWRIGHT_LAUNCH_ARGS, PLAYWRIGHT_VIEWPORT,
+    DAILY_INGEST_LOOKBACK_DAYS,
+)
+from .browser import BROWSER_LAUNCH_LOCK
 from .selector import WorkSelector
 from .db import get_ehr_connection, log_run_event
 from .session import (
     login_and_select_practice, discover_practices, resolve_practice_name,
-    now_cst, cleanup_acc_directory,
+    now_cst, cleanup_acc_directory, practice_download_dir, cleanup_practice_download_dir,
 )
 from .passes import (
     pass_appointments, pass_notes, pass_facesheets, pass_charges, pass_patient_match,
@@ -35,16 +39,40 @@ def _log(message: str):
 
 def _window(sel):
     """Resolve the [from, to] window used by passes that need explicit dates
-    (appointment scrape, patient-match). Daily = today; target = the date given
-    or today; backfill = the window."""
+    (appointment scrape, patient-match). Daily = the trailing
+    DAILY_INGEST_LOOKBACK_DAYS through today (a self-healing re-scrape, not
+    just today -- see DAILY_INGEST_LOOKBACK_DAYS in config.py for why); target
+    = the date given or today; backfill = the window."""
     if sel.mode == "backfill":
         return sel.start_date, sel.end_date
     if sel.mode == "target" and sel.start_date:
         return sel.start_date, sel.start_date
     today = now_cst().date()
+    if sel.mode == "daily":
+        return today - timedelta(days=DAILY_INGEST_LOOKBACK_DAYS), today
     return today, today
 
 
+# Practices are still requested fully in parallel (DailyPdfLoaderJob.js fires
+# every practice's /run-tebra call as fire-and-forget instead of
+# one-at-a-time). An earlier version of this file serialized every run behind
+# one global slot to work around the shared DOWNLOAD_DIR root
+# (passes.py/zipbuild.py wrote straight into it by bare filename, with no
+# per-practice separation, so one practice finishing and cleaning up
+# mid-scrape could delete another practice's just-downloaded file). That
+# file-collision issue is fixed properly now: practice_download_dir()
+# (ehr/session.py) gives each practice its own subfolder, threaded through
+# pass_facesheets/pass_zip below, so concurrent practices never share a path.
+#
+# But a *separate* problem showed up once that removed the old serialization:
+# concurrent Chromium instances (confirmed live 2026-09-17, rotating
+# ".MuiDataGrid-virtualScroller" timeouts across different practices run by
+# the same DailyPdfLoaderJob.js fan-out -- PrePost+ Tennessee, then
+# PrePostPlus Germantown) starve each other of CPU/RAM/`/dev/shm` on the VM.
+# BROWSER_LAUNCH_LOCK (ehr/browser.py) below re-serializes only the browser
+# lifetime itself (not the whole practice's DB/upload work), so at most one
+# Chromium instance runs at a time process-wide while still keeping the
+# per-practice download-dir isolation above.
 def run(sel: WorkSelector, scrape_patients=None, no_upload=False, skip_appointment_scrape=False):
     if not DOWNLOAD_DIR:
         raise RuntimeError(
@@ -82,7 +110,10 @@ def run(sel: WorkSelector, scrape_patients=None, no_upload=False, skip_appointme
 
     # First, discover practices with a short-lived browser so a normalized API
     # payload can be resolved back to the canonical Tebra practice name.
-    with sync_playwright() as p:
+    # BROWSER_LAUNCH_LOCK (ehr/browser.py): only one Chromium instance runs at
+    # a time process-wide, so concurrent /run-tebra calls for different
+    # practices don't starve each other's grid renders.
+    with BROWSER_LAUNCH_LOCK, sync_playwright() as p:
         browser = p.chromium.launch(
             headless=PLAYWRIGHT_HEADLESS,
             args=PLAYWRIGHT_LAUNCH_ARGS,
@@ -129,12 +160,16 @@ def run(sel: WorkSelector, scrape_patients=None, no_upload=False, skip_appointme
             ungated_repull=sel.ungated_repull,
         )
         from_date, to_date = _window(psel)
+        practice_dir = practice_download_dir(sel.entity, sel.sub_entity, practice)
 
         # Fresh browser + context PER PRACTICE. Tebra keeps a session logged in
         # to one practice; reusing the browser means the next practice's login
         # bounces straight to the dashboard and #sign-in never appears. A clean
         # browser guarantees the sign-in screen every time.
-        with sync_playwright() as p:
+        # BROWSER_LAUNCH_LOCK held for this practice's whole browser lifetime,
+        # so a concurrently-running practice from another /run-tebra call
+        # waits its turn instead of rendering at the same time.
+        with BROWSER_LAUNCH_LOCK, sync_playwright() as p:
             browser = p.chromium.launch(
                 headless=PLAYWRIGHT_HEADLESS,
                 args=PLAYWRIGHT_LAUNCH_ARGS,
@@ -164,7 +199,7 @@ def run(sel: WorkSelector, scrape_patients=None, no_upload=False, skip_appointme
                 _log(f"Practice={practice} notes pass done elapsed={time.monotonic() - phase_clock:.1f}s")
 
                 phase_clock = time.monotonic()
-                pass_facesheets(page, context, psel)   # normal + missed-charges re-download
+                pass_facesheets(page, context, psel, download_dir=practice_dir)   # normal + missed-charges re-download
                 _log(f"Practice={practice} facesheets pass done elapsed={time.monotonic() - phase_clock:.1f}s")
 
                 phase_clock = time.monotonic()
@@ -172,7 +207,7 @@ def run(sel: WorkSelector, scrape_patients=None, no_upload=False, skip_appointme
                 _log(f"Practice={practice} charges pass done elapsed={time.monotonic() - phase_clock:.1f}s")
 
                 phase_clock = time.monotonic()
-                zip_result = pass_zip(psel, practice, no_upload=no_upload)  # one ZIP incl. charge_data
+                zip_result = pass_zip(psel, practice, no_upload=no_upload, download_dir=practice_dir)  # one ZIP incl. charge_data
                 zip_result = zip_result or {}
                 _log(
                     f"Practice={practice} zip/upload pass done elapsed={time.monotonic() - phase_clock:.1f}s "
@@ -202,8 +237,13 @@ def run(sel: WorkSelector, scrape_patients=None, no_upload=False, skip_appointme
                     browser.close()
                 except Exception:
                     pass
+                cleanup_practice_download_dir(practice_dir)
 
     _log_run(sel, run_start)
+    # Safety-net sweep of the shared DOWNLOAD_DIR root itself, kept for
+    # anything that might still land there directly - normal facesheet/zip
+    # traffic no longer does, now that it's all scoped under practice_dir
+    # above, so this is expected to be a no-op most of the time.
     cleanup_acc_directory()
     _log(
         f"Run finished completed={completed} failed={failed} "
