@@ -6,6 +6,24 @@ virtual-scroll row lookup, patient-row -> facesheet navigation, and the
 Tebra Patient ID scrape. No pipeline logic lives here.
 """
 
+import threading
+
+# Confirmed live 2026-09-17: with DailyPdfLoaderJob.js firing every practice's
+# /run-tebra call as fire-and-forget instead of one-at-a-time, multiple
+# practices' pipeline.run() calls land in this process at once, each launching
+# its own headless Chromium (pipeline.py's discovery browser + per-practice
+# browser, patients.py's roster-scrape browsers). Several concurrent Chromium
+# instances on the same VM starve each other of CPU/RAM/`/dev/shm`, which
+# shows up as an intermittent, rotating "waiting for locator
+# ('.MuiDataGrid-virtualScroller') to be visible" timeout on whichever
+# practice's grid happens to be rendering when the VM is most contended (e.g.
+# PrePost+ Tennessee, then PrePostPlus Germantown on a later run) -- not a
+# per-practice bug. Every `p.chromium.launch(...)` call site in pipeline.py
+# and patients.py holds this lock for the browser's full lifetime so only one
+# Chromium instance runs at a time process-wide, trading away some wall-clock
+# parallelism for reliability.
+BROWSER_LAUNCH_LOCK = threading.Lock()
+
 
 def slow_fill(locator, text):
     locator.click()
@@ -295,7 +313,7 @@ def scrape_tebra_patient_id(fs_page):
         return None
 
 
-def scrape_virtual_grid(page, extract_fn, max_scrolls=300, repair_passes=1):
+def scrape_virtual_grid(page, extract_fn, max_scrolls=300, repair_passes=2, max_extra_sweeps=8):
     """
     Scroll a MUI virtual DataGrid top-to-bottom, collecting extract_fn(row)
     keyed by appt_id.
@@ -309,6 +327,28 @@ def scrape_virtual_grid(page, extract_fn, max_scrolls=300, repair_passes=1):
     each independently re-reading every row and patching only fields that
     are still None/"" -- a field that already has a value is never
     overwritten, so a bad read on a later sweep can't clobber a good one.
+
+    Confirmed live (2026-09-11, PrePost+Tennessee 2026-05-28): the grid's
+    virtualization can also drop a row from the sweep ENTIRELY -- not just
+    blank a field on a row it did render -- when scroll timing races
+    Tebra's own render (13 real appointments on Tebra, only 9 captured by a
+    single sweep). A row that's simply never seen has no None/"" fields to
+    trigger a repair sweep, so the old "only repair if some field is
+    blank" gate could skip re-sweeping altogether and that row was gone for
+    good.
+
+    This used to be a bounded, best-effort retry (repair_passes) with no way
+    to know if it actually caught everything -- just hoping a couple of
+    extra sweeps were enough. The grid tells us the real answer: MUI stamps
+    `aria-rowcount` on `.MuiDataGrid-main`, one more than the actual data row
+    count (the ARIA header-row convention) -- confirmed live, 13 real rows
+    reported as aria-rowcount=14. So instead of guessing, sweep again
+    whenever `len(seen)` is still short of that expected count (bounded by
+    max_extra_sweeps so a page that never reports a sane count, or is
+    genuinely stuck, can't loop forever) -- each sweep independent and
+    additive-only via _merge, so it can only add missing rows/fields, never
+    overwrite a good read. If it still can't reach the expected count after
+    the bound, that's logged loudly instead of silently returning short.
     """
     seen = {}
 
@@ -347,10 +387,34 @@ def scrape_virtual_grid(page, extract_fn, max_scrolls=300, repair_passes=1):
             except Exception:
                 continue
 
+    def _wait_for_rows_settled(poll_ms=50, stable_polls_needed=2, max_wait_ms=2000):
+        """Wait for the currently-mounted `.MuiDataGrid-row` count to stop
+        changing, instead of a blind fixed sleep -- attacks the actual race
+        directly (we used to scroll again before Tebra finished mounting
+        rows at the new position, so a fixed 150ms either wasted time on a
+        fast render or wasn't enough on a slow one). Polls the row count at
+        poll_ms intervals; considers it settled once it reads the same count
+        stable_polls_needed times in a row. Bounded by max_wait_ms so a page
+        that genuinely never settles can't hang the whole scrape."""
+        last_count = -1
+        stable_streak = 0
+        elapsed = 0
+        while elapsed < max_wait_ms:
+            page.wait_for_timeout(poll_ms)
+            elapsed += poll_ms
+            count = page.locator(".MuiDataGrid-row").count()
+            if count == last_count:
+                stable_streak += 1
+                if stable_streak >= stable_polls_needed:
+                    return
+            else:
+                stable_streak = 0
+            last_count = count
+
     def _sweep():
         """One independent full top-to-bottom read of every currently-loaded row."""
         _scroll_to(0)
-        page.wait_for_timeout(200)
+        _wait_for_rows_settled()
         prev_pos = -1
         for _ in range(max_scrolls):
             _scan_current()
@@ -359,12 +423,46 @@ def scrape_virtual_grid(page, extract_fn, max_scrolls=300, repair_passes=1):
                 break  # scrollTop stopped advancing -- we've hit the bottom
             prev_pos = pos
             _scroll_forward()
-            page.wait_for_timeout(150)
+            _wait_for_rows_settled()
+
+    def _expected_count():
+        """Tebra's own claimed row count for the current filter, straight from
+        the grid -- MUI's aria-rowcount is (data rows + 1) for the header
+        row. Returns None if the grid doesn't expose it (don't block on a
+        signal that isn't there)."""
+        try:
+            raw = page.locator(".MuiDataGrid-main").first.get_attribute("aria-rowcount")
+            return int(raw) - 1 if raw else None
+        except Exception:
+            return None
 
     _sweep()
-    for _ in range(repair_passes):
-        if not any(v in (None, "") for rec in seen.values() for v in rec.values()):
-            break  # every field on every row already has a value -- done early
+    expected = _expected_count()
+    prev_count = len(seen)
+
+    for extra_sweeps in range(1, max_extra_sweeps + 1):
+        fields_incomplete = any(v in (None, "") for rec in seen.values() for v in rec.values())
+        short_of_expected = expected is not None and len(seen) < expected
+        # Keep sweeping while there's a known reason to (blank fields, or
+        # confirmed-short of Tebra's own count), or while we're still inside
+        # the unconditional minimum (repair_passes) that guards the case
+        # where the grid doesn't expose aria-rowcount at all.
+        if not fields_incomplete and not short_of_expected and extra_sweeps > repair_passes:
+            break
         _sweep()
+        new_count = len(seen)
+        no_progress = new_count == prev_count
+        prev_count = new_count
+        if no_progress and not fields_incomplete and not short_of_expected:
+            break  # this sweep found nothing new and there's no known gap left -- done
+    else:
+        if expected is not None and len(seen) < expected:
+            print(f"[GRID] WARNING scrape_virtual_grid still short after "
+                  f"{max_extra_sweeps} extra sweeps: got {len(seen)}, "
+                  f"Tebra grid claims {expected}")
+
+    if expected is not None and len(seen) < expected:
+        print(f"[GRID] WARNING scrape_virtual_grid returning {len(seen)} rows, "
+              f"Tebra grid claims {expected} (aria-rowcount)")
 
     return seen

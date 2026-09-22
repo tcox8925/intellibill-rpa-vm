@@ -62,6 +62,77 @@ from pf_sync_pkg.report_pull import pull_appointment_report_on_page
 from pf_sync_pkg.store import append_run, finish_run, load_store, save_store, store_rows
 from sync_patient_visits_to_edi_tebra import sync_appointments_to_edi_tebra
 
+try:
+    # Lives at the repo root, one level up -- only importable when this
+    # module is loaded as part of the combined server.py process (repo root
+    # is on sys.path there). Fall back to no-ops so this file still runs
+    # standalone (`python -m uvicorn server:app` from inside pf_sync_v5_6/),
+    # which has no "EDI_Tebra".cron_jobs row to look up / DB creds configured
+    # for anyway in a bare standalone run.
+    from cron_execution_log import start_execution, finish_execution, mark_processing
+except ImportError:
+    def start_execution(job_setting: str, response: dict | None = None) -> str:
+        return ""
+
+    def finish_execution(execution_id: str, success: bool, error_description: str | None = None, response: dict | None = None) -> None:
+        pass
+
+    def mark_processing(execution_id: str, response: dict | None = None) -> None:
+        pass
+
+
+def _find_stage_failures(node, path=""):
+    """Recursively scan a stages/result structure for failure signals.
+
+    Confirmed live 2026-09-17: run_sync_schedules_by_date's `stages` dict has
+    six independent stages (discover/inject_discovered/process/process_retry/
+    rcm_upload/rcm_upload_retry), each of which can fail WITHOUT ever raising
+    -- a failure just gets recorded as {"error": ...} or {"failed": N, ...}
+    and the function returns normally either way (same class of bug already
+    fixed in myops/server.py's /run-tebra: finish_execution(success=True)
+    fired unconditionally whenever the outer call merely returned, with no
+    look at whether an inner stage actually failed).
+
+    Walked generically (not one hand-written check per stage) because the
+    exact shape differs per stage today -- a bare {"error": ...},
+    {"failed": N, "details": [...]}, or (since the PF-processing-deferral
+    fix) a nested stage["pf_facesheet_processing"]["error"] -- and new
+    stages/shapes get added over time; a hand-listed check would silently
+    miss whatever's added next.
+    """
+    failures = []
+    if isinstance(node, dict):
+        for key in ("error", "processing_error"):
+            value = node.get(key)
+            if value:
+                failures.append(f"{path or 'result'}.{key}: {value}")
+        failed_count = node.get("failed")
+        if isinstance(failed_count, int) and failed_count > 0:
+            failures.append(f"{path or 'result'}: failed={failed_count}")
+        for key, value in node.items():
+            if key in ("error", "processing_error", "failed"):
+                continue
+            failures.extend(_find_stage_failures(value, f"{path}.{key}" if path else key))
+    elif isinstance(node, list):
+        for i, item in enumerate(node):
+            failures.extend(_find_stage_failures(item, f"{path}[{i}]"))
+    return failures
+
+
+def _stage_outcome(result):
+    """Returns (success, error_description) for a stages/result dict --
+    see _find_stage_failures for what counts as a failure."""
+    failures = _find_stage_failures(result)
+    if failures:
+        return False, "; ".join(failures)
+    return True, None
+
+# job_setting value for this job's row in "EDI_Tebra".cron_jobs (already
+# seeded manually) -- only /sync-schedules-by-date maps to it; the other
+# endpoints that also go through _dispatch_browser_job (facesheet-pull-by-date,
+# full-sync-by-date, process, refresh) have no cron_jobs row and are not logged.
+_PRACTICE_FUSION_FACESHEET_PULL_JOB_SETTING = "PRACTICE_FUSION_FACESHEET_PULL"
+
 CST = ZoneInfo("America/Chicago")
 
 
@@ -225,6 +296,13 @@ def _dispatch_browser_job(wait_for_completion: bool, job_name: str, callback):
     Mirrors myops/server.py: wait_for_completion=True runs inline and returns the
     result (or raises HTTPException on failure); False starts a background thread
     and returns 202 immediately with a job_id.
+
+    Generic across every endpoint that calls it (facesheet-pull-by-date,
+    full-sync-by-date, process, refresh, sync-schedules-by-date, ...), most of
+    which have no corresponding "EDI_Tebra".cron_jobs row - so cron_job_executions
+    logging is NOT done here. It's done in the one caller that does map to a
+    seeded row (sync_schedules_by_date_endpoint, PRACTICE_FUSION_FACESHEET_PULL),
+    wrapping its own `job` callback instead.
     """
     if wait_for_completion:
         started = time.monotonic()
@@ -955,12 +1033,47 @@ def sync_schedules_by_date_endpoint(request: SyncSchedulesByDateRequestSlim):
         wait_for_completion=request.wait_for_completion,
     )
     args = _namespace_with_env_creds(full_request)
+    _execution_response = {
+        "report_date": request.report_date,
+        "start_date": request.start_date,
+        "end_date": request.end_date,
+    }
 
     def job():
+        # start_execution() (a Postgres round-trip) deliberately happens in
+        # here, not before _dispatch_browser_job(...) below -- when
+        # wait_for_completion=False, `job` only ever runs on the background
+        # thread _dispatch_browser_job spawns, never on the thread that has
+        # to return this endpoint's HTTP response. Logging it out there
+        # instead would put a DB write back in front of that response,
+        # reintroducing the exact open-ended wait wait_for_completion=False
+        # was built to remove (confirmed 2026-09-17 on the equivalent bug in
+        # tebra_patient_sync/app_tebra.py's /tebra/sync: a slow/unreachable
+        # DB hung start_execution() well past the caller's 30s trigger
+        # timeout, indistinguishable from the original blocking-sync timeout
+        # bug, and logged nothing since the INSERT never got a chance to run).
+        execution_id = None
+        try:
+            execution_id = start_execution(_PRACTICE_FUSION_FACESHEET_PULL_JOB_SETTING, response=_execution_response)
+            if execution_id:
+                mark_processing(execution_id)
+        except Exception as e:
+            _slog(f"sync-schedules-by-date failed to start execution logging: {e!r}")
+
         # Schedule scrape -> Seen-status filter -> inject synthetic record ->
         # process, entirely independent of the Eligibility Report -- reused via
         # cli.run_sync_schedules_by_date, not reimplemented here.
-        return run_sync_schedules_by_date(args)
+        try:
+            result = run_sync_schedules_by_date(args)
+            if execution_id:
+                success, error_description = _stage_outcome(result)
+                finish_execution(execution_id, success=success, error_description=error_description,
+                                  response={"result": result})
+            return result
+        except Exception as e:
+            if execution_id:
+                finish_execution(execution_id, success=False, error_description=repr(e))
+            raise
 
     return _dispatch_browser_job(request.wait_for_completion, "sync-schedules-by-date", job)
 

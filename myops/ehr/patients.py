@@ -28,6 +28,7 @@ import psycopg2
 
 from otp_info import handle_tebra_otp_if_present
 from email_read import fetch_latest_tebra_otp_code
+from .browser import BROWSER_LAUNCH_LOCK
 from .config import (
     EHR_NAME,
     LOGIN_URL,
@@ -1196,12 +1197,15 @@ def scrape_practice_patients(
 
 # =========================================================
 # PRACTICES CONFIG
-# All practices share entity=270681372, sub_entity=270681372001.
 # PRACTICES dict controls per-practice test_limit (None = scrape all).
+# Entity/sub_entity are NOT configured here -- they come from whatever the
+# caller of run_patient_insurance_rpa() passed in (see that function), which
+# is what actually tags every upserted ehr_patients row. This dict used to
+# also hardcode entity=270681372/sub_entity=270681372001 into its returned
+# config and those two fields were never even read by the only caller
+# (run_patient_insurance_rpa never looked at cfg["entity"]) -- dead, stale
+# values sitting next to the real ones, removed to stop that confusion.
 # =========================================================
-
-ENTITY = "270681372"
-SUB_ENTITY = "270681372001"
 
 PRACTICES = {
     "PrePost+ Tennessee": {"test_limit": None},
@@ -1215,21 +1219,17 @@ PRACTICES = {
 def get_practice_config(ui_name: str) -> dict:
     """
     Look up test_limit for a practice name.
-    Returns { practice_name, entity, sub_entity, test_limit }.
+    Returns { practice_name, test_limit }.
     """
     for practice_name, cfg in PRACTICES.items():
         if practice_name.lower() in ui_name.lower() or ui_name.lower() in practice_name.lower():
             return {
                 "practice_name": practice_name,
-                "entity": ENTITY,
-                "sub_entity": SUB_ENTITY,
                 "test_limit": cfg.get("test_limit"),
             }
     # Fallback: practice not in config — no test_limit
     return {
         "practice_name": ui_name.strip(),
-        "entity": ENTITY,
-        "sub_entity": SUB_ENTITY,
         "test_limit": None,
     }
 
@@ -1247,8 +1247,8 @@ def is_practice_configured(ui_name: str) -> bool:
 # =========================================================
 
 def run_patient_insurance_rpa(
-    entity: str = ENTITY,
-    sub_entity: str = SUB_ENTITY,
+    entity: str,
+    sub_entity: str,
     ehr_name: str = EHR_NAME,
 ):
     """
@@ -1270,34 +1270,42 @@ def run_patient_insurance_rpa(
       4. Close browser
     """
     with sync_playwright() as p:
-        browser = p.chromium.launch(
-            headless=PLAYWRIGHT_HEADLESS,
-            args=PLAYWRIGHT_LAUNCH_ARGS,
-        )
-        context = browser.new_context(
-            no_viewport=(PLAYWRIGHT_VIEWPORT is None), viewport=PLAYWRIGHT_VIEWPORT,
-        )
-        page = context.new_page()
+        # BROWSER_LAUNCH_LOCK (ehr/browser.py): held for each browser's own
+        # lifetime only, so this discovery browser doesn't run at the same
+        # time as a concurrent /run-tebra practice's browser and starve it of
+        # CPU/RAM/`/dev/shm`.
+        BROWSER_LAUNCH_LOCK.acquire()
+        try:
+            browser = p.chromium.launch(
+                headless=PLAYWRIGHT_HEADLESS,
+                args=PLAYWRIGHT_LAUNCH_ARGS,
+            )
+            context = browser.new_context(
+                no_viewport=(PLAYWRIGHT_VIEWPORT is None), viewport=PLAYWRIGHT_VIEWPORT,
+            )
+            page = context.new_page()
 
-        # ── Discover practices — login once to get the list ──
-        page.goto(LOGIN_URL)
-        page.fill("#userName", EMAIL)
-        page.fill("#password", PASSWORD)
-        page.click("#sign-in")
+            # ── Discover practices — login once to get the list ──
+            page.goto(LOGIN_URL)
+            page.fill("#userName", EMAIL)
+            page.fill("#password", PASSWORD)
+            page.click("#sign-in")
 
-        page.wait_for_selector("h3:has-text('Practice select')")
-        page.wait_for_timeout(2000)  # let all practice tiles render
+            page.wait_for_selector("h3:has-text('Practice select')")
+            page.wait_for_timeout(2000)  # let all practice tiles render
 
-        practice_elements = page.locator("h6.MuiTypography-subtitle2")
-        all_ui_practices = []
-        for i in range(practice_elements.count()):
-            name = practice_elements.nth(i).inner_text().strip()
-            if name:
-                all_ui_practices.append(name)
-                print(f"[DISCOVER]   {i}: '{name}'")
+            practice_elements = page.locator("h6.MuiTypography-subtitle2")
+            all_ui_practices = []
+            for i in range(practice_elements.count()):
+                name = practice_elements.nth(i).inner_text().strip()
+                if name:
+                    all_ui_practices.append(name)
+                    print(f"[DISCOVER]   {i}: '{name}'")
 
-        print(f"[DISCOVER] Found {len(all_ui_practices)} practices in Tebra UI")
-        browser.close()
+            print(f"[DISCOVER] Found {len(all_ui_practices)} practices in Tebra UI")
+            browser.close()
+        finally:
+            BROWSER_LAUNCH_LOCK.release()
 
         # ── Loop through practices (fresh browser each time) ──
         completed = []
@@ -1313,14 +1321,22 @@ def run_patient_insurance_rpa(
             print(f"{'='*60}")
 
             # ── Fresh browser for each practice ──
-            browser = p.chromium.launch(
-                headless=PLAYWRIGHT_HEADLESS,
-                args=PLAYWRIGHT_LAUNCH_ARGS,
-            )
-            context = browser.new_context(
-                no_viewport=(PLAYWRIGHT_VIEWPORT is None), viewport=PLAYWRIGHT_VIEWPORT,
-            )
-            page = context.new_page()
+            BROWSER_LAUNCH_LOCK.acquire()
+            try:
+                browser = p.chromium.launch(
+                    headless=PLAYWRIGHT_HEADLESS,
+                    args=PLAYWRIGHT_LAUNCH_ARGS,
+                )
+                context = browser.new_context(
+                    no_viewport=(PLAYWRIGHT_VIEWPORT is None), viewport=PLAYWRIGHT_VIEWPORT,
+                )
+                page = context.new_page()
+            except Exception:
+                # launch/context/page creation itself failed -- release before
+                # re-raising, or this lock never gets freed and every future
+                # browser launch process-wide hangs forever.
+                BROWSER_LAUNCH_LOCK.release()
+                raise
 
             start_dt = _now_cst()
             error_msg = None
@@ -1370,6 +1386,7 @@ def run_patient_insurance_rpa(
 
             finally:
                 browser.close()
+                BROWSER_LAUNCH_LOCK.release()
 
             # ── Log run ──
             log_run_event(
@@ -1392,4 +1409,16 @@ def run_patient_insurance_rpa(
 # =========================================================
 
 if __name__ == "__main__":
-    run_patient_insurance_rpa()
+    import argparse
+
+    ap = argparse.ArgumentParser(description="Patient insurance RPA")
+    ap.add_argument("--entity", required=True, help="Tenant entity id (required, no default)")
+    ap.add_argument("--sub-entity", required=True, help="Tenant sub_entity id (required, no default)")
+    ap.add_argument("--ehr-name", default=EHR_NAME)
+    cli_args = ap.parse_args()
+
+    run_patient_insurance_rpa(
+        entity=cli_args.entity,
+        sub_entity=cli_args.sub_entity,
+        ehr_name=cli_args.ehr_name,
+    )

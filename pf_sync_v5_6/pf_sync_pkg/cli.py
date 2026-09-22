@@ -123,16 +123,34 @@ def require_browser_args(args: argparse.Namespace) -> None:
         raise ValueError("--chrome-user-data-dir is required unless --attach is used.")
 
 
+def _run_pending_pf_facesheet_trigger_after_close(result):
+    """Fires any deferred PF facesheet-processing trigger (see
+    rcm_upload.py's run_pending_pf_facesheet_trigger docstring for why it
+    must wait until AFTER close_browser() -- calling it while Chrome is
+    still CDP-attached corrupts Playwright's own cleanup, confirmed live
+    2026-09-17). Folds the outcome into `result` when it's a dict so it's
+    visible in this command's own JSON output instead of only in logs;
+    no-ops (returns) if nothing uploaded a ZIP this run."""
+    from pf_sync_pkg.rcm_upload import run_pending_pf_facesheet_trigger
+
+    trigger_result = run_pending_pf_facesheet_trigger()
+    if trigger_result and isinstance(result, dict):
+        result["pf_facesheet_processing"] = trigger_result
+
+
 def browser_command_wrapper(args: argparse.Namespace, callback):
     require_browser_args(args)
     playwright = context = page = None
+    result = None
     try:
         playwright, context, page = build_browser(args)
         page = wait_for_pf_login(context, page, args)
-        return callback(page)
+        result = callback(page)
+        return result
     finally:
         if playwright is not None and context is not None and page is not None:
             close_browser(args, playwright, context, page)
+        _run_pending_pf_facesheet_trigger_after_close(result)
 
 
 def browser_command_wrapper_with_context(args: argparse.Namespace, callback):
@@ -145,13 +163,16 @@ def browser_command_wrapper_with_context(args: argparse.Namespace, callback):
     sync-schedules-by-date) are untouched."""
     require_browser_args(args)
     playwright = context = page = None
+    result = None
     try:
         playwright, context, page = build_browser(args)
         page = wait_for_pf_login(context, page, args)
-        return callback(page, context)
+        result = callback(page, context)
+        return result
     finally:
         if playwright is not None and context is not None and page is not None:
             close_browser(args, playwright, context, page)
+        _run_pending_pf_facesheet_trigger_after_close(result)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -1631,13 +1652,20 @@ def main() -> int:
             return 0
 
         if args.command == "zip-upload":
-            from pf_sync_pkg.rcm_upload import build_and_upload_zip
+            from pf_sync_pkg.rcm_upload import build_and_upload_zip, run_pending_pf_facesheet_trigger
 
             result = build_and_upload_zip(
                 args.manifest_json, args.downloads_dir, args.practice,
                 no_upload=args.no_upload,
                 delete_local_after_upload=not args.keep_local,
             )
+            # No browser involved in this command, so no CDP-cleanup ordering
+            # concern -- but the trigger is still deferred (build_and_upload_zip
+            # only marks it pending, see rcm_upload.py), so fire it explicitly
+            # here rather than never at all.
+            trigger_result = run_pending_pf_facesheet_trigger()
+            if trigger_result:
+                result["pf_facesheet_processing"] = trigger_result
             print(json.dumps(result, indent=2))
             return 0
 

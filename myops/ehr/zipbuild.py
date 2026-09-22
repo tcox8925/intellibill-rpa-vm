@@ -13,7 +13,6 @@ import json
 import random
 import re
 import string
-import threading
 import zipfile
 
 from azure.storage.blob import BlobServiceClient
@@ -30,33 +29,40 @@ from .session import now_cst
 def _trigger_daily_pdf_processor():
     """Fires the Tebra PDF processor (ehr/pdf_processor.py) right after a ZIP
     actually lands in `rcm-attachments` below -- event-driven, not a guessed
-    cron delay after the scrape. Runs in a background thread so the upload
-    path (and whatever's awaiting pass_zip's return) never waits on the
-    processor's own blob scan + backend calls. server.py's
-    _run_daily_pdf_processor_job self-guards against overlapping runs (see
-    its docstring), so firing this once per practice's upload in a daily,
-    multi-practice run is safe -- redundant triggers just skip.
-    """
-    def _run():
-        try:
-            import sys
-            # When this VM is running the combined repo-root server.py, this
-            # very module is already loaded in sys.modules as "tebra_server"
-            # (see that file's _load_app) -- reuse THAT module object rather
-            # than `import server`, which would re-exec myops/server.py as a
-            # second, disconnected module (its own FastAPI app, its own
-            # _locks dict) instead of reaching the one actually serving
-            # requests. Only fall back to a plain import when myops/server.py
-            # is genuinely running standalone (`python -m uvicorn server:app`
-            # from inside myops/), where no such alias exists yet.
-            server_module = sys.modules.get("tebra_server") or sys.modules.get("server")
-            if server_module is None:
-                import server as server_module
-            server_module._run_daily_pdf_processor_job()
-        except Exception as e:
-            print(f"[ZIP] Failed to trigger daily PDF processor: {e!r}", flush=True)
+    cron delay after the scrape.
 
-    threading.Thread(target=_run, daemon=True).start()
+    BLOCKING, not fire-and-forget: this used to spawn a detached background
+    thread and return immediately, so pass_zip (and /run-tebra's own tracked
+    cron_job_executions row above it) reported success the instant the ZIP
+    upload finished -- while the actual claim creation this ZIP triggers was
+    still running afterward, one PDF at a time, completely invisible to that
+    row (confirmed live 2026-09-17: /run-tebra showed 200/processing done
+    while claims kept trickling in well after). The pull and the processing
+    that turns it into claims are one unit of work, not two -- this call now
+    blocks until extraction genuinely finishes and raises if it failed, so
+    the exception propagates up through pass_zip's own try/except below (see
+    upload_error) and makes run() correctly mark this practice failed instead
+    of reporting done before the claims exist.
+    """
+    import sys
+    # When this VM is running the combined repo-root server.py, this
+    # very module is already loaded in sys.modules as "tebra_server"
+    # (see that file's _load_app) -- reuse THAT module object rather
+    # than `import server`, which would re-exec myops/server.py as a
+    # second, disconnected module (its own FastAPI app, its own
+    # _locks dict) instead of reaching the one actually serving
+    # requests. Only fall back to a plain import when myops/server.py
+    # is genuinely running standalone (`python -m uvicorn server:app`
+    # from inside myops/), where no such alias exists yet.
+    server_module = sys.modules.get("tebra_server") or sys.modules.get("server")
+    if server_module is None:
+        import server as server_module
+    # blocking=True: wait for a previous still-running extraction to finish
+    # rather than silently skip this trigger -- skipping would mean this
+    # ZIP's own claims never get created at all. raise_on_error=True: a
+    # failure here must surface as this practice's own failure, not vanish
+    # into a print() nobody's watching.
+    server_module._run_daily_pdf_processor_job(blocking=True, raise_on_error=True)
 
 
 def get_practice_abbr(practice_name):
@@ -114,13 +120,20 @@ def upload_zip_to_rcm_sftp(local_zip_path, zip_name, folder_structure):
     return blob_path
 
 
-def pass_zip(sel, practice_name, no_upload=False):
+def pass_zip(sel, practice_name, no_upload=False, download_dir=None):
     """
     Build ONE ZIP for the selection's processed signed-note appointments and
     deliver it to the mapped client folder inside the configured container. ZIP name uses the
     window end date (backfill) / today (daily). JSON carries charge_data when
     captured.
+
+    download_dir, when given, is the practice-scoped folder pipeline.py reads
+    facesheet PDFs from (see ehr/session.py's practice_download_dir) instead
+    of the shared DOWNLOAD_DIR root -- both the PDF lookups below and this
+    call's own zip_tmp staging folder live under it, so a concurrent run for
+    a different practice never shares a path with this one.
     """
+    effective_dir = download_dir or DOWNLOAD_DIR
     conn = get_ehr_connection()
     cur = conn.cursor()
     try:
@@ -165,7 +178,7 @@ def pass_zip(sel, practice_name, no_upload=False):
         folder_dt = sel.end_date or now_cst().date()
         folder_date = folder_dt.strftime("%Y-%m-%d")
 
-        temp_dir = os.path.join(DOWNLOAD_DIR, "zip_tmp")
+        temp_dir = os.path.join(effective_dir, "zip_tmp")
         os.makedirs(temp_dir, exist_ok=True)
 
         records, included_db_ids, needed_pdfs = [], [], {}
@@ -205,7 +218,7 @@ def pass_zip(sel, practice_name, no_upload=False):
         missing_pdf_files = []
         missing_pdf_db_ids = []
         for facesheet_id, pdf_filename in list(needed_pdfs.items()):
-            if not os.path.exists(os.path.join(DOWNLOAD_DIR, pdf_filename)):
+            if not os.path.exists(os.path.join(effective_dir, pdf_filename)):
                 print(f"[ZIP] Missing local PDF {pdf_filename}", flush=True)
                 missing_pdf_files.append(pdf_filename)
                 dropped_ids = [
@@ -271,7 +284,7 @@ def pass_zip(sel, practice_name, no_upload=False):
         unique_pdfs = {r["pdf_file"] for r in records}
         with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as z:
             for pdf_filename in unique_pdfs:
-                local_pdf = os.path.join(DOWNLOAD_DIR, pdf_filename)
+                local_pdf = os.path.join(effective_dir, pdf_filename)
                 if os.path.exists(local_pdf):
                     z.write(local_pdf, pdf_filename)
             z.write(json_path, json_name)
@@ -326,9 +339,19 @@ def pass_zip(sel, practice_name, no_upload=False):
             os.remove(zip_path)
         except Exception:
             pass
+        try:
+            # json_path is the standalone local copy of the same manifest
+            # that's already embedded inside the zip (and already uploaded)
+            # -- it served no purpose after this point but was never
+            # cleaned up like zip_path/the PDFs below are, so one of these
+            # was left behind in zip_tmp/ on every single successful run,
+            # forever, with nothing ever deleting them.
+            os.remove(json_path)
+        except Exception:
+            pass
         for pdf_filename in unique_pdfs:
             try:
-                os.remove(os.path.join(DOWNLOAD_DIR, pdf_filename))
+                os.remove(os.path.join(effective_dir, pdf_filename))
             except OSError:
                 pass
         return {

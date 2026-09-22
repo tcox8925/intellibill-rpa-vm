@@ -33,6 +33,14 @@ def name_key(text):
     return frozenset(clean)
 
 
+def last_name_key(text):
+    """Just the last-name word(s) from 'Last, First Middle' -- the part
+    before the first comma (patient_name is always stored that way; falls
+    back to the full name_key if there's genuinely no comma)."""
+    before_comma = text.split(",", 1)[0] if "," in text else text
+    return name_key(before_comma)
+
+
 def find_name_match(card_key, needed):
     """
     Match a card name-key against the `needed` dict keys.
