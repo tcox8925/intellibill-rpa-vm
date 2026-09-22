@@ -92,8 +92,9 @@ def _find_and_mark_print_document(
     record: QueueRecord,
     config: SyncConfig,
     timeout_ms: int = DEFAULT_TIMEOUT,
+    notes_expected: bool = True,
 ):
-    """Locate the actual PF printable SOAP document, not the Summary page.
+    """Locate the actual PF printable document, not the Summary page.
 
     PF keeps the browser URL on ``/summary`` and renders the chart preview as a
     body-level overlay (and, in some builds, inside a same-origin iframe).  The blue
@@ -101,9 +102,22 @@ def _find_and_mark_print_document(
     printable document.  Therefore, finding an ancestor of that link is unreliable.
 
     Instead, search every same-origin frame for the smallest visible element containing
-    the distinctive printable-chart text markers and the encounter date.  The Summary
-    page cannot satisfy this guard because it does not contain the combined
-    PATIENT/FACILITY/ENCOUNTER/NOTE TYPE headings plus SOAP body headings.
+    the distinctive printable-chart text markers. When notes_expected=True (default,
+    every caller except historical_diagnosis_backfill.py's skip_note_selection path),
+    the Summary page cannot satisfy this guard because it does not contain the combined
+    PATIENT/FACILITY/ENCOUNTER/NOTE TYPE headings plus SOAP body headings plus the
+    encounter date.
+
+    notes_expected=False (Facesheet-only prints -- Demographics/Insurance/Diagnoses,
+    no SOAP note selected at all): the NOTE TYPE/clinical-body/date markers above
+    never appear on a genuine facesheet-only document either, so requiring them would
+    make this guard reject a perfectly good print. Confirmed live: a
+    --skip-note-selection run hit exactly this false rejection (PRINT_DOCUMENT_NOT_FOUND)
+    on a document a human could see printing correctly in the browser -- the fallback
+    SOAP note it *would* have selected was dated earlier than record.appointment_date,
+    so date_tokens (built from record.appointment_date, not the note's real date)
+    could never match anyway, on top of not needing a note here at all. Relax to just
+    the generic PATIENT/FACILITY markers common to every PF chart print.
     """
     date_tokens = note_date_tokens(record.appointment_date, config.note_date_formats)
     date_tokens = [clean(token).upper() for token in date_tokens if clean(token)]
@@ -111,7 +125,7 @@ def _find_and_mark_print_document(
     last_diagnostics: list = []
 
     finder_js = r"""
-        ({dateTokens}) => {
+        ({dateTokens, notesExpected}) => {
             const normalize = value => String(value || '')
                 .replace(/ /g, ' ')
                 .replace(/\s+/g, ' ')
@@ -150,8 +164,16 @@ def _find_and_mark_print_document(
                 const hasDate = !dateTokens.length || dateTokens.some(token => text.includes(token));
 
                 // This conjunction deliberately excludes the underlying patient Summary.
-                if (!(hasPatient && hasFacility && hasEncounter && hasNoteType &&
-                      hasClinicalBody && hasDate)) {
+                // notesExpected=false (Facesheet-only: Demographics/Insurance/Diagnoses,
+                // no SOAP note selected) drops the note/clinical-body/date requirements --
+                // a facesheet-only print never contains them, so requiring them would
+                // reject a genuinely valid document. hasPatient/hasFacility alone still
+                // excludes the Summary page, which lacks both.
+                const matches = notesExpected
+                    ? (hasPatient && hasFacility && hasEncounter && hasNoteType &&
+                       hasClinicalBody && hasDate)
+                    : (hasPatient && hasFacility);
+                if (!matches) {
                     continue;
                 }
 
@@ -257,7 +279,7 @@ def _find_and_mark_print_document(
         last_diagnostics = []
         for frame in list(page.frames):
             try:
-                result = frame.evaluate(finder_js, {"dateTokens": date_tokens})
+                result = frame.evaluate(finder_js, {"dateTokens": date_tokens, "notesExpected": notes_expected})
             except Exception as exc:
                 last_diagnostics.append({"url": getattr(frame, "url", ""), "error": str(exc)[:200]})
                 continue
@@ -292,10 +314,14 @@ def _find_and_mark_print_document(
     except Exception:
         pass
 
+    required_markers = (
+        "PATIENT/FACILITY/ENCOUNTER, SOAP headings, and the appointment date"
+        if notes_expected else "PATIENT/FACILITY"
+    )
     raise RuntimeError(
         "PRINT_DOCUMENT_NOT_FOUND: Practice Fusion showed the print toolbar, but no "
-        "visible document containing PATIENT/FACILITY/ENCOUNTER, SOAP headings, and "
-        f"the appointment date was found. Diagnostics were saved in {debug_dir.resolve()}."
+        f"visible document containing {required_markers} was found. "
+        f"Diagnostics were saved in {debug_dir.resolve()}."
     )
 
 
@@ -761,13 +787,20 @@ def generate_pdf(
     record: QueueRecord,
     downloads_dir: str,
     dry_run: bool,
+    notes_expected: bool = True,
 ) -> str:
-    """Clone the confirmed PF SOAP print section into a clean page and print it.
+    """Clone the confirmed PF print section into a clean page and print it.
 
     Printing the original EHR page either captured the Summary screen or produced a
     929-byte blank PDF because Practice Fusion's surrounding layout and print rules
     remained active.  The new page preserves PF styles but contains no EHR navigation,
     hidden modal ancestors, advertisements, or overlay backdrop.
+
+    notes_expected=False: no SOAP note was selected (historical_diagnosis_backfill.py's
+    skip_note_selection path -- Facesheet sections only). Threaded down to
+    _find_and_mark_print_document so its content guard doesn't require SOAP-note-only
+    markers that a facesheet-only print will never contain -- see that function's
+    docstring.
     """
     if dry_run:
         return "DRY_RUN_NO_PDF"
@@ -823,7 +856,7 @@ def generate_pdf(
             pass
 
         target_frame, print_root, root_info = _find_and_mark_print_document(
-            page, record, config, DEFAULT_TIMEOUT
+            page, record, config, DEFAULT_TIMEOUT, notes_expected=notes_expected
         )
         root_text = clean(print_root.inner_text(timeout=5_000))
         print(

@@ -691,15 +691,16 @@ def run_nightly(
 
 def build_full_sync_by_date_config(args: argparse.Namespace) -> SyncConfig:
     """SyncConfig for full-sync-by-date: the appointment-date SOAP note (as configured)
-    plus Patient demographics and Patient insurance -- filtered to Active insurance only --
-    on every printed chart.
+    plus Patient demographics, Patient insurance -- filtered to Active insurance only --
+    and Diagnoses, on every printed chart.
 
     v5.19: full-sync-by-date is the one command this applies to by default. process,
     nightly, refresh, and plain full-sync all keep reading the on-disk config's notes-only
     default untouched (see prepare_print_chart_sections/include_facesheet_sections). This
     never edits the on-disk config file -- same pattern run_facesheet_pull_by_date already
     uses to force facesheet sections on for one call without changing everyone else's
-    default, except scoped to just demographics + insurance rather than every section.
+    default, except scoped to just demographics + insurance + diagnoses rather than every
+    section.
     """
     base_config = SyncConfig.load(args.config_json)
     return replace(
@@ -708,6 +709,7 @@ def build_full_sync_by_date_config(args: argparse.Namespace) -> SyncConfig:
         facesheet_checkbox_selectors=[
             "[data-element='chk-patient-demographics'] input[type='checkbox']",
             "[data-element='print-insurance-options'] input[type='checkbox']",
+            "[data-element='chk-diagnoses'] input[type='checkbox']",
         ],
     )
 
