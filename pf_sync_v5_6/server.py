@@ -52,7 +52,7 @@ from pf_sync_pkg.cli import (
     run_refresh,
     run_sync_schedules_by_date,
 )
-from pf_sync_pkg.constants import BUILD_ID
+from pf_sync_pkg.constants import BUILD_ID, disabled_command_message
 from pf_sync_pkg.ingest import ingest_appointments
 from pf_sync_pkg.matching import match_patients, resolve_patient_manually
 from pf_sync_pkg.models import AppointmentReportConfig, SyncConfig
@@ -759,6 +759,7 @@ def doctor(request: DoctorRequest):
 
 @app.post("/ingest")
 def ingest(request: IngestRequest):
+    raise HTTPException(status_code=410, detail=disabled_command_message("ingest"))
     config = SyncConfig.load(request.config_json) if request.config_json else SyncConfig()
     try:
         counts = ingest_appointments(
@@ -889,6 +890,7 @@ def process_endpoint(request: ProcessRequest):
 
 @app.post("/full-sync")
 def full_sync_endpoint(request: FullSyncRequest):
+    raise HTTPException(status_code=410, detail=disabled_command_message("full-sync"))
     args = _namespace_with_env_creds(request)
 
     def job():
@@ -932,6 +934,7 @@ def full_sync_endpoint(request: FullSyncRequest):
 
 @app.post("/refresh")
 def refresh_endpoint(request: RefreshRequest):
+    raise HTTPException(status_code=410, detail=disabled_command_message("refresh"))
     args = _namespace_with_env_creds(request)
 
     def job():
@@ -945,6 +948,7 @@ def refresh_endpoint(request: RefreshRequest):
 
 @app.post("/nightly")
 def nightly_endpoint(request: NightlyRequest):
+    raise HTTPException(status_code=410, detail=disabled_command_message("nightly"))
     args = _namespace_with_env_creds(request)
 
     def job():
@@ -973,6 +977,7 @@ class FullSyncByDateRequestSlim(BaseModel):
 
 @app.post("/full-sync-by-date")
 def full_sync_by_date_endpoint(request: FullSyncByDateRequestSlim):
+    raise HTTPException(status_code=410, detail=disabled_command_message("full-sync-by-date"))
     # Expand the slim request into the full model so every other field keeps
     # FullSyncByDateRequest's own real, anchored defaults instead of a
     # caller-supplied Swagger placeholder.
@@ -995,6 +1000,7 @@ def full_sync_by_date_endpoint(request: FullSyncByDateRequestSlim):
 
 @app.post("/facesheet-pull-by-date")
 def facesheet_pull_by_date_endpoint(request: FacesheetPullByDateRequestSlim):
+    raise HTTPException(status_code=410, detail=disabled_command_message("facesheet-pull-by-date"))
     # Expand the slim request into the full model so every other field keeps
     # FacesheetPullByDateRequest's own real, anchored defaults (never a
     # caller-supplied "string" placeholder) -- see FacesheetPullByDateRequestSlim's
