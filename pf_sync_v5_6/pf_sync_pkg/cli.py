@@ -24,7 +24,6 @@ from pf_sync_pkg.ingest import (
 )
 from pf_sync_pkg.matching import (
     load_patient_registry,
-    mapping_identity,
     match_patients,
     match_patients_against_registry,
     resolve_patient_manually,
@@ -43,7 +42,7 @@ from pf_sync_pkg.report_pull import pull_appointment_report_on_page
 from pf_sync_pkg.selftest import run_self_test
 from pf_sync_pkg.store import append_run, atomic_write_json, finish_run, load_store, save_store, store_rows
 from pf_sync_pkg.tabular import read_tabular_rows
-from pf_sync_pkg.utils import clean, normalize_header, now_iso, parse_date, practice_today, require_date
+from pf_sync_pkg.utils import clean, normalize_header, parse_date, practice_today, require_date
 
 
 def add_browser_arguments(parser: argparse.ArgumentParser) -> None:
@@ -1012,50 +1011,22 @@ def run_sync_schedules_by_date(
                 if row.ehr_patient_guid
             }
 
-            # 2026-09-24: a report-ingested row (ingest.py's record_key()
-            # fallback hash) starts with NO guid -- a CSV report has no GUID
-            # column, so patient_match_method only becomes "fuzzy_name_dob_phone"
-            # once a LATER match-patients run resolves it. If this endpoint runs
-            # first (the normal case -- it's the only scheduled pipeline), that
-            # row is invisible to ingested_guid_dates above (it filters on
-            # `if row.ehr_patient_guid`), so the exact same visit gets a SECOND,
-            # synthetic row here. Confirmed live: 308 duplicate pairs, ~43% of
-            # every guid-matched row in the queue, 272 of them with BOTH copies
-            # already fully processed (see dedupe_queue_rows.py's one-time
-            # cleanup for the backlog this already created).
-            #
-            # This index lets a not-yet-guid'd row be recognized and backfilled
-            # in place instead of duplicated. It is intentionally NOT the fuzzy
-            # name-similarity dedup that was tried and reverted (see the comment
-            # below) -- it requires an EXACT normalized-name + EXACT DOB match
-            # (both must be present), the same precise signal
-            # matching.mapping_identity/resolve_patient_manually already trusts
-            # elsewhere for merging one confirmed identity across rows, not a
-            # similarity-scored guess. Two entries can only collide here if two
-            # real patients share both an identical normalized name AND an
-            # identical DOB -- effectively never -- and even then this only
-            # attaches a GUID to an already-ambiguous stub; it never invents one.
-            unmatched_identity_index: Dict[Tuple[str, str, date], QueueRecord] = {}
-            for row in rows_for_inject:
-                if row.ehr_patient_guid:
-                    continue
-                identity = mapping_identity(row)
-                if not identity["normalized_name"] or not identity["dob"]:
-                    continue
-                row_date = parse_date(row.appointment_date)
-                if not row_date:
-                    continue
-                key = (identity["normalized_name"], identity["dob"], row_date)
-                # Ambiguous (more than one stub sharing this identity+date) --
-                # leave both alone and fall through to normal injection below
-                # rather than guess which one to backfill.
-                unmatched_identity_index[key] = (
-                    row if key not in unmatched_identity_index else None
-                )
+            # 2026-09-24: a name+DOB backfill index briefly lived here to
+            # reconcile with report-ingested rows (ingest.py's record_key()
+            # fallback hash) that started with no guid -- those could be
+            # invisible to ingested_guid_dates above and get duplicated by a
+            # second, synthetic row here. Confirmed live: 308 duplicate pairs.
+            # Removed the same day: ingest/nightly/full-sync-by-date/
+            # facesheet-pull-by-date/full-sync/refresh are now permanently
+            # disabled (see constants.DISABLED_COMMANDS), so no report-ingested
+            # row will ever exist again for this to reconcile with -- keeping
+            # it would just be dead complexity. The 449 report-ingested rows
+            # already in the table were purged in the same commit (see
+            # purge_report_ingested_rows.py); ingested_guid_dates alone is
+            # sufficient once this is the only thing writing to the table.
 
             to_inject = []
             not_seen_skipped = []
-            guid_backfills: List[Dict[str, str]] = []
             for appt in appointments:
                 # Scoped to THIS filtering pass only -- deliberately not named
                 # `guid` (a prior version did, and that name leaking into the
@@ -1074,39 +1045,9 @@ def run_sync_schedules_by_date(
                 # "already covered". The real 2026-08-21 incident was a plain
                 # stale-loop-variable bug (see ehr_patient_guid=rp.... below),
                 # not a GUID reliability problem, and needed a code fix, not a
-                # name-matching safety net. (The EXACT-identity backfill index
-                # above is a separate, narrower mechanism -- see its own
-                # comment for why it doesn't reintroduce that risk.)
+                # name-matching safety net.
                 candidate_guid = appt.patient.ehr_patient_guid
                 if not candidate_guid or (candidate_guid, appt.appointment_date) in ingested_guid_dates:
-                    continue
-
-                rp = appt.patient
-                candidate_name = normalize_person_name(f"{rp.first_name} {rp.last_name}".strip())
-                candidate_dob = parse_date(rp.dob).isoformat() if parse_date(rp.dob) else ""
-                backfill_target = (
-                    unmatched_identity_index.get((candidate_name, candidate_dob, appt.appointment_date))
-                    if candidate_name and candidate_dob else None
-                )
-                if backfill_target is not None:
-                    backfill_target.ehr_patient_guid = candidate_guid
-                    backfill_target.patient_id = backfill_target.patient_id or rp.patient_id
-                    backfill_target.patient_match_status = "matched"
-                    backfill_target.patient_match_method = "schedule_guid_backfill"
-                    backfill_target.updated_at = now_iso()
-                    if backfill_target.status in {"needs_attention", "ignored"}:
-                        backfill_target.status = "ready"
-                        backfill_target.status_reason = "schedule_guid_backfill"
-                        backfill_target.error_message = ""
-                        backfill_target.message = ""
-                    guid_backfills.append(
-                        {
-                            "row_id": backfill_target.row_id,
-                            "patient_name": backfill_target.patient_name,
-                            "appointment_date": appt.appointment_date.isoformat(),
-                            "ehr_patient_guid": candidate_guid,
-                        }
-                    )
                     continue
 
                 if is_seen_status(appt.patient.appointment_status, config):
@@ -1160,7 +1101,7 @@ def run_sync_schedules_by_date(
                     )
                 )
 
-            if synthetic_rows or guid_backfills:
+            if synthetic_rows:
                 rows_for_inject.extend(synthetic_rows)
                 save_store(args.queue_json, store, rows_for_inject)
 
@@ -1177,10 +1118,6 @@ def run_sync_schedules_by_date(
                     f"({appt.patient.appointment_status or 'no status read'})"
                     for appt in not_seen_skipped
                 ],
-                # Existing report-ingested rows that got their GUID attached in
-                # place instead of getting a duplicate synthetic row -- see the
-                # unmatched_identity_index comment above.
-                "existing_rows_guid_backfilled": guid_backfills,
             }
         except Exception as exc:
             stages["inject_discovered"] = {"error": f"{type(exc).__name__}: {exc}"}
