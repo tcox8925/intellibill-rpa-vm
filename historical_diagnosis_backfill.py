@@ -68,7 +68,27 @@
 #   --headless                    no visible Chrome window for this run (safe once
 #                                  your profile has already done PF's one-time OTP
 #                                  login headed; --headed forces a window back on)
-#   --patient-guid <guid>        limit to one patient
+#   --patient-guid <guid>          limit to one patient, by ehr_patient_guid. unique-
+#                                  patients mode: always forces a real PF pull for that
+#                                  one patient (bypasses the DB pre-check and the
+#                                  cross-file already-delivered skip). Given WITHOUT
+#                                  --start-date/--end-date, skips Schedule discovery
+#                                  entirely and goes straight to that patient's chart
+#                                  (name/dob scraped live off the chart, today's date
+#                                  used as the nominal appt_date) -- no date range
+#                                  needed at all in that case:
+#                                    python historical_diagnosis_backfill.py \
+#                                        --mode unique-patients \
+#                                        --patient-guid <ehr_patient_guid>
+#                                  Pass a date range alongside --patient-guid instead
+#                                  for the old behavior (scan that range on the
+#                                  Schedule, then filter down to this one GUID), e.g.
+#                                  to fold this patient's result into a specific
+#                                  range's own summary file:
+#                                    python historical_diagnosis_backfill.py \
+#                                        --mode unique-patients --include-not-seen \
+#                                        --start-date 2026-06-01 --end-date 2026-09-30 \
+#                                        --patient-guid <ehr_patient_guid>
 #   --statuses processed,review  (reprocess-queue only) widen beyond "processed"
 #   --no-backend-call            generate PDFs locally only, skip the RCM POST
 #                                 (pair with --keep-local-pdfs to inspect them)
@@ -267,14 +287,39 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--start-date",
         default="",
-        help="Inclusive; blank = no lower bound (required for --mode unique-patients).",
+        help=(
+            "Inclusive; blank = no lower bound. Required for --mode unique-patients "
+            "UNLESS --patient-guid is also given with no dates at all -- that skips "
+            "Schedule discovery entirely and goes straight to that patient's chart "
+            "(see --patient-guid)."
+        ),
     )
     parser.add_argument(
         "--end-date",
         default="",
-        help="Inclusive; blank = no upper bound (required for --mode unique-patients).",
+        help=(
+            "Inclusive; blank = no upper bound. Required for --mode unique-patients "
+            "UNLESS --patient-guid is also given with no dates at all (see --patient-guid)."
+        ),
     )
-    parser.add_argument("--patient-guid", default="", help="Limit the run to one patient.")
+    parser.add_argument(
+        "--patient-guid",
+        default="",
+        help=(
+            "Limit the run to one patient (ehr_patient_guid). unique-patients mode: "
+            "also forces a real PF pull for that one patient, bypassing both the DB "
+            "pre-check and the cross-file already-delivered skip -- a targeted "
+            "single-patient request always actually runs, regardless of what's "
+            "already on file. Given WITHOUT --start-date/--end-date, skips Schedule "
+            "discovery entirely and goes straight to that patient's chart (name/dob "
+            "scraped live off the chart itself, today's date used as the nominal "
+            "appt_date) -- no date range needed at all in that case, since the only "
+            "reason a range exists elsewhere is to let a Schedule scan happen to "
+            "land on a day this patient appears; a known GUID doesn't need that. "
+            "Pass a date range alongside --patient-guid instead if you want the old "
+            "behavior (scan that range on the Schedule, then filter to this GUID)."
+        ),
+    )
     parser.add_argument(
         "--statuses",
         default="processed",
@@ -379,8 +424,15 @@ def parse_args() -> argparse.Namespace:
         help="Don't write a log file -- console only.",
     )
     args = parser.parse_args()
-    if args.mode == "unique-patients" and not (args.start_date and args.end_date):
-        parser.error("--mode unique-patients requires both --start-date and --end-date.")
+    if (
+        args.mode == "unique-patients"
+        and not (args.start_date and args.end_date)
+        and not args.patient_guid
+    ):
+        parser.error(
+            "--mode unique-patients requires either both --start-date and --end-date, "
+            "or --patient-guid (with no dates, for a direct GUID-only lookup)."
+        )
     return args
 
 
@@ -552,6 +604,75 @@ def discover_unique_patients_from_schedule(page, args: argparse.Namespace, confi
 
     records.sort(key=lambda r: r.patient_name or "")
     return records, never_seen
+
+
+def discover_single_patient_by_guid(page, args: argparse.Namespace) -> list:
+    """True GUID-only lookup, used by run_unique_patients when --patient-guid
+    is given WITHOUT --start-date/--end-date: skip Schedule discovery
+    entirely and go straight to this one patient's own chart.
+
+    --start-date/--end-date exist only because discover_unique_patients_from_
+    schedule's sole data source is Practice Fusion's Schedule -- a day-by-day
+    calendar with no "look up by GUID" capability, so a date range was the
+    only way to make the scan land on a day this patient appears (which also
+    happened to be where patient_name/dob/a representative visit date came
+    from). A known GUID doesn't need any of that: it goes straight to
+    patient_summary_url(guid), same as process_one_record itself does a
+    moment later for the actual print. name/dob are scraped directly off the
+    chart page (same data/elements patient_scraper.py's own profile scrape
+    reads via safe_text_by_data(page, "full-name"/"birth-date-text")), and
+    TODAY is used as the nominal appointment_date -- historical_diagnosis is
+    patient-level data, not tied to any one visit; the backend's manifest
+    schema just requires appt_date to be non-null, not tied to a real past
+    appointment.
+
+    process_one_record navigates to this same summary_url again right after
+    this returns -- a second, identical page.goto a moment later is harmless.
+    It does the exact same "goto summary_url, then try/except-swallow a
+    wait_for on PATIENT_NAME_SELECTOR" dance immediately afterward (see its
+    skip_encounter_lookup branch), which is why the wait below is swallowed
+    the same way here rather than left to raise: confirmed live 2026-09-23
+    that this element isn't reliably visible-in-time on the summary page even
+    for a perfectly valid GUID, so a hard failure here was rejecting good
+    patients before Print Chart was ever attempted. safe_text_by_data itself
+    never raises either way (returns "" on a missing element), so a slow- or
+    non-rendering name/dob just means a blanker manifest entry for this
+    patient, not a failed run -- process_one_record's own subsequent
+    navigation and Print Chart attempt are the real authority on whether this
+    GUID actually resolves to a chart at all.
+    """
+    from pf_sync_pkg.chart_ui import patient_summary_url
+    from pf_sync_pkg.constants import PATIENT_NAME_SELECTOR
+    from pf_sync_pkg.patient_scraper import safe_text_by_data
+
+    page.goto(patient_summary_url(args.patient_guid), wait_until="domcontentloaded")
+    try:
+        page.locator(PATIENT_NAME_SELECTOR).first.wait_for(state="visible", timeout=15_000)
+    except Exception:
+        pass
+    patient_name = safe_text_by_data(page, "full-name") or args.patient_guid
+    patient_dob = safe_text_by_data(page, "birth-date-text")
+
+    record = QueueRecord(
+        row_id=str(uuid.uuid4()),
+        practice=args.practice,
+        ehr_patient_guid=args.patient_guid,
+        patient_name=patient_name,
+        patient_dob=patient_dob,
+        appointment_date=datetime.now().strftime("%Y-%m-%d"),
+        appointment_status="seen",
+        appointment_type="",
+        provider="",
+        service_location="",
+        patient_id="",
+        patient_match_status="matched",
+        patient_match_method="direct_guid_lookup",
+        status="ready",
+        status_reason="unique_patient_historical_diagnosis_pull",
+        created_at=now_iso(),
+        updated_at=now_iso(),
+    )
+    return [record]
 
 
 def derive_outcome_from_backend_status(backend_response: dict) -> str:
@@ -729,16 +850,33 @@ def run_unique_patients(args: argparse.Namespace) -> dict:
     result: dict = {}
 
     def callback(page):
-        all_records, never_seen = discover_unique_patients_from_schedule(page, args, config)
+        guid_only = bool(args.patient_guid) and not (args.start_date and args.end_date)
+        if guid_only:
+            # No date range at all -- skip Schedule discovery entirely and go
+            # straight to this one patient's chart. See
+            # discover_single_patient_by_guid's docstring for why the date
+            # range isn't needed here even though it is for the normal scan.
+            all_records = discover_single_patient_by_guid(page, args)
+            never_seen = []
+            print(
+                f"[HISTORICAL-DIAGNOSIS-BACKFILL] --patient-guid {args.patient_guid} resolved "
+                f"directly from PF's chart -- {all_records[0].patient_name} -- no Schedule scan, "
+                f"no date range needed.",
+                flush=True,
+            )
+        else:
+            all_records, never_seen = discover_unique_patients_from_schedule(page, args, config)
+
         seen_records = [r for r in all_records if r.status_reason != NOT_SEEN_STATUS_REASON]
         not_seen_records = [r for r in all_records if r.status_reason == NOT_SEEN_STATUS_REASON]
 
-        print(
-            f"[HISTORICAL-DIAGNOSIS-BACKFILL] {len(all_records)} unique patient(s) total between "
-            f"{args.start_date} and {args.end_date} -- {len(seen_records)} Seen, "
-            f"{len(not_seen_records)} not Seen.",
-            flush=True,
-        )
+        if not guid_only:
+            print(
+                f"[HISTORICAL-DIAGNOSIS-BACKFILL] {len(all_records)} unique patient(s) total between "
+                f"{args.start_date} and {args.end_date} -- {len(seen_records)} Seen, "
+                f"{len(not_seen_records)} not Seen.",
+                flush=True,
+            )
 
         # Seed EVERY discovered patient into the summary right away, never
         # overwriting an existing entry -- so the file always reflects the
@@ -750,6 +888,26 @@ def run_unique_patients(args: argparse.Namespace) -> dict:
             to_consider = all_records
         else:
             to_consider = seen_records
+
+        if args.patient_guid:
+            # A targeted single-patient request: narrow to just this GUID
+            # (whichever population it's already in -- Seen or not-seen,
+            # regardless of --include-not-seen/--only-not-seen) and always
+            # actually run it for real; see the DB-check/completed-records
+            # bypasses below.
+            to_consider = [r for r in all_records if r.ehr_patient_guid == args.patient_guid]
+            if not to_consider:
+                where = (
+                    "on their own chart"
+                    if guid_only
+                    else f"on the Schedule for {args.start_date} to {args.end_date}"
+                )
+                print(
+                    f"[HISTORICAL-DIAGNOSIS-BACKFILL] --patient-guid {args.patient_guid} was not "
+                    f"found {where} -- nothing to do.",
+                    flush=True,
+                )
+
         to_consider_guids = {r.ehr_patient_guid for r in to_consider}
         _apply_patient_updates(
             args, never_seen,
@@ -763,8 +921,10 @@ def run_unique_patients(args: argparse.Namespace) -> dict:
         # Check the RCM DB before ever touching PF: a patient whose
         # historical_diagnosis is already on file needs neither a chart
         # opened nor a backend call this run. One batched query for the
-        # whole population, not one per patient.
-        if not args.redo and not args.skip_db_check:
+        # whole population, not one per patient. Skipped entirely for a
+        # targeted --patient-guid request -- that's an explicit "pull this
+        # one now" ask, not something the DB pre-check should second-guess.
+        if not args.redo and not args.skip_db_check and not args.patient_guid:
             already_in_db = _fetch_existing_historical_diagnosis(
                 [r.ehr_patient_guid for r in to_consider]
             )
@@ -869,14 +1029,22 @@ def run_unique_patients(args: argparse.Namespace) -> dict:
 
 
 def _unique_patients_summary_path(args: argparse.Namespace) -> Path:
+    if args.patient_guid and not (args.start_date and args.end_date):
+        # GUID-only lookup (see discover_single_patient_by_guid) -- no date
+        # range to name the file after, so key it by GUID instead. Singular
+        # "unique_patient_" (not "unique_patients_") keeps it visually
+        # distinct from a date-ranged file while still matching
+        # _completed_records' "unique_patient*.json" glob below.
+        return Path(args.downloads_dir) / f"unique_patient_{args.patient_guid}.json"
     return Path(args.downloads_dir) / f"unique_patients_{args.start_date}_to_{args.end_date}.json"
 
 
 def _completed_records(args: argparse.Namespace) -> dict:
     """The FULL prior patient entry (not just the GUID) for every GUID
     already marked "special_run_updated" or "already_in_db" in ANY
-    unique_patients_*.json summary file under --downloads-dir -- those are
-    the only two outcomes that mean historical_diagnosis was actually saved.
+    unique_patient*.json summary file under --downloads-dir (date-ranged or
+    single-GUID) -- those are the only two outcomes that mean
+    historical_diagnosis was actually saved.
     Everything else ("pending", "not_processed_this_run", "failed",
     "review", "needs_attention", "backend_failed", "reprinted_only",
     "reprinted_dry_run", "ignored", and every "skipped_<reason>" a declined
@@ -888,8 +1056,10 @@ def _completed_records(args: argparse.Namespace) -> dict:
     230+ declined/unconfirmed patients were never retried and nobody
     noticed until the backend detail was actually inspected.
 
-    Pools across EVERY summary file, not just the one matching this run's
-    exact --start-date/--end-date -- confirmed live 2026-09-21: July and
+    Pools across EVERY summary file (both date-ranged unique_patients_*.json
+    and single-GUID unique_patient_<guid>.json files from a GUID-only lookup
+    -- see _unique_patients_summary_path), not just the one matching this
+    run's exact --start-date/--end-date -- confirmed live 2026-09-21: July and
     August were each already fully delivered under their own per-month
     date ranges (unique_patients_2026-07-01_to_2026-07-31.json,
     unique_patients_2026-08-01_to_2026-08-31.json), then a later run
@@ -912,7 +1082,7 @@ def _completed_records(args: argparse.Namespace) -> dict:
     downloads_dir = Path(args.downloads_dir)
     if not downloads_dir.is_dir():
         return completed
-    for path in downloads_dir.glob("unique_patients_*.json"):
+    for path in downloads_dir.glob("unique_patient*.json"):
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
         except Exception:
@@ -1092,13 +1262,52 @@ def _patient_entry(record, outcome: str, backend_response) -> dict:
     return entry
 
 
+_FAILURE_REASON_LABELS = {
+    # skipped_<reason> is derive_outcome_from_backend_status's encoding of
+    # runPfFacesheetSpecialHistoricalDiagnosisRun's own {"status": "skipped",
+    # "reason": ...} response -- these four are the exact reason strings
+    # that backend mutation returns (see its docstring/derive_outcome_from_
+    # backend_status above). Everything else here is one of this script's
+    # OWN outcome values (handle_process_error's states, or a local failure
+    # before the backend was ever reached).
+    "skipped_extraction_empty": "no data found (extraction empty)",
+    "skipped_facility_not_resolved": "facility not resolved",
+    "skipped_ocr_extraction_failed": "failed extraction (OCR)",
+    "skipped_patient_header_not_resolved": "patient header not resolved",
+    "skipped_unknown": "skipped (backend gave no reason)",
+    "backend_failed": "backend call failed (network/exception)",
+    "needs_attention": "patient not resolved (needs attention)",
+    "review": "needs manual review",
+    "ignored": "ignored (appointment status excluded)",
+}
+
+
+def _failure_reason_label(outcome: str) -> str:
+    """Human-readable label for one failed patient's outcome, used to key the
+    "failure_reasons" breakdown in _compute_totals. Falls back to the raw
+    outcome string (underscores turned to spaces) for anything not in the
+    table above -- e.g. a backend_unexpected_status_<status> outcome, or a
+    future skipped_<reason> the backend starts returning that isn't listed
+    here yet -- so a new failure mode still shows up in the count under its
+    own name instead of silently disappearing into a generic bucket.
+    """
+    return _FAILURE_REASON_LABELS.get(outcome, (outcome or "unknown").replace("_", " "))
+
+
 def _compute_totals(patients: list) -> dict:
+    failure_reasons: dict = {}
+    for p in patients:
+        if p.get("success") is False:
+            label = _failure_reason_label(p.get("outcome") or "")
+            failure_reasons[label] = failure_reasons.get(label, 0) + 1
     return {
         "total_patients": len(patients),
         "seen": sum(1 for p in patients if p.get("seen")),
         "not_seen": sum(1 for p in patients if not p.get("seen")),
         "success": sum(1 for p in patients if p.get("success") is True),
         "failure": sum(1 for p in patients if p.get("success") is False),
+        # Most-common reason first -- see _failure_reason_label.
+        "failure_reasons": dict(sorted(failure_reasons.items(), key=lambda kv: -kv[1])),
         "not_yet_attempted": sum(1 for p in patients if p.get("success") is None),
     }
 
