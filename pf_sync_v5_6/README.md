@@ -14,6 +14,9 @@ Chrome session.
   rather than run standalone. It can still be run standalone on port **8011**
   for local development (§4 below).
 - No database — everything is files: JSON queue, CSV/XLSX reports, PDF output.
+- **Flow diagram**: [sync-schedules-by-date](https://claude.ai/artifact/YVJ9rqX59vfoAQ73tHvoFG) — stage-by-stage
+  walkthrough of the one pipeline still in production, including the dedup/dupe-row
+  fix history and the still-open items.
 
 ---
 
