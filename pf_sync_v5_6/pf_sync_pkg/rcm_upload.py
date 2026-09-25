@@ -192,20 +192,44 @@ def _delete_local_files(paths: list) -> Dict[str, object]:
     return {"deleted": deleted, "errors": errors}
 
 
-def retry_orphaned_zips(downloads_dir: str, folder_structure: str = PF_RCM_FOLDER_STRUCTURE) -> Dict[str, object]:
+def retry_orphaned_zips(
+    downloads_dir: str,
+    folder_structure: str = PF_RCM_FOLDER_STRUCTURE,
+    practice_name: str = "",
+    exclude_manifest_path: str = "",
+) -> Dict[str, object]:
     """Re-attempt delivery of any zip left over from a previous run whose upload
-    failed. build_and_upload_zip only ever zips the CURRENT run's freshly-
-    processed records -- a zip that fails to upload once is otherwise orphaned
-    forever, since nothing re-scans for it (see this module's docstring: unlike
-    Tebra's zipbuild.pass_zip, which re-queries `file_path IS NULL` every run
-    and so self-heals from a failed delivery, pf_sync has no DB to re-query).
-    Call this before building today's new zip so a stuck delivery gets retried
-    on every subsequent run instead of sitting on disk untouched.
+    failed, PLUS (when practice_name is given) sweep up any appointments_*.json
+    manifest that was never even zipped in the first place. build_and_upload_zip
+    only ever zips the CURRENT run's freshly-processed records -- a zip that
+    fails to upload once, or a run that never reaches build_and_upload_zip at
+    all, is otherwise orphaned forever, since nothing re-scans for it (see this
+    module's docstring: unlike Tebra's zipbuild.pass_zip, which re-queries
+    `file_path IS NULL` every run and so self-heals from a failed delivery,
+    pf_sync has no DB to re-query). Call this before building today's new zip
+    so a stuck delivery gets retried on every subsequent run instead of
+    sitting on disk untouched.
 
     A retried zip's PDFs are only deleted once THIS retry actually succeeds --
     same "never delete on a failed/skipped upload" rule as build_and_upload_zip.
     The zip's own manifest json entry (already embedded from the run that built
-    it) travels with it, so no manifest_path is needed here.
+    it) travels with it, so no manifest_path is needed for the zip-retry half.
+
+    2026-09-25: the manifest-sweep half exists because a run that crashes or
+    hangs between finishing process_records_on_page (which already wrote a
+    manifest + real PDFs) and reaching build_and_upload_zip leaves that whole
+    batch stuck forever -- the queue rows are already "processed" (not
+    failed/review), so nothing ever re-selects them, and there was no zip yet
+    for the old zip-only sweep above to find. Confirmed live 2026-09-25: 120
+    rows across 8 manifests, some going back three weeks, silently never
+    delivered. A manifest is swept only when at least one of its PDFs is still
+    on disk (build_and_upload_zip's own missing-PDF handling covers the rest,
+    same as a normal call); exclude_manifest_path skips the CALLER's own
+    in-flight manifest so this sweep doesn't consume it out from under the
+    build_and_upload_zip call that's about to run right after this one.
+    practice_name="" (the default) skips this half entirely -- existing
+    callers that only pass downloads_dir keep today's zip-only behavior
+    unchanged.
     """
     directory = Path(downloads_dir)
     if not directory.is_dir():
@@ -258,7 +282,54 @@ def retry_orphaned_zips(downloads_dir: str, folder_structure: str = PF_RCM_FOLDE
                 flush=True,
             )
 
-    return {"retried": retried, "uploaded": uploaded, "failed": failed, "details": details}
+    manifest_sweep = _sweep_unzipped_manifests(
+        directory, folder_structure, practice_name, exclude_manifest_path,
+    )
+
+    return {
+        "retried": retried, "uploaded": uploaded, "failed": failed, "details": details,
+        "manifest_sweep": manifest_sweep,
+    }
+
+
+def _sweep_unzipped_manifests(
+    directory: Path,
+    folder_structure: str,
+    practice_name: str,
+    exclude_manifest_path: str,
+) -> Dict[str, object]:
+    """The never-zipped-at-all half of retry_orphaned_zips -- see its docstring.
+    No-ops (practice_name is required to build a new zip's filename/contents)
+    when the caller hasn't opted in by passing one."""
+    if not practice_name:
+        return {"swept": 0, "uploaded": 0, "failed": 0}
+
+    excluded = str(Path(exclude_manifest_path).resolve()) if exclude_manifest_path else ""
+    swept = uploaded = failed = 0
+    details = []
+    for manifest_path in sorted(directory.glob("appointments_*.json")):
+        resolved = str(manifest_path.resolve())
+        if resolved == excluded:
+            continue
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8-sig"))
+        except Exception:
+            continue  # not a manifest we recognize -- leave it alone, not our concern here.
+        pdf_names = {r.get("pdf_file", "") for r in (manifest.get("appointments") or []) if r.get("pdf_file")}
+        if not any((directory / name).exists() for name in pdf_names if name):
+            continue  # every PDF this manifest references is already gone -- already delivered elsewhere.
+
+        swept += 1
+        print(f"[RCM-UPLOAD] Found never-uploaded manifest {manifest_path.name} -- delivering it now", flush=True)
+        result = build_and_upload_zip(resolved, str(directory), practice_name, folder_structure)
+        details.append({"manifest_name": manifest_path.name, **result})
+        if result.get("uploaded"):
+            uploaded += 1
+        else:
+            failed += 1
+            print(f"[RCM-UPLOAD] Manifest sweep FAILED for {manifest_path.name}: {result}", flush=True)
+
+    return {"swept": swept, "uploaded": uploaded, "failed": failed, "details": details}
 
 
 def build_and_upload_zip(

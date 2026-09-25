@@ -52,7 +52,7 @@ from pf_sync_pkg.cli import (
     run_refresh,
     run_sync_schedules_by_date,
 )
-from pf_sync_pkg.constants import BUILD_ID
+from pf_sync_pkg.constants import BUILD_ID, disabled_command_message
 from pf_sync_pkg.ingest import ingest_appointments
 from pf_sync_pkg.matching import match_patients, resolve_patient_manually
 from pf_sync_pkg.models import AppointmentReportConfig, SyncConfig
@@ -446,6 +446,13 @@ class ProcessRequest(BrowserFieldsNoCreds):
                     "instead of each call producing its own fragment. Leave unset for the old "
                     "per-call random-uuid manifest naming.",
     )
+    practice: str = Field(
+        default="",
+        description="Zip this call's processed PDFs and upload to rcm-attachments immediately "
+                    "after processing (same delivery path sync-schedules-by-date uses "
+                    "internally), instead of requiring a separate /zip-upload call. Leave unset "
+                    "to skip upload entirely and only generate PDFs, as before.",
+    )
     wait_for_completion: bool = True
 
 
@@ -649,7 +656,6 @@ class SyncSchedulesByDateRequest(BrowserFieldsNoCreds, ReportDateFields):
     dry_run: bool = False
     include_failed: bool = False
     lookback_days: int = 3
-    retry_concurrency: int = 3
     wait_for_completion: bool = True
 
 
@@ -759,6 +765,7 @@ def doctor(request: DoctorRequest):
 
 @app.post("/ingest")
 def ingest(request: IngestRequest):
+    raise HTTPException(status_code=410, detail=disabled_command_message("ingest"))
     config = SyncConfig.load(request.config_json) if request.config_json else SyncConfig()
     try:
         counts = ingest_appointments(
@@ -880,6 +887,30 @@ def process_endpoint(request: ProcessRequest):
             )
             finish_run(store, run_id, "success", counts)
             save_store(request.queue_json, store, rows)
+
+            # 2026-09-25: opt-in (practice) zip+upload right after processing -- see
+            # cli.py's identical block on the "process" command for the full reasoning.
+            # The facesheet-processing trigger needs no extra code here either:
+            # build_and_upload_zip marks it pending, and browser_command_wrapper's own
+            # finally block already fires it after the browser closes.
+            if request.practice and not request.dry_run:
+                from pf_sync_pkg.rcm_upload import build_and_upload_zip, retry_orphaned_zips
+
+                manifest_path = counts.get("metadata_manifest_path", "")
+                try:
+                    counts["rcm_upload_retry"] = retry_orphaned_zips(
+                        request.downloads_dir, practice_name=request.practice, exclude_manifest_path=manifest_path,
+                    )
+                except Exception as exc:
+                    counts["rcm_upload_retry"] = {"error": f"{type(exc).__name__}: {exc}"}
+
+                try:
+                    counts["rcm_upload"] = build_and_upload_zip(
+                        manifest_path, request.downloads_dir, request.practice,
+                    )
+                except Exception as exc:
+                    counts["rcm_upload"] = {"error": f"{type(exc).__name__}: {exc}"}
+
             return counts
 
         return browser_command_wrapper(args, callback)
@@ -889,6 +920,7 @@ def process_endpoint(request: ProcessRequest):
 
 @app.post("/full-sync")
 def full_sync_endpoint(request: FullSyncRequest):
+    raise HTTPException(status_code=410, detail=disabled_command_message("full-sync"))
     args = _namespace_with_env_creds(request)
 
     def job():
@@ -932,6 +964,7 @@ def full_sync_endpoint(request: FullSyncRequest):
 
 @app.post("/refresh")
 def refresh_endpoint(request: RefreshRequest):
+    raise HTTPException(status_code=410, detail=disabled_command_message("refresh"))
     args = _namespace_with_env_creds(request)
 
     def job():
@@ -945,6 +978,7 @@ def refresh_endpoint(request: RefreshRequest):
 
 @app.post("/nightly")
 def nightly_endpoint(request: NightlyRequest):
+    raise HTTPException(status_code=410, detail=disabled_command_message("nightly"))
     args = _namespace_with_env_creds(request)
 
     def job():
@@ -973,6 +1007,7 @@ class FullSyncByDateRequestSlim(BaseModel):
 
 @app.post("/full-sync-by-date")
 def full_sync_by_date_endpoint(request: FullSyncByDateRequestSlim):
+    raise HTTPException(status_code=410, detail=disabled_command_message("full-sync-by-date"))
     # Expand the slim request into the full model so every other field keeps
     # FullSyncByDateRequest's own real, anchored defaults instead of a
     # caller-supplied Swagger placeholder.
@@ -995,6 +1030,7 @@ def full_sync_by_date_endpoint(request: FullSyncByDateRequestSlim):
 
 @app.post("/facesheet-pull-by-date")
 def facesheet_pull_by_date_endpoint(request: FacesheetPullByDateRequestSlim):
+    raise HTTPException(status_code=410, detail=disabled_command_message("facesheet-pull-by-date"))
     # Expand the slim request into the full model so every other field keeps
     # FacesheetPullByDateRequest's own real, anchored defaults (never a
     # caller-supplied "string" placeholder) -- see FacesheetPullByDateRequestSlim's

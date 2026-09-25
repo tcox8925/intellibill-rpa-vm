@@ -120,3 +120,31 @@ def configure_csv_field_limit() -> int:
 
 
 CSV_FIELD_LIMIT = configure_csv_field_limit()
+
+# 2026-09-24: sync-schedules-by-date is now the only supported Practice Fusion
+# facesheet pipeline. The other paths that can create/touch ehr.ehr_pf_queue_rows
+# (ingest, nightly, full-sync-by-date, facesheet-pull-by-date, full-sync, refresh)
+# are disabled, not removed -- they raced against sync-schedules-by-date's own
+# scheduled runs (each unaware of the other) and produced 308 duplicate rows for
+# the same real appointments; see pf_sync_pkg/cli.py's run_sync_schedules_by_date
+# docstring/comments and dedupe_queue_rows.py for the incident and cleanup.
+# Kept as a shared message so the CLI (cli.py main()) and the HTTP API (server.py)
+# report the identical reason for every one of the 6.
+DISABLED_COMMANDS = {
+    "ingest": "sync-schedules-by-date discovers and ingests appointments itself -- a separate 'ingest' run duplicates it.",
+    "nightly": "nightly's pull-report/ingest/match/process pipeline duplicates sync-schedules-by-date's own discovery.",
+    "full-sync-by-date": "full-sync-by-date's report-based discovery duplicates sync-schedules-by-date's own discovery.",
+    "facesheet-pull-by-date": "facesheet-pull-by-date's report-based discovery duplicates sync-schedules-by-date's own discovery.",
+    "full-sync": "full-sync's registry-based discovery duplicates sync-schedules-by-date's own discovery.",
+    "refresh": "refresh creates its own synthetic queue row outside sync-schedules-by-date's dedup logic.",
+}
+
+
+def disabled_command_message(command: str) -> str:
+    reason = DISABLED_COMMANDS.get(command, "")
+    return (
+        f"'{command}' is disabled: sync-schedules-by-date is now the only supported "
+        f"Practice Fusion sync pipeline (see pf_sync_v5_6/README.md). {reason} "
+        f"Use 'sync-schedules-by-date' instead. (Pre-existing duplicate rows this "
+        f"already created: see pf_sync_v5_6/dedupe_queue_rows.py.)"
+    )
