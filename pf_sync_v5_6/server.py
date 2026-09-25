@@ -446,6 +446,13 @@ class ProcessRequest(BrowserFieldsNoCreds):
                     "instead of each call producing its own fragment. Leave unset for the old "
                     "per-call random-uuid manifest naming.",
     )
+    practice: str = Field(
+        default="",
+        description="Zip this call's processed PDFs and upload to rcm-attachments immediately "
+                    "after processing (same delivery path sync-schedules-by-date uses "
+                    "internally), instead of requiring a separate /zip-upload call. Leave unset "
+                    "to skip upload entirely and only generate PDFs, as before.",
+    )
     wait_for_completion: bool = True
 
 
@@ -649,7 +656,6 @@ class SyncSchedulesByDateRequest(BrowserFieldsNoCreds, ReportDateFields):
     dry_run: bool = False
     include_failed: bool = False
     lookback_days: int = 3
-    retry_concurrency: int = 3
     wait_for_completion: bool = True
 
 
@@ -881,6 +887,30 @@ def process_endpoint(request: ProcessRequest):
             )
             finish_run(store, run_id, "success", counts)
             save_store(request.queue_json, store, rows)
+
+            # 2026-09-25: opt-in (practice) zip+upload right after processing -- see
+            # cli.py's identical block on the "process" command for the full reasoning.
+            # The facesheet-processing trigger needs no extra code here either:
+            # build_and_upload_zip marks it pending, and browser_command_wrapper's own
+            # finally block already fires it after the browser closes.
+            if request.practice and not request.dry_run:
+                from pf_sync_pkg.rcm_upload import build_and_upload_zip, retry_orphaned_zips
+
+                manifest_path = counts.get("metadata_manifest_path", "")
+                try:
+                    counts["rcm_upload_retry"] = retry_orphaned_zips(
+                        request.downloads_dir, practice_name=request.practice, exclude_manifest_path=manifest_path,
+                    )
+                except Exception as exc:
+                    counts["rcm_upload_retry"] = {"error": f"{type(exc).__name__}: {exc}"}
+
+                try:
+                    counts["rcm_upload"] = build_and_upload_zip(
+                        manifest_path, request.downloads_dir, request.practice,
+                    )
+                except Exception as exc:
+                    counts["rcm_upload"] = {"error": f"{type(exc).__name__}: {exc}"}
+
             return counts
 
         return browser_command_wrapper(args, callback)

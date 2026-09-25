@@ -261,6 +261,13 @@ def build_parser() -> argparse.ArgumentParser:
              "appointments_<run-id>.json manifest instead of each call producing its own "
              "fragment. Leave unset for the old per-call random-uuid manifest naming.",
     )
+    process.add_argument(
+        "--practice", default="",
+        help="Zip this call's processed PDFs and upload to rcm-attachments immediately after "
+             "processing (same delivery path sync-schedules-by-date uses internally), instead "
+             "of requiring a separate 'zip-upload' call. Leave unset to skip upload entirely "
+             "and only generate PDFs, as before.",
+    )
     add_browser_arguments(process)
 
     full_sync = sub.add_parser(
@@ -396,14 +403,6 @@ def build_parser() -> argparse.ArgumentParser:
              "scans [today - lookback_days, today] instead of just today, so a patient "
              "missed on a prior day still gets caught on a later call. Explicit dates "
              "always win over this default.",
-    )
-    sync_schedules_by_date.add_argument(
-        "--retry-concurrency", type=int, default=3,
-        help=(
-            "Extra Chrome tabs (same logged-in session) to run the failed/review retry pass "
-            "across concurrently. 1 = single-tab behavior. Not yet validated against PF's own "
-            "tolerance for simultaneous tabs -- keep this small (2-3) until proven out."
-        ),
     )
     add_report_dates(sync_schedules_by_date)
     add_browser_arguments(sync_schedules_by_date)
@@ -1155,28 +1154,40 @@ def run_sync_schedules_by_date(
 
         # Retry failed/review rows from THIS run immediately, same run, before
         # the zip goes out -- otherwise a row that failed here just sits until
-        # someone happens to trigger a whole new run. Run across a few extra
-        # tabs (context.new_page(), same logged-in session) concurrently --
-        # see process_records_concurrently's docstring for why this is safe.
-        # Bounded to one retry pass: a row that fails again goes out as
-        # failed/review in the response same as today, to be picked up by the
-        # next scheduled run rather than looping here indefinitely.
+        # someone happens to trigger a whole new run. Bounded to one retry
+        # pass: a row that fails again goes out as failed/review in the
+        # response same as today, to be picked up by the next scheduled run
+        # rather than looping here indefinitely.
+        #
+        # 2026-09-25: this used to fan out across extra tabs via
+        # process_records_concurrently (real threading.Thread workers calling
+        # into Pages that were all created on THIS thread). Playwright's sync
+        # API is greenlet-based and single-thread-bound to whichever thread
+        # called sync_playwright().start() -- calling into it from a spawned
+        # thread raises "Cannot switch to a different thread" regardless of
+        # which Page is being touched. Confirmed live: every failed row in
+        # the queue (18/18) carried exactly this error. Reverted to serial,
+        # single-page processing on the same `page` this run already has --
+        # slower than the intended 3x, but not silently broken. See
+        # process_records_concurrently's own docstring for what a correct
+        # fix looks like (each worker thread needs its own independent
+        # Playwright/CDP connection, not a Page handed to it from another
+        # thread) if the retry-speed tradeoff matters enough to revisit.
         try:
             store = load_store(args.queue_json)
             rows = store_rows(store)
             retry_candidates = [r for r in rows if r.status in {"failed", "review"}]
             if retry_candidates:
                 print(
-                    f"Retrying {len(retry_candidates)} failed/review row(s) from this run "
-                    f"across up to {args.retry_concurrency} tab(s) before upload...",
+                    f"Retrying {len(retry_candidates)} failed/review row(s) from this run, "
+                    f"serially, before upload...",
                     flush=True,
                 )
-                stages["process_retry"] = process_records_concurrently(
-                    context, args.queue_json, config, args.downloads_dir,
-                    retry_candidates, rows, store, manifest_run_id,
-                    use_timeline_fallback=False, skip_encounter_lookup=True,
-                    allow_most_recent_note_fallback=True, dry_run=args.dry_run,
-                    concurrency=args.retry_concurrency,
+                stages["process_retry"] = process_records_on_page(
+                    page, args.queue_json, config, args.downloads_dir,
+                    retry_candidates, rows, store, 0, args.dry_run, False,
+                    manifest_run_id, use_timeline_fallback=False, skip_encounter_lookup=True,
+                    allow_most_recent_note_fallback=True,
                 )
         except Exception as exc:
             stages["process_retry"] = {"error": f"{type(exc).__name__}: {exc}"}
@@ -1186,15 +1197,27 @@ def run_sync_schedules_by_date(
         else:
             from pf_sync_pkg.rcm_upload import build_and_upload_zip, retry_orphaned_zips
 
-            try:
-                stages["rcm_upload_retry"] = retry_orphaned_zips(args.downloads_dir)
-            except Exception as exc:
-                stages["rcm_upload_retry"] = {"error": f"{type(exc).__name__}: {exc}"}
-
             manifest_path = ""
             process_result = stages.get("process")
             if isinstance(process_result, dict):
                 manifest_path = process_result.get("metadata_manifest_path", "")
+
+            try:
+                # practice_name=args.practice, exclude_manifest_path=manifest_path:
+                # also sweeps up any appointments_*.json from a PRIOR run that
+                # crashed/hung before ever reaching its own build_and_upload_zip
+                # call -- see retry_orphaned_zips' own docstring for the incident
+                # this closes (120 rows, 8 manifests, some three weeks old, all
+                # "processed" in the queue and so invisible to every other retry
+                # path). exclude_manifest_path keeps this call from consuming
+                # THIS run's own manifest before the build_and_upload_zip call
+                # right below gets to it.
+                stages["rcm_upload_retry"] = retry_orphaned_zips(
+                    args.downloads_dir, practice_name=args.practice, exclude_manifest_path=manifest_path,
+                )
+            except Exception as exc:
+                stages["rcm_upload_retry"] = {"error": f"{type(exc).__name__}: {exc}"}
+
             try:
                 stages["rcm_upload"] = build_and_upload_zip(
                     manifest_path, args.downloads_dir, args.practice,
@@ -1597,6 +1620,36 @@ def main() -> int:
                 )
                 finish_run(store, run_id, "success", counts)
                 save_store(args.queue_json, store, rows)
+
+                # 2026-09-25: opt-in (--practice) zip+upload right after processing,
+                # same delivery path run_sync_schedules_by_date uses internally, so a
+                # manual `process --include-failed --practice ...` call doesn't need a
+                # separate 'zip-upload' call afterward. The facesheet-processing
+                # trigger itself needs no extra code here: build_and_upload_zip marks
+                # it pending on a successful upload, and browser_command_wrapper's own
+                # finally block (_run_pending_pf_facesheet_trigger_after_close) already
+                # fires it for every command, after the browser closes -- it was just a
+                # no-op for plain 'process' before, since nothing ever marked it
+                # pending without this. Skipped entirely when --practice is omitted, so
+                # existing callers that only want PDFs generated keep today's behavior.
+                if args.practice and not args.dry_run:
+                    from pf_sync_pkg.rcm_upload import build_and_upload_zip, retry_orphaned_zips
+
+                    manifest_path = counts.get("metadata_manifest_path", "")
+                    try:
+                        counts["rcm_upload_retry"] = retry_orphaned_zips(
+                            args.downloads_dir, practice_name=args.practice, exclude_manifest_path=manifest_path,
+                        )
+                    except Exception as exc:
+                        counts["rcm_upload_retry"] = {"error": f"{type(exc).__name__}: {exc}"}
+
+                    try:
+                        counts["rcm_upload"] = build_and_upload_zip(
+                            manifest_path, args.downloads_dir, args.practice,
+                        )
+                    except Exception as exc:
+                        counts["rcm_upload"] = {"error": f"{type(exc).__name__}: {exc}"}
+
                 return counts
 
             counts = browser_command_wrapper(args, callback)
