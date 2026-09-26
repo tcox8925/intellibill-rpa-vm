@@ -458,6 +458,18 @@ def build_parser() -> argparse.ArgumentParser:
              "(default: delete them once Azure has the zip, so PHI doesn't linger locally).",
     )
 
+    retry_orphaned = sub.add_parser(
+        "retry-orphaned-zips",
+        help="Sweep downloads-dir for stale zips/manifests from a previous run that never made "
+             "it to Azure and (re)deliver them, without processing anything new.",
+    )
+    retry_orphaned.add_argument("--downloads-dir", required=True)
+    retry_orphaned.add_argument(
+        "--practice", default="",
+        help="Also sweep manifests that were never even zipped (a run that crashed between "
+             "Process and Upload). Leave unset to only retry zips that already exist on disk.",
+    )
+
     write_config = sub.add_parser("write-config", help="Write the complete PDF config.")
     write_config.add_argument("--config-json", required=True)
     write_report_config = sub.add_parser("write-report-config", help="Write the report config.")
@@ -1737,6 +1749,17 @@ def main() -> int:
             # concern -- but the trigger is still deferred (build_and_upload_zip
             # only marks it pending, see rcm_upload.py), so fire it explicitly
             # here rather than never at all.
+            trigger_result = run_pending_pf_facesheet_trigger()
+            if trigger_result:
+                result["pf_facesheet_processing"] = trigger_result
+            print(json.dumps(result, indent=2))
+            return 0
+
+        if args.command == "retry-orphaned-zips":
+            from pf_sync_pkg.rcm_upload import retry_orphaned_zips, run_pending_pf_facesheet_trigger
+
+            result = retry_orphaned_zips(args.downloads_dir, practice_name=args.practice)
+            # No browser involved in this command either -- see zip-upload above.
             trigger_result = run_pending_pf_facesheet_trigger()
             if trigger_result:
                 result["pf_facesheet_processing"] = trigger_result
