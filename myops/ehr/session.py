@@ -9,6 +9,8 @@ import re
 import shutil
 from datetime import datetime, timezone
 
+from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
+
 from .config import (
     LOGIN_URL, EMAIL, PASSWORD, DOWNLOAD_DIR, CST_TZ as CST,
 )
@@ -39,14 +41,44 @@ def normalize_practice_compare(text):
 
 def login_and_select_practice(page, practice_name):
     """Log in and click into `practice_name`, handling OTP. Raises if the
-    practice tile isn't found."""
+    practice tile isn't found. Returns Tebra's own canonical practice text
+    (the matched tile's text, or the single-practice dashboard header) --
+    not necessarily identical to `practice_name`, which callers may pass in
+    a normalized (lowercased/space-stripped) form -- so downstream DB
+    writes/folder naming stay consistent regardless of how the caller spelled it.
+
+    Confirmed live 2026-09-28/29: when the Tebra login resolves to a single
+    practice, it skips the 'Practice select' tile picker entirely and lands
+    straight on that practice's dashboard (URL .../scheduling/dashboard/...,
+    header shows [data-testid='navigation-practice-name']) -- waiting only
+    for the 'Practice select' h3 then hung for the full 30s timeout. Wait
+    for 'Practice select' first as the normal case; only fall back to
+    reading the single-practice dashboard header if that wait times out.
+    """
     page.goto(LOGIN_URL)
     page.fill("#userName", EMAIL)
     page.fill("#password", PASSWORD)
     page.click("#sign-in")
 
-    page.wait_for_selector("h3:has-text('Practice select')")
     target = normalize_text(practice_name)
+
+    try:
+        page.wait_for_selector("h3:has-text('Practice select')", timeout=30_000)
+    except PlaywrightTimeoutError:
+        single_practice = page.locator("[data-testid='navigation-practice-name']")
+        if single_practice.count() == 0:
+            raise
+        landed = (single_practice.first.get_attribute("title") or single_practice.first.inner_text()).strip()
+        norm_landed = normalize_text(landed)
+        if target and (target in norm_landed or norm_landed in target):
+            print(f"[LOGIN] Single-practice landing '{landed}' matched requested '{practice_name}'")
+            _handle_otp(page)
+            return landed
+        raise RuntimeError(
+            f"Practice '{practice_name}' not found in Tebra UI. "
+            f"Account landed directly on single practice '{landed}' instead."
+        )
+
     tiles = page.locator("h6.MuiTypography-subtitle2")
     n = tiles.count()
 
@@ -59,7 +91,7 @@ def login_and_select_practice(page, practice_name):
             print(f"[LOGIN] Matched practice tile '{tile_text}' for '{practice_name}'")
             tiles.nth(i).click()
             _handle_otp(page)
-            return
+            return tile_text
 
     # No match: list what Tebra actually showed, to make the mismatch obvious.
     seen = [tiles.nth(i).inner_text().strip() for i in range(n)]
@@ -93,8 +125,27 @@ def _handle_otp(page):
 def discover_practices(page=None):
     """Read all practice names from the practice-select screen. If `page` is
     given it's assumed to already be at the select screen; otherwise this is
-    called right after login."""
-    page.wait_for_selector("h3:has-text('Practice select')", timeout=30_000)
+    called right after login.
+
+    Confirmed live 2026-09-28/29: Tebra skips the 'Practice select' tile
+    picker entirely and routes straight into a single practice's dashboard
+    (.../scheduling/dashboard/day/..., header shows
+    [data-testid='navigation-practice-name']) when the login only resolves
+    to one practice -- same landing login_and_select_practice's docstring
+    above handles. Wait for the picker as the normal case first; only fall
+    back to reading the single-practice dashboard header if that wait
+    times out, instead of hanging for the full timeout every time.
+    """
+    try:
+        page.wait_for_selector("h3:has-text('Practice select')", timeout=30_000)
+    except PlaywrightTimeoutError:
+        single_practice = page.locator("[data-testid='navigation-practice-name']")
+        if single_practice.count() == 0:
+            raise
+        landed = (single_practice.first.get_attribute("title") or single_practice.first.inner_text()).strip()
+        print(f"[DISCOVER] Practice-select skipped, single-practice landing: '{landed}'")
+        return [landed] if landed else []
+
     page.wait_for_timeout(2000)
     elements = page.locator("h6.MuiTypography-subtitle2")
     count = elements.count()
