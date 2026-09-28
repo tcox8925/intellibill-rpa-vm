@@ -421,6 +421,16 @@ class ResetRequest(BaseModel):
     all_processed: bool = False
 
 
+class RetryOrphanedZipsRequest(BaseModel):
+    downloads_dir: str
+    practice: str = Field(
+        default="",
+        description="Also sweep manifests that were never even zipped (a run that crashed "
+                    "between Process and Upload). Leave unset to only retry zips that already "
+                    "exist on disk.",
+    )
+
+
 # ---------------------------------------------------------------------------
 # Browser-job request models
 # ---------------------------------------------------------------------------
@@ -836,6 +846,23 @@ def reset_endpoint(request: ResetRequest):
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc))
     return {"reset": count}
+
+
+@app.post("/retry-orphaned-zips")
+def retry_orphaned_zips_endpoint(request: RetryOrphanedZipsRequest):
+    from pf_sync_pkg.rcm_upload import retry_orphaned_zips, run_pending_pf_facesheet_trigger
+
+    try:
+        result = retry_orphaned_zips(request.downloads_dir, practice_name=request.practice)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+    # No browser involved in this endpoint, so no CDP-cleanup ordering concern --
+    # but build_and_upload_zip only marks the trigger pending (see rcm_upload.py),
+    # so fire it explicitly here rather than never at all.
+    trigger_result = run_pending_pf_facesheet_trigger()
+    if trigger_result:
+        result["pf_facesheet_processing"] = trigger_result
+    return result
 
 
 @app.post("/pull-report")
