@@ -6,6 +6,7 @@ WorkSelector differs.
 """
 
 import os
+import threading
 import time
 from datetime import date, timedelta
 
@@ -19,8 +20,9 @@ from .browser import BROWSER_LAUNCH_LOCK
 from .selector import WorkSelector
 from .db import get_ehr_connection, log_run_event
 from .session import (
-    login_and_select_practice, discover_practices, resolve_practice_name,
+    login_and_select_practice, discover_practices,
     now_cst, cleanup_acc_directory, practice_download_dir, cleanup_practice_download_dir,
+    _handle_otp,
 )
 from .passes import (
     pass_appointments, pass_notes, pass_facesheets, pass_charges, pass_patient_match,
@@ -35,6 +37,69 @@ def _ts() -> str:
 
 def _log(message: str):
     print(f"[PIPELINE] [{_ts()}] {message}", flush=True)
+
+
+# Confirmed live 2026-09-24: DailyPdfLoaderJob.js fires every practice's
+# /run-tebra call as fire-and-forget, all landing within ~tens of ms of each
+# other (5 practices in one burst, confirmed via cron_job_executions).
+# Each one used to do its OWN full discovery login (fresh browser, fresh
+# Tebra sign-in) just to resolve its practice name against the tile list --
+# 5 redundant logins to the exact same shared Tebra account (LOGIN_URL/
+# EMAIL/PASSWORD in config.py are not per-practice; one login already shows
+# every practice's tile), each one a fresh chance to trip Tebra's OTP
+# challenge. _DISCOVERY_CACHE_LOCK is held for the WHOLE discovery login
+# (not just a cache check), so a request that lands while another is already
+# logging in queues behind it and then reuses its result, instead of also
+# logging in itself. 60s TTL is comfortably wider than the observed burst
+# spread, while still refreshing if /run-tebra is called standalone well
+# outside a daily fan-out.
+_DISCOVERY_CACHE_LOCK = threading.Lock()
+_DISCOVERY_CACHE_TTL_SECONDS = 60
+_discovery_cache: dict = {"practices": None, "fetched_at": 0.0}
+
+
+def _get_discovered_practices() -> list:
+    with _DISCOVERY_CACHE_LOCK:
+        cached = _discovery_cache["practices"]
+        if cached is not None and (time.monotonic() - _discovery_cache["fetched_at"]) < _DISCOVERY_CACHE_TTL_SECONDS:
+            return cached
+
+        from .config import LOGIN_URL, EMAIL, PASSWORD
+
+        # BROWSER_LAUNCH_LOCK (ehr/browser.py): only one Chromium instance
+        # runs at a time process-wide, so a concurrent per-practice login
+        # (session.py's login_and_select_practice, still one per practice)
+        # doesn't starve this discovery login's own grid render.
+        with BROWSER_LAUNCH_LOCK, sync_playwright() as p:
+            browser = p.chromium.launch(
+                headless=PLAYWRIGHT_HEADLESS,
+                args=PLAYWRIGHT_LAUNCH_ARGS,
+            )
+            context = browser.new_context(
+                no_viewport=(PLAYWRIGHT_VIEWPORT is None), viewport=PLAYWRIGHT_VIEWPORT,
+            )
+            page = context.new_page()
+            page.goto(LOGIN_URL)
+            page.fill("#userName", EMAIL)
+            page.fill("#password", PASSWORD)
+            page.click("#sign-in")
+            # Confirmed live 2026-09-24: this discovery login had no OTP
+            # handling at all (unlike login_and_select_practice's later
+            # per-practice login, which does via _handle_otp) -- so once
+            # Tebra started prompting for OTP here too, every practice
+            # failed identically, waiting 30s for a "Practice select"
+            # heading sitting behind an unhandled OTP modal instead.
+            _handle_otp(page)
+            # discover_practices() does its own wait for 'Practice select'
+            # (falling back to a single-practice dashboard landing if that
+            # times out -- see its docstring in session.py) so no separate
+            # wait is needed here.
+            discovered = discover_practices(page)
+            browser.close()
+
+        _discovery_cache["practices"] = discovered
+        _discovery_cache["fetched_at"] = time.monotonic()
+        return discovered
 
 
 def _window(sel):
@@ -106,61 +171,46 @@ def run(sel: WorkSelector, scrape_patients=None, no_upload=False, skip_appointme
             # will just reconcile against whatever roster exists.
             _log(f"Patient roster scrape failed (continuing): {e!r}")
 
-    from .config import LOGIN_URL, EMAIL, PASSWORD
-
-    # First, discover practices with a short-lived browser so a normalized API
-    # payload can be resolved back to the canonical Tebra practice name.
-    # BROWSER_LAUNCH_LOCK (ehr/browser.py): only one Chromium instance runs at
-    # a time process-wide, so concurrent /run-tebra calls for different
-    # practices don't starve each other's grid renders.
-    with BROWSER_LAUNCH_LOCK, sync_playwright() as p:
-        browser = p.chromium.launch(
-            headless=PLAYWRIGHT_HEADLESS,
-            args=PLAYWRIGHT_LAUNCH_ARGS,
-        )
-        context = browser.new_context(
-            no_viewport=(PLAYWRIGHT_VIEWPORT is None), viewport=PLAYWRIGHT_VIEWPORT,
-        )
-        page = context.new_page()
-        page.goto(LOGIN_URL)
-        page.fill("#userName", EMAIL)
-        page.fill("#password", PASSWORD)
-        page.click("#sign-in")
-        page.wait_for_selector("h3:has-text('Practice select')", timeout=30_000)
-        discovered = discover_practices(page)
-        browser.close()
-
-    skipped = []
+    # Practices to process this run:
+    #  - sel.practice given (e.g. /run-tebra -- payload already names the
+    #    practice): no live discovery login needed at all. The per-practice
+    #    login below (login_and_select_practice) already logs in fresh for
+    #    THIS specific request and independently matches it against Tebra's
+    #    live tiles (or a single-practice dashboard landing), with no shared
+    #    cache -- so it can't be corrupted by what a DIFFERENT concurrent
+    #    /run-tebra call's discovery login happened to land on. Confirmed
+    #    live 2026-09-28/29: routing this through the shared, time-cached
+    #    _get_discovered_practices() meant that whenever that discovery
+    #    login itself landed on a single practice's dashboard (Tebra's
+    #    behavior when a login resolves to just one practice) instead of the
+    #    tile picker, EVERY other concurrent practice in the same
+    #    DailyPdfLoaderJob.js fan-out failed to resolve against that
+    #    incomplete 1-item cached list.
+    #  - sel.practice is None (true "all practices" daily/backfill run):
+    #    still needs live discovery to enumerate the full list.
     if sel.practice:
-        try:
-            practices = [resolve_practice_name(sel.practice, discovered)]
-        except Exception as e:
-            _log(
-                f"Requested practice not found in Tebra UI; skipping "
-                f"practice={sel.practice!r} error={e!r}"
-            )
-            practices = []
-            skipped.append(sel.practice)
+        practices = [sel.practice]
     else:
-        practices = discovered
+        practices = _get_discovered_practices()
 
     _log(f"Resolved practices count={len(practices)} practices={practices}")
 
+    # Populated only if some future path adds an entry without ever
+    # attempting a login (kept for response-shape compatibility) -- a
+    # requested practice not found in Tebra now surfaces as a normal
+    # per-practice failure (see except below) instead of silently landing
+    # here, where server.py's _summary_outcome() never looked at it.
+    skipped = []
     completed, failed = [], []
     failed_details = {}
-    for practice in practices:
-        _log(f"Practice start name={practice}")
+    for requested_practice in practices:
+        _log(f"Practice start name={requested_practice}")
         practice_clock = time.monotonic()
-        psel = WorkSelector(
-            mode=sel.mode, practice=practice,
-            folder_structure=sel.folder_structure,
-            start_date=sel.start_date, end_date=sel.end_date,
-            appt_id=sel.appt_id, patient_name=sel.patient_name,
-            entity=sel.entity, sub_entity=sel.sub_entity, ehr_name=sel.ehr_name,
-            ungated_repull=sel.ungated_repull,
-        )
-        from_date, to_date = _window(psel)
-        practice_dir = practice_download_dir(sel.entity, sel.sub_entity, practice)
+        # Canonical Tebra name, known only once login_and_select_practice
+        # below returns it -- until then, fall back to the requested name
+        # for logging/error-reporting if login itself fails.
+        practice = requested_practice
+        practice_dir = None
 
         # Fresh browser + context PER PRACTICE. Tebra keeps a session logged in
         # to one practice; reusing the browser means the next practice's login
@@ -180,8 +230,25 @@ def run(sel: WorkSelector, scrape_patients=None, no_upload=False, skip_appointme
             page = context.new_page()
             try:
                 phase_clock = time.monotonic()
-                login_and_select_practice(page, practice)
+                # Returns Tebra's own canonical practice text (tile text, or
+                # the single-practice dashboard header) -- not necessarily
+                # the same string as requested_practice (server.py passes a
+                # lowercased/space-stripped payload value), so downstream DB
+                # writes/folder naming stay consistent regardless of how the
+                # caller spelled it.
+                practice = login_and_select_practice(page, requested_practice)
                 _log(f"Practice={practice} login/select done elapsed={time.monotonic() - phase_clock:.1f}s")
+
+                psel = WorkSelector(
+                    mode=sel.mode, practice=practice,
+                    folder_structure=sel.folder_structure,
+                    start_date=sel.start_date, end_date=sel.end_date,
+                    appt_id=sel.appt_id, patient_name=sel.patient_name,
+                    entity=sel.entity, sub_entity=sel.sub_entity, ehr_name=sel.ehr_name,
+                    ungated_repull=sel.ungated_repull,
+                )
+                from_date, to_date = _window(psel)
+                practice_dir = practice_download_dir(sel.entity, sel.sub_entity, practice)
 
                 # skip_appointment_scrape=True bypasses the live Tebra worklist
                 # calendar walk (the expensive, per-day UI scrape that

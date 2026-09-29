@@ -524,9 +524,32 @@ def _download_and_mark(page, context, cur, conn,
         last_name = patient_name.split(",")[0].strip().replace(" ", "_")
         pdf_path = os.path.join(download_dir or DOWNLOAD_DIR, f"{facesheet_id}_{last_name}.pdf")
 
-        resp = context.request.get(pdf_url)
-        if resp.status != 200:
-            raise RuntimeError(f"PDF download failed: HTTP {resp.status}")
+        # Confirmed live 2026-09-29: a transient network blip can make this
+        # GET blow past Playwright's 30s default timeout even though Tebra's
+        # own server responded in under 2s (BELLANGER, SANDRA facesheet
+        # 208310847 -- the timeout error's own call log showed a real 200 OK
+        # PDF response, just arriving after the client-side deadline). No
+        # retry meant one slow round trip cost this patient's whole
+        # facesheet until the next scheduled run naturally re-picked it up
+        # via process_status='Error'. Retry in-run instead of always waiting
+        # on that.
+        max_attempts = 3
+        resp = None
+        last_err = None
+        for attempt in range(1, max_attempts + 1):
+            try:
+                resp = context.request.get(pdf_url, timeout=30_000)
+                if resp.status != 200:
+                    raise RuntimeError(f"PDF download failed: HTTP {resp.status}")
+                last_err = None
+                break
+            except Exception as e:
+                last_err = e
+                print(f"[{phase}] facesheet PDF fetch attempt {attempt}/{max_attempts} "
+                      f"failed for {patient_name}: {e!r}")
+        if last_err is not None:
+            raise last_err
+
         with open(pdf_path, "wb") as f:
             f.write(resp.body())
 
