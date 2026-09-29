@@ -162,13 +162,40 @@ PF_SYNC_API_PORT = int(os.environ.get("PF_SYNC_API_PORT", 8011))
 _locks = {}
 _locks_guard = threading.Lock()
 _BROWSER_LOCK_KEY = "__pf_sync__"
+# lock key -> job_name currently holding it, so a busy error can say WHICH
+# job is in the way instead of just "something is running".
+_lock_holders: dict[str, str] = {}
+
+# How long a background (wait_for_completion=False) job waits for the browser
+# lock before giving up. Confirmed live 2026-09-29: the 1 AM CDT scheduled
+# /sync-schedules-by-date got an instant 409 because a user's manual
+# /appointments-by-date call (~31s) happened to start the same second -- the
+# scheduled pull was silently dropped for the day. Background callers already
+# got their 202, so there's nobody to retry; waiting is the only way the run
+# still happens. Interactive (wait_for_completion=True) calls keep the
+# immediate 409 so a person isn't left with a hung request.
+_BACKGROUND_LOCK_WAIT_SECONDS = 600
 
 
-def _acquire_key_lock(key: str) -> threading.Lock:
+class BrowserBusyError(HTTPException):
+    """The shared browser lock couldn't be acquired. A distinct subclass so
+    callers can tell "never got to run" apart from an HTTPException raised by
+    the job itself -- still a 409 wherever it surfaces as an HTTP response."""
+
+
+def _acquire_key_lock(key: str, timeout: float | None = None) -> threading.Lock:
+    """timeout=None fails immediately if the lock is held; otherwise waits up
+    to `timeout` seconds for it."""
     with _locks_guard:
         lock = _locks.setdefault(key, threading.Lock())
-    if not lock.acquire(blocking=False):
-        raise HTTPException(status_code=409, detail="A pf_sync browser job is already running.")
+    acquired = lock.acquire(blocking=False) if timeout is None else lock.acquire(timeout=timeout)
+    if not acquired:
+        holder = _lock_holders.get(key) or "unknown job"
+        waited = "" if timeout is None else f" after waiting {timeout:.0f}s"
+        raise BrowserBusyError(
+            status_code=409,
+            detail=f"A pf_sync browser job is already running ({holder}){waited}.",
+        )
     return lock
 
 
@@ -278,19 +305,33 @@ def _namespace_with_env_creds(model: BaseModel, **extra) -> argparse.Namespace:
     )
 
 
-def _run_browser_job(lock_key: str, callback):
-    """Run callback() under the global browser lock, releasing it when done."""
-    lock = _acquire_key_lock(lock_key)
+def _run_browser_job(lock_key: str, job_name: str, callback, lock_timeout: float | None = None,
+                     on_lock_failure=None):
+    """Run callback() under the global browser lock, releasing it when done.
+    on_lock_failure(exc), if given, is called when the lock couldn't be
+    acquired (callback never ran) before the BrowserBusyError is re-raised."""
+    try:
+        lock = _acquire_key_lock(lock_key, timeout=lock_timeout)
+    except BrowserBusyError as exc:
+        if on_lock_failure is not None:
+            try:
+                on_lock_failure(exc)
+            except Exception as hook_exc:
+                _slog(f"{job_name} on_lock_failure hook failed: {hook_exc!r}")
+        raise
+    _lock_holders[lock_key] = job_name
     try:
         return callback()
     finally:
+        _lock_holders.pop(lock_key, None)
         try:
             lock.release()
         except Exception:
             pass
 
 
-def _dispatch_browser_job(wait_for_completion: bool, job_name: str, callback):
+def _dispatch_browser_job(wait_for_completion: bool, job_name: str, callback,
+                          before_lock=None, on_lock_failure=None):
     """Run a browser job inline (default) or in a background thread.
 
     Mirrors myops/server.py: wait_for_completion=True runs inline and returns the
@@ -302,15 +343,30 @@ def _dispatch_browser_job(wait_for_completion: bool, job_name: str, callback):
     which have no corresponding "EDI_Tebra".cron_jobs row - so cron_job_executions
     logging is NOT done here. It's done in the one caller that does map to a
     seeded row (sync_schedules_by_date_endpoint, PRACTICE_FUSION_FACESHEET_PULL),
-    wrapping its own `job` callback instead.
+    via the optional hooks: before_lock() runs on the worker thread before the
+    lock wait starts (never on the request thread), on_lock_failure(exc) runs
+    if the lock was never acquired, so a skipped run still leaves a record.
+
+    Lock behavior: wait_for_completion=True fails immediately with 409 if the
+    browser is busy; False waits up to _BACKGROUND_LOCK_WAIT_SECONDS first.
     """
+    def _run():
+        if before_lock is not None:
+            try:
+                before_lock()
+            except Exception as hook_exc:
+                _slog(f"{job_name} before_lock hook failed: {hook_exc!r}")
+        lock_timeout = None if wait_for_completion else _BACKGROUND_LOCK_WAIT_SECONDS
+        return _run_browser_job(_BROWSER_LOCK_KEY, job_name, callback,
+                                lock_timeout=lock_timeout, on_lock_failure=on_lock_failure)
+
     if wait_for_completion:
         started = time.monotonic()
         outcome: dict = {}
 
         def _runner():
             try:
-                outcome["result"] = _run_browser_job(_BROWSER_LOCK_KEY, callback)
+                outcome["result"] = _run()
             except BaseException as exc:  # re-raised on the caller's thread below
                 # BaseException, not Exception -- SystemExit/KeyboardInterrupt raised
                 # inside this background thread otherwise escape this handler
@@ -345,8 +401,12 @@ def _dispatch_browser_job(wait_for_completion: bool, job_name: str, callback):
 
     def _runner():
         _slog(f"{job_name} background job_id={job_id} starting")
+        holder = _lock_holders.get(_BROWSER_LOCK_KEY)
+        if holder:
+            _slog(f"{job_name} background job_id={job_id} waiting up to "
+                  f"{_BACKGROUND_LOCK_WAIT_SECONDS}s for browser lock held by {holder}")
         try:
-            _run_browser_job(_BROWSER_LOCK_KEY, callback)
+            _run()
             _slog(f"{job_name} background job_id={job_id} done")
         except BaseException as exc:
             # BaseException, not Exception -- see the wait_for_completion=True
@@ -1102,26 +1162,39 @@ def sync_schedules_by_date_endpoint(request: SyncSchedulesByDateRequestSlim):
         "end_date": request.end_date,
     }
 
-    def job():
-        # start_execution() (a Postgres round-trip) deliberately happens in
-        # here, not before _dispatch_browser_job(...) below -- when
-        # wait_for_completion=False, `job` only ever runs on the background
-        # thread _dispatch_browser_job spawns, never on the thread that has
-        # to return this endpoint's HTTP response. Logging it out there
-        # instead would put a DB write back in front of that response,
-        # reintroducing the exact open-ended wait wait_for_completion=False
-        # was built to remove (confirmed 2026-09-17 on the equivalent bug in
-        # tebra_patient_sync/app_tebra.py's /tebra/sync: a slow/unreachable
-        # DB hung start_execution() well past the caller's 30s trigger
-        # timeout, indistinguishable from the original blocking-sync timeout
-        # bug, and logged nothing since the INSERT never got a chance to run).
-        execution_id = None
+    # execution_id is shared between the hooks and `job` below. All three run
+    # on _dispatch_browser_job's worker thread, never on the thread that has
+    # to return this endpoint's HTTP response -- a Postgres round-trip out
+    # there would put a DB write back in front of that response, reintroducing
+    # the exact open-ended wait wait_for_completion=False was built to remove
+    # (confirmed 2026-09-17 on the equivalent bug in
+    # tebra_patient_sync/app_tebra.py's /tebra/sync: a slow/unreachable DB hung
+    # start_execution() well past the caller's 30s trigger timeout,
+    # indistinguishable from the original blocking-sync timeout bug, and
+    # logged nothing since the INSERT never got a chance to run).
+    execution = {"id": None}
+
+    def start_logging():
+        # Before the browser-lock wait, not after: a run that never gets the
+        # lock still leaves a row (status 'started' while it waits), with
+        # triggered_at reflecting when it was actually triggered.
         try:
-            execution_id = start_execution(_PRACTICE_FUSION_FACESHEET_PULL_JOB_SETTING, response=_execution_response)
-            if execution_id:
-                mark_processing(execution_id)
+            execution["id"] = start_execution(_PRACTICE_FUSION_FACESHEET_PULL_JOB_SETTING,
+                                              response=_execution_response)
         except Exception as e:
             _slog(f"sync-schedules-by-date failed to start execution logging: {e!r}")
+
+    def log_lock_failure(exc):
+        if execution["id"]:
+            finish_execution(execution["id"], success=False, error_description=str(exc.detail))
+
+    def job():
+        execution_id = execution["id"]
+        if execution_id:
+            try:
+                mark_processing(execution_id)
+            except Exception as e:
+                _slog(f"sync-schedules-by-date failed to mark execution processing: {e!r}")
 
         # Schedule scrape -> Seen-status filter -> inject synthetic record ->
         # process, entirely independent of the Eligibility Report -- reused via
@@ -1138,7 +1211,8 @@ def sync_schedules_by_date_endpoint(request: SyncSchedulesByDateRequestSlim):
                 finish_execution(execution_id, success=False, error_description=repr(e))
             raise
 
-    return _dispatch_browser_job(request.wait_for_completion, "sync-schedules-by-date", job)
+    return _dispatch_browser_job(request.wait_for_completion, "sync-schedules-by-date", job,
+                                 before_lock=start_logging, on_lock_failure=log_lock_failure)
 
 @app.post("/appointments-by-date")
 def appointments_by_date_endpoint(request: AppointmentsByDateRequestSlim):
