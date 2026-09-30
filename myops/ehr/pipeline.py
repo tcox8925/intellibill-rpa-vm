@@ -22,7 +22,7 @@ from .db import get_ehr_connection, log_run_event
 from .session import (
     login_and_select_practice, discover_practices,
     now_cst, cleanup_acc_directory, practice_download_dir, cleanup_practice_download_dir,
-    _handle_otp,
+    _wait_for_otp_then_resolve,
 )
 from .passes import (
     pass_appointments, pass_notes, pass_facesheets, pass_charges, pass_patient_match,
@@ -89,7 +89,12 @@ def _get_discovered_practices() -> list:
             # Tebra started prompting for OTP here too, every practice
             # failed identically, waiting 30s for a "Practice select"
             # heading sitting behind an unhandled OTP modal instead.
-            _handle_otp(page)
+            # Confirmed live 2026-10-01: a single _handle_otp() check right
+            # after sign-in only covers ~1.2s -- if the modal renders later
+            # than that it's missed entirely, same gap as
+            # login_and_select_practice had. Poll over a longer window
+            # instead (see _wait_for_otp_then_resolve's docstring).
+            _wait_for_otp_then_resolve(page)
             # discover_practices() does its own wait for 'Practice select'
             # (falling back to a single-practice dashboard landing if that
             # times out -- see its docstring in session.py) so no separate
