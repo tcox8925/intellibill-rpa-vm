@@ -54,11 +54,23 @@ def login_and_select_practice(page, practice_name):
     for the 'Practice select' h3 then hung for the full 30s timeout. Wait
     for 'Practice select' first as the normal case; only fall back to
     reading the single-practice dashboard header if that wait times out.
+
+    Confirmed live 2026-10-01: an OTP challenge can appear immediately after
+    sign-in, before EITHER the tile picker or a single-practice dashboard
+    ever renders -- same class of bug _get_discovered_practices() (pipeline.py)
+    already had to handle for its own login. This function used to only call
+    _handle_otp() AFTER a tile/dashboard match succeeded, so an OTP modal
+    sitting in front of both landings hung for the full 30s and then failed
+    the single-practice fallback too (neither selector visible behind it).
+    Check for OTP proactively right after sign-in -- _handle_otp() is a cheap
+    ~1.2s no-op when no OTP modal is present, so this costs nothing in the
+    common case.
     """
     page.goto(LOGIN_URL)
     page.fill("#userName", EMAIL)
     page.fill("#password", PASSWORD)
     page.click("#sign-in")
+    _handle_otp(page)
 
     target = normalize_text(practice_name)
 
