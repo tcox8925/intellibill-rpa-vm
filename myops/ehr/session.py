@@ -7,6 +7,7 @@ how we get an authenticated Playwright page on a given practice.
 import os
 import re
 import shutil
+import time
 from datetime import datetime, timezone
 
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
@@ -55,22 +56,21 @@ def login_and_select_practice(page, practice_name):
     for 'Practice select' first as the normal case; only fall back to
     reading the single-practice dashboard header if that wait times out.
 
-    Confirmed live 2026-10-01: an OTP challenge can appear immediately after
-    sign-in, before EITHER the tile picker or a single-practice dashboard
-    ever renders -- same class of bug _get_discovered_practices() (pipeline.py)
-    already had to handle for its own login. This function used to only call
-    _handle_otp() AFTER a tile/dashboard match succeeded, so an OTP modal
-    sitting in front of both landings hung for the full 30s and then failed
-    the single-practice fallback too (neither selector visible behind it).
-    Check for OTP proactively right after sign-in -- _handle_otp() is a cheap
-    ~1.2s no-op when no OTP modal is present, so this costs nothing in the
-    common case.
+    Confirmed live 2026-10-01: an OTP challenge can appear some seconds
+    after sign-in, not necessarily immediately -- same class of bug
+    _get_discovered_practices() (pipeline.py) already had to handle for its
+    own login, but a single _handle_otp() check right after the sign-in
+    click only covers the first ~1.2s. If Tebra takes longer to render the
+    modal than that (observed on the VM's network path), the check misses
+    it, and it pops up moments later completely unhandled while this
+    function sits blindly waiting on 'Practice select'/dashboard until the
+    30s timeout. Poll for OTP over a longer window instead of checking once.
     """
     page.goto(LOGIN_URL)
     page.fill("#userName", EMAIL)
     page.fill("#password", PASSWORD)
     page.click("#sign-in")
-    _handle_otp(page)
+    _wait_for_otp_then_resolve(page)
 
     target = normalize_text(practice_name)
 
@@ -114,13 +114,16 @@ def login_and_select_practice(page, practice_name):
 
 
 def _handle_otp(page):
+    """Returns True if an OTP modal was present and got handled, False if
+    none was visible at the moment of this call (not an error -- OTP is
+    optional per login)."""
     otp_since = datetime.now(timezone.utc)
     if handle_tebra_otp_if_present is None:
         raise RuntimeError(
             "OTP helper unavailable — otp_info.py / email_read.py must sit "
             f"next to the ehr/ package. Import error was: {_OTP_IMPORT_ERROR!r}"
         )
-    handle_tebra_otp_if_present(
+    return handle_tebra_otp_if_present(
         page,
         fetch_latest_otp_code_fn=fetch_latest_tebra_otp_code,
         since_dt_utc=otp_since,
@@ -132,6 +135,25 @@ def _handle_otp(page):
         # still returns fast whenever the email shows up sooner.
         poll_seconds=240,
     )
+
+
+def _wait_for_otp_then_resolve(page, poll_window_s=20):
+    """Poll for the OTP modal for up to poll_window_s instead of checking
+    once. Confirmed live 2026-10-01: a single _handle_otp() check right
+    after the sign-in click can miss the modal if Tebra takes longer than
+    its ~1.2s visibility check to render it (observed on the VM's network
+    path) -- it then pops up moments later completely unhandled, while the
+    caller sits blindly waiting on 'Practice select'/dashboard until its own
+    30s timeout. Returns True if OTP was found and handled at any point in
+    the window, False if it never appeared (normal -- OTP doesn't fire on
+    every login)."""
+    deadline = time.monotonic() + poll_window_s
+    while True:
+        if _handle_otp(page):
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        page.wait_for_timeout(1000)
 
 
 def discover_practices(page=None):
