@@ -14,30 +14,32 @@ def _is_visible(locator, timeout_ms=1500) -> bool:
         return False
 
 def handle_tebra_otp_if_present(page, fetch_latest_otp_code_fn, *, since_dt_utc=None, poll_seconds=240):
-
-    otp_form = page.locator("form[name='Two-Factor Authentication Method Form']")
-    otp_heading = page.locator("h2:has-text('Two-Factor Authentication')")
-
-    if not (_is_visible(otp_form, 1200) or _is_visible(otp_heading, 1200)):
+    # Confirmed live 2026-10-01 (myops/ehr/session.py's OTP handling kept
+    # timing out even after retries -- the actual rendered screen was
+    # captured and compared against what this function checked for): the
+    # real challenge Tebra shows is NOT the method-picker this used to
+    # assume (a form named 'Two-Factor Authentication Method Form' with an
+    # 'h2:has-text('Two-Factor Authentication')' heading and EMAIL/SMS radio
+    # buttons to choose from, then a single #mfa-confirmation-form-code-input
+    # text field). Neither of those selectors ever matched anything -- this
+    # function silently returned False on every real OTP challenge, no
+    # matter how long anything polled for it.
+    #
+    # The real screen (rendered inside the Tebra sign-in page's <descope-wc>
+    # web component, in its shadow DOM -- Playwright locators pierce this
+    # fine, but a plain page.content()/outerHTML dump of the document won't
+    # show it) already auto-sends the code and jumps straight to a "We've
+    # sent a message containing a 6-digit code to <masked email>" / "Enter
+    # Code" screen: 6 SEPARATE single-digit <input type="tel"
+    # aria-label="passcode digit"> boxes. Their ids (Vaadin-generated, e.g.
+    # "input-vaadin-text-field-33") are NOT stable across loads -- select by
+    # aria-label, never by id. There is no visible submit/confirm button on
+    # this screen; it auto-submits once the 6th digit lands.
+    code_boxes = page.locator("input[aria-label='passcode digit']")
+    if not _is_visible(code_boxes.first, 1200):
         return False
 
-    print("[OTP] Two-Factor Authentication modal detected")
-
-    email_radio = page.locator("input[name='Two-Factor Authentication Method'][value='EMAIL']")
-    if email_radio.count():
-        try:
-            email_radio.check(force=True)
-        except Exception:
-            page.locator("label:has(input[value='EMAIL'])").first.click(force=True)
-
-    continue_btn = page.locator("form[name='Two-Factor Authentication Method Form'] button[type='submit']:has-text('Continue')")
-    if continue_btn.count():
-        continue_btn.first.click(force=True)
-    else:
-        page.locator("button[type='submit']:has-text('Continue')").first.click(force=True)
-
-    code_input = page.locator("#mfa-confirmation-form-code-input")
-    code_input.wait_for(state="visible", timeout=30_000)
+    print("[OTP] 6-digit code entry screen detected")
 
     if since_dt_utc is None:
         since_dt_utc = datetime.now(timezone.utc) - timedelta(minutes=2)
@@ -48,19 +50,28 @@ def handle_tebra_otp_if_present(page, fetch_latest_otp_code_fn, *, since_dt_utc=
     if not code or not re.fullmatch(r"\d{6}", code):
         raise RuntimeError(f"[OTP] Invalid code returned: {code}")
 
-    code_input.click()
-    code_input.press("Control+A")
-    code_input.press("Backspace")
-    code_input.fill(code)
+    n = code_boxes.count()
+    if n != len(code):
+        raise RuntimeError(
+            f"[OTP] Expected {len(code)} passcode-digit boxes, found {n} -- "
+            "Tebra's OTP screen markup may have changed again."
+        )
+    for i, digit in enumerate(code):
+        box = code_boxes.nth(i)
+        box.click()
+        # press_sequentially (real keystrokes, not a direct value set) --
+        # these boxes' auto-advance/auto-submit is driven by keyboard
+        # events, not just the resulting value, so .fill() alone risks
+        # never triggering the auto-submit.
+        box.press_sequentially(digit)
 
-    confirm_btn = page.locator("button[type='submit']:has-text('Confirm')")
-    confirm_btn.wait_for(state="visible", timeout=15_000)
-    confirm_btn.click(force=True)
-
+    # No visible submit button on this screen -- it auto-submits once the
+    # 6th digit is entered. Give it a moment; the caller's own post-login
+    # wait (Practice select / dashboard) is what actually confirms success.
     try:
-        page.wait_for_selector("#mfa-confirmation-form-code-input", state="detached", timeout=30_000)
+        code_boxes.first.wait_for(state="detached", timeout=15_000)
     except Exception:
-        pass
+        page.wait_for_timeout(2000)
 
-    print("[OTP] Confirmed successfully")
+    print("[OTP] Code entered")
     return True
