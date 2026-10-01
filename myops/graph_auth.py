@@ -2,39 +2,43 @@
 import os
 from pathlib import Path
 
-from azure.identity import DefaultAzureCredential, ClientSecretCredential
-from azure.keyvault.secrets import SecretClient
+from azure.identity import ClientSecretCredential
 from dotenv import load_dotenv
 
 ROOT_ENV_FILE = Path(__file__).resolve().parent.parent / ".env"
 load_dotenv(ROOT_ENV_FILE, override=False)
 
-KEY_VAULT_NAME = os.environ.get("KEY_VAULT_NAME", "keyvault-834analytics").strip()
-KEY_VAULT_URL = os.environ.get("KEYVAULT_URL", "").strip() or f"https://{KEY_VAULT_NAME}.vault.azure.net/"
-
-CLIENT_ID_KEY = os.environ.get("KEYVAULT_CLIENT_ID_SECRET_NAME", "SynapseAccessClientId").strip()
-CLIENT_SECRET_KEY = os.environ.get("KEYVAULT_CLIENT_SECRET_NAME", "SynapseAccessSecret").strip()
-TENANT_ID_KEY = os.environ.get("KEYVAULT_TENANT_ID_SECRET_NAME", "TenantId").strip()
-
 GRAPH_SCOPE = "https://graph.microsoft.com/.default"
 
 def get_graph_access_token() -> str:
     """
-    Uses the SynapseAccess SP creds to get a Graph access token. Prefers the
-    creds already present in the environment (.env); only hits Key Vault if
-    they're not set there.
-    Returns raw bearer token string.
+    Returns a Graph access token for reading the Tebra OTP mailbox.
+
+    Confirmed live 2026-10-01: this used to read the shared AZURE_TENANT_ID/
+    AZURE_CLIENT_ID/AZURE_CLIENT_SECRET (falling back to the SynapseAccess
+    Key Vault secrets) -- those creds are for the 834labs/"AHG Enterprise"
+    tenant, used app-wide (Azure OpenAI, communication services, several
+    callAI modules, blob storage auth -- see app/core/config.py and its many
+    callers). The Tebra OTP mailbox (support@intellibillrcm.com) lives in a
+    COMPLETELY SEPARATE Microsoft 365 tenant that AHG Enterprise has no
+    access to -- Graph app-only auth is always scoped to one tenant, so
+    every lookup 404'd with ErrorInvalidUser no matter what. This function
+    is only ever called from email_read.py (nothing else uses graph_auth.py),
+    so it gets its own dedicated, differently-named env vars instead,
+    pointing at an app registration created IN the intellibillrcm.com
+    tenant -- never reuse the shared AZURE_* vars here again.
     """
-    tenant_id = os.environ.get("AZURE_TENANT_ID", "").strip()
-    client_id = os.environ.get("AZURE_CLIENT_ID", "").strip()
-    client_secret = os.environ.get("AZURE_CLIENT_SECRET", "").strip()
+    tenant_id = os.environ.get("TEBRA_OTP_TENANT_ID", "").strip()
+    client_id = os.environ.get("TEBRA_OTP_CLIENT_ID", "").strip()
+    client_secret = os.environ.get("TEBRA_OTP_CLIENT_SECRET", "").strip()
 
     if not (tenant_id and client_id and client_secret):
-        credential = DefaultAzureCredential()
-        client = SecretClient(vault_url=KEY_VAULT_URL, credential=credential)
-        tenant_id = client.get_secret(TENANT_ID_KEY).value
-        client_id = client.get_secret(CLIENT_ID_KEY).value
-        client_secret = client.get_secret(CLIENT_SECRET_KEY).value
+        raise RuntimeError(
+            "TEBRA_OTP_TENANT_ID / TEBRA_OTP_CLIENT_ID / TEBRA_OTP_CLIENT_SECRET "
+            "must be set in .env -- these are a dedicated app registration in "
+            "the intellibillrcm.com tenant (the one that owns the Tebra OTP "
+            "mailbox), separate from this app's shared AZURE_* credentials."
+        )
 
     sp = ClientSecretCredential(
         tenant_id=tenant_id,

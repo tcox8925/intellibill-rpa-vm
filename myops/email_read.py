@@ -13,6 +13,14 @@ ROOT_ENV_FILE = Path(__file__).resolve().parent.parent / ".env"
 load_dotenv(ROOT_ENV_FILE, override=False)
 
 MAILBOX_UPN = os.environ.get("TEBRA_MAILBOX_UPN", "").strip()
+# Confirmed live 2026-10-01: a bare \b(\d{6})\b search over the WHOLE raw
+# HTML body matched a wrong 6-digit sequence (observed: "000000") somewhere
+# else in the markup -- tracking-link query strings, px/size values, etc. --
+# before ever reaching the real code, which Tebra always renders inside a
+# specific, stable element: <div id="email-otp-code">325712 </div>. Anchor
+# to that element first; only fall back to the bare search if Tebra's
+# template ever changes and that id disappears.
+OTP_CODE_ANCHOR_RE = re.compile(r'id=["\']email-otp-code["\'][^>]*>\s*(\d{6})\s*<')
 CODE_RE = re.compile(r"\b(\d{6})\b")
 
 def _parse_graph_dt(dt_str: str) -> datetime:
@@ -93,7 +101,7 @@ def fetch_latest_tebra_otp_code_graph(
                 continue
 
             body = (msg.get("body") or {}).get("content") or ""
-            m = CODE_RE.search(body)
+            m = OTP_CODE_ANCHOR_RE.search(body) or CODE_RE.search(body)
             if not m:
                 continue
 
