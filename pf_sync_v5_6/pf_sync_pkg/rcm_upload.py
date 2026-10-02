@@ -16,6 +16,7 @@ destination folder is the fixed PF_RCM_FOLDER_STRUCTURE constant instead of
 being threaded through from anywhere.
 """
 
+import contextlib
 import json
 import os
 import random
@@ -31,6 +32,10 @@ from pf_sync_pkg.constants import (
     PF_RCM_FOLDER_STRUCTURE,
     RCM_ATTACHMENTS_CONTAINER,
 )
+
+# Subfolder of downloads_dir that unreadable orphaned zips are moved into --
+# see retry_orphaned_zips.
+CORRUPTED_ZIP_DIRNAME = "corrupted"
 
 
 def _trigger_pf_facesheet_processor():
@@ -235,23 +240,48 @@ def retry_orphaned_zips(
     if not directory.is_dir():
         return {"retried": 0, "uploaded": 0, "failed": 0}
 
+    # Non-recursive glob, so anything already moved into CORRUPTED_ZIP_DIRNAME
+    # is never picked up again.
     stale_zips = sorted(directory.glob("pf_facesheets_*.zip"))
     retried = 0
     uploaded = 0
     failed = 0
     details = []
+    corrupted = []
     for zip_path in stale_zips:
-        retried += 1
         zip_name = zip_path.name
-        print(f"[RCM-UPLOAD] Retrying orphaned zip {zip_name}", flush=True)
         try:
             with zipfile.ZipFile(zip_path, "r") as z:
                 pdf_names = [n for n in z.namelist() if n.lower().endswith(".pdf")]
         except Exception as exc:
-            failed += 1
-            details.append({"zip_name": zip_name, "error": f"unreadable zip: {type(exc).__name__}: {exc}"})
-            print(f"[RCM-UPLOAD] Orphaned zip {zip_name} is unreadable, leaving it in place: {exc}", flush=True)
+            # 2026-10-02: an unreadable zip used to be counted as failed and
+            # left in place, so it was retried -- and failed the whole
+            # PRACTICE_FUSION_FACESHEET_PULL execution -- on every run
+            # forever. It can never succeed, and its content isn't lost: the
+            # manifest + PDFs it was built from are only deleted after a
+            # confirmed upload, so _sweep_unzipped_manifests below rebuilds
+            # and delivers a fresh zip from them. Quarantine it and move on;
+            # reported under "corrupted" with a "warning" (not "error"/
+            # "failed") so server._find_stage_failures doesn't fail the run.
+            reason = f"unreadable zip: {type(exc).__name__}: {exc}"
+            try:
+                moved_to = _quarantine_corrupted_zip(zip_path)
+            except Exception as move_exc:
+                failed += 1
+                details.append({"zip_name": zip_name,
+                                "error": f"{reason}; could not move it to {CORRUPTED_ZIP_DIRNAME}/: "
+                                         f"{type(move_exc).__name__}: {move_exc}"})
+                print(f"[RCM-UPLOAD] Orphaned zip {zip_name} is unreadable and could not be quarantined: "
+                      f"{move_exc}", flush=True)
+                continue
+            corrupted.append({"zip_name": zip_name, "warning": reason, "moved_to": moved_to,
+                              "size_bytes": os.path.getsize(moved_to)})
+            print(f"[RCM-UPLOAD] WARNING: orphaned zip {zip_name} is corrupt ({reason}) -- "
+                  f"moved to {moved_to}, skipping", flush=True)
             continue
+
+        retried += 1
+        print(f"[RCM-UPLOAD] Retrying orphaned zip {zip_name}", flush=True)
 
         try:
             blob_path = upload_zip_to_rcm(str(zip_path), zip_name, folder_structure)
@@ -288,8 +318,23 @@ def retry_orphaned_zips(
 
     return {
         "retried": retried, "uploaded": uploaded, "failed": failed, "details": details,
-        "manifest_sweep": manifest_sweep,
+        "corrupted": corrupted, "manifest_sweep": manifest_sweep,
     }
+
+
+def _quarantine_corrupted_zip(zip_path: Path) -> str:
+    """Moves an unreadable zip into <its dir>/CORRUPTED_ZIP_DIRNAME/ (kept,
+    not deleted, so it can still be inspected) and returns the new path.
+    Never overwrites: a name collision gets a numeric suffix."""
+    target_dir = zip_path.parent / CORRUPTED_ZIP_DIRNAME
+    target_dir.mkdir(exist_ok=True)
+    target = target_dir / zip_path.name
+    n = 1
+    while target.exists():
+        target = target_dir / f"{zip_path.stem}_{n}{zip_path.suffix}"
+        n += 1
+    os.replace(zip_path, target)
+    return str(target)
 
 
 def _sweep_unzipped_manifests(
@@ -396,10 +441,25 @@ def build_and_upload_zip(
     zip_name = f"{base_name}.zip"
     zip_path = os.path.join(downloads_dir, zip_name)
 
-    with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as z:
-        for pdf_filename in present:
-            z.write(os.path.join(downloads_dir, pdf_filename), pdf_filename)
-        z.writestr(json_name, json.dumps(manifest, indent=2, ensure_ascii=False))
+    # Written under a ".partial" name and renamed only once complete. A zip's
+    # central directory is written last, on close -- a process killed
+    # mid-write (server restart/redeploy, OOM, disk full) used to leave a
+    # truncated file under the final pf_facesheets_*.zip name, which
+    # retry_orphaned_zips then found as "BadZipFile: File is not a zip file".
+    # os.replace is atomic on the same filesystem, so a zip under the final
+    # name is now always complete; ".zip.partial" doesn't match the retry glob.
+    partial_path = zip_path + ".partial"
+    try:
+        with zipfile.ZipFile(partial_path, "w", zipfile.ZIP_DEFLATED) as z:
+            for pdf_filename in present:
+                z.write(os.path.join(downloads_dir, pdf_filename), pdf_filename)
+            z.writestr(json_name, json.dumps(manifest, indent=2, ensure_ascii=False))
+        os.replace(partial_path, zip_path)
+    except Exception as exc:
+        with contextlib.suppress(OSError):
+            os.remove(partial_path)
+        print(f"[RCM-UPLOAD] Zip build FAILED zip={zip_name}: {type(exc).__name__}: {exc}", flush=True)
+        return {"error": f"zip build failed for {zip_name}: {type(exc).__name__}: {exc}"}
 
     result: Dict[str, object] = {
         "zip_name": zip_name,
