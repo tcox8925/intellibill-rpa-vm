@@ -127,11 +127,13 @@ def _stage_outcome(result):
         return False, "; ".join(failures)
     return True, None
 
-# job_setting value for this job's row in "EDI_Tebra".cron_jobs (already
-# seeded manually) -- only /sync-schedules-by-date maps to it; the other
-# endpoints that also go through _dispatch_browser_job (facesheet-pull-by-date,
-# full-sync-by-date, process, refresh) have no cron_jobs row and are not logged.
+# job_setting values for rows in "EDI_Tebra".cron_jobs (seeded manually) --
+# /sync-schedules-by-date and /appointments-by-date are the only endpoints
+# logged; the others that also go through _dispatch_browser_job
+# (facesheet-pull-by-date, full-sync-by-date, process, refresh) have no
+# cron_jobs row and are not logged.
 _PRACTICE_FUSION_FACESHEET_PULL_JOB_SETTING = "PRACTICE_FUSION_FACESHEET_PULL"
+_PF_SC_APPOINTMENTS_PULL_JOB_SETTING = "PF_SC_appointments_pull"
 
 CST = ZoneInfo("America/Chicago")
 
@@ -341,9 +343,9 @@ def _dispatch_browser_job(wait_for_completion: bool, job_name: str, callback,
     Generic across every endpoint that calls it (facesheet-pull-by-date,
     full-sync-by-date, process, refresh, sync-schedules-by-date, ...), most of
     which have no corresponding "EDI_Tebra".cron_jobs row - so cron_job_executions
-    logging is NOT done here. It's done in the one caller that does map to a
-    seeded row (sync_schedules_by_date_endpoint, PRACTICE_FUSION_FACESHEET_PULL),
-    via the optional hooks: before_lock() runs on the worker thread before the
+    logging is NOT done here. It's done in the callers that do map to a seeded
+    row (sync_schedules_by_date_endpoint, appointments_by_date_endpoint), via
+    the optional hooks: before_lock() runs on the worker thread before the
     lock wait starts (never on the request thread), on_lock_failure(exc) runs
     if the lock was never acquired, so a skipped run still leaves a record.
 
@@ -1228,8 +1230,53 @@ def appointments_by_date_endpoint(request: AppointmentsByDateRequestSlim):
         appointment_type=request.appointment_type,
     )
     args = _namespace_with_env_creds(full_request)
+    _execution_response = {
+        "report_date": request.report_date,
+        "start_date": request.start_date,
+        "end_date": request.end_date,
+        "insert_into_db": request.insert_into_db,
+        "update_appointments": request.update_appointments,
+        "clean_and_insert": request.clean_and_insert,
+        "appointment_type": request.appointment_type,
+    }
+
+    # Same hook layout as sync_schedules_by_date_endpoint above -- all DB
+    # writes happen on _dispatch_browser_job's worker thread, never on the
+    # request thread, and a run that never gets the browser lock still
+    # leaves a 'failed' row.
+    execution = {"id": None}
+
+    def start_logging():
+        try:
+            execution["id"] = start_execution(_PF_SC_APPOINTMENTS_PULL_JOB_SETTING,
+                                              response=_execution_response)
+        except Exception as e:
+            _slog(f"appointments-by-date failed to start execution logging: {e!r}")
+
+    def log_lock_failure(exc):
+        if execution["id"]:
+            finish_execution(execution["id"], success=False, error_description=str(exc.detail))
 
     def job():
+        execution_id = execution["id"]
+        if execution_id:
+            try:
+                mark_processing(execution_id)
+            except Exception as e:
+                _slog(f"appointments-by-date failed to mark execution processing: {e!r}")
+        try:
+            result = _appointments_job()
+            if execution_id:
+                success, error_description = _appointments_outcome(result)
+                finish_execution(execution_id, success=success, error_description=error_description,
+                                  response=_appointments_execution_summary(result))
+            return result
+        except Exception as e:
+            if execution_id:
+                finish_execution(execution_id, success=False, error_description=repr(e))
+            raise
+
+    def _appointments_job():
         # Read-only Schedule scrape across [start_date, end_date] -- no chart,
         # no facesheet, no queue writes -- reused via
         # cli.run_appointments_by_date, not reimplemented here. The browser
@@ -1249,4 +1296,31 @@ def appointments_by_date_endpoint(request: AppointmentsByDateRequestSlim):
             )
         return fetch_result
 
-    return _dispatch_browser_job(request.wait_for_completion, "appointments-by-date", job)
+    return _dispatch_browser_job(request.wait_for_completion, "appointments-by-date", job,
+                                 before_lock=start_logging, on_lock_failure=log_lock_failure)
+
+
+def _appointments_outcome(result):
+    """(success, error_description) for an /appointments-by-date result.
+    sync_appointments_to_edi_tebra records per-row failures in row_errors
+    and still returns normally, so a non-zero count fails the execution
+    rather than being reported as success."""
+    sync = result.get("edi_tebra_sync") or {}
+    row_errors = sync.get("row_errors") or 0
+    if row_errors:
+        return False, f"edi_tebra_sync: row_errors={row_errors} of {sync.get('total_appointments', '?')}"
+    return True, None
+
+
+def _appointments_execution_summary(result):
+    """The jsonb response for the execution row -- counts and per-day
+    diagnostics only, not the full appointments list (PHI, and it can be
+    hundreds of rows for a wide date range)."""
+    return {
+        "start_date": result.get("start_date"),
+        "end_date": result.get("end_date"),
+        "count": result.get("count"),
+        "service_location": result.get("service_location"),
+        "day_diagnostics": result.get("day_diagnostics"),
+        "edi_tebra_sync": result.get("edi_tebra_sync"),
+    }
