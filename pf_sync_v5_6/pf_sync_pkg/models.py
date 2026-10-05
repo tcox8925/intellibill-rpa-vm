@@ -150,6 +150,16 @@ class SyncConfig:
     # chart_ui.dismiss_stray_print_preview_modal.
     native_print_preview_modal_selector: str = "[data-element='print-modal']"
 
+    # Patient's pinned-note popover, auto-shown on chart open for patients who
+    # have one. Confirmed live 2026-10-05 on the VM: at its Xvfb window size it
+    # lands on top of the Print Chart button ("pinned-note__popover subtree
+    # intercepts pointer events") and times out every click for that patient.
+    # See chart_ui.dismiss_pinned_note_popover. The close (X) button is looked
+    # up inside the popover only -- the same popover also holds Delete/Edit and
+    # the "Auto-open note" switch, none of which may ever be clicked.
+    pinned_note_popover_selector: str = ".pinned-note__popover"
+    pinned_note_close_selector: str = "[data-element='close-popover']"
+
     # "Select: all | none" links inside the modal header.
     print_modal_select_none_selector: str = "[data-element='print-modal-select-none']"
     print_modal_select_all_selector: str = "[data-element='print-modal-select-all']"
