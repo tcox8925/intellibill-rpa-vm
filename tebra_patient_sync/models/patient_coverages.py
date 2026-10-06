@@ -2,12 +2,12 @@
 migrations/patient_tables.sql.
 """
 
-from datetime import datetime
+from datetime import date, datetime
 from decimal import Decimal
 from typing import Optional
 from uuid import UUID
 
-from sqlalchemy import ForeignKey, Numeric, text
+from sqlalchemy import Date, ForeignKey, Numeric, text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from models.base import Base
@@ -59,9 +59,12 @@ class PatientCoverage(Base):
     deductible: Mapped[Optional[Decimal]] = mapped_column(Numeric(18, 4), default=None)
 
     # --- effective dates (drive utils/coverage_rules.py's active/inactive
-    # rules - stored as text) ---
-    effective_start_date: Mapped[Optional[str]] = mapped_column(default=None)
-    effective_end_date: Mapped[Optional[str]] = mapped_column(default=None)
+    # rules) - DATE columns since intellibill migration
+    # 00166_date_columns_to_date_type.sql. Typed as Date so psycopg binds them
+    # as ::DATE; the loaders still pass YYYY-MM-DD strings (format_date),
+    # which Postgres casts. Reads come back as datetime.date. ---
+    effective_start_date: Mapped[Optional[date]] = mapped_column(Date, default=None)
+    effective_end_date: Mapped[Optional[date]] = mapped_column(Date, default=None)
 
     # --- insured (subscriber), when different from the patient ---
     patient_relationship_to_insured: Mapped[Optional[str]] = mapped_column(default=None)
