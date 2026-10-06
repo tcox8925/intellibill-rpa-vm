@@ -75,6 +75,14 @@ def _summary_outcome(summary: dict) -> tuple[bool, str | None]:
     yourself. Returns (success, error_description)."""
     summary = summary or {}
     failed = summary.get("failed") or []
+    # Skipped practices (requested practice not found in Tebra) don't fail
+    # the run, but their reason still goes into error_description so it's
+    # visible without opening the JSON response.
+    skipped_details = summary.get("skipped_details") or {}
+    skipped_note = "; ".join(
+        f"Skipped {practice}: {skipped_details.get(practice, 'no reason recorded')}"
+        for practice in (summary.get("skipped") or [])
+    ) or None
     if failed:
         # run() already records *why* each practice failed in
         # failed_details ({practice: repr(exception)}) -- surface that
@@ -86,8 +94,10 @@ def _summary_outcome(summary: dict) -> tuple[bool, str | None]:
             f"{practice}: {failed_details[practice]}" if practice in failed_details else practice
             for practice in failed
         )
+        if skipped_note:
+            reasons = f"{reasons}; {skipped_note}"
         return False, reasons
-    return True, None
+    return True, skipped_note
 
 # job_setting value for this job's row in "EDI_Tebra".cron_jobs (already
 # seeded manually) -- every /run-tebra call, across every practice, logs its

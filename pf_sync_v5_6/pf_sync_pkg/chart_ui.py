@@ -1,5 +1,6 @@
 """Encounter discovery and Print Chart section/notes selection UI driving."""
 
+import contextlib
 import hashlib
 import re
 import time
@@ -453,12 +454,62 @@ def dismiss_stray_print_preview_modal(page: Page, config: SyncConfig) -> None:
         pass
 
 
+def dismiss_pinned_note_popover(page: Page, config: SyncConfig) -> None:
+    """Get the patient's pinned-note popover out of the way of Print Chart.
+
+    Confirmed live 2026-10-05: PF auto-opens this popover on chart load for
+    patients with a pinned note, and on the VM's window size it covers the
+    Print Chart button -- every click for that patient timed out with
+    "pinned-note__popover subtree intercepts pointer events" (7 visits stuck
+    in failed, retried and re-failed on every scheduled run). Not reproducible
+    on a larger local screen, where the popover doesn't overlap the button.
+
+    Only acts when the popover is actually showing. Clicks the popover's own
+    close (X) button, scoped to inside the popover -- Escape does nothing to
+    it (confirmed live), and the popover also holds Delete/Edit and the
+    "Auto-open note" switch, which must never be touched. If it's somehow
+    still showing after that, hide it in the DOM -- it's read-only patient
+    info, nothing in this pipeline needs it. Best-effort like
+    dismiss_stray_print_preview_modal: the caller's own click/timeout is
+    still the backstop.
+    """
+    selector = clean(config.pinned_note_popover_selector)
+    if not selector:
+        return
+    try:
+        popover = page.locator(selector).first
+        if not popover.is_visible():
+            return
+        close_selector = clean(config.pinned_note_close_selector)
+        if close_selector:
+            close_button = popover.locator(close_selector).first
+            if close_button.is_visible():
+                close_button.click(timeout=SHORT_TIMEOUT)
+                with contextlib.suppress(Exception):
+                    popover.wait_for(state="hidden", timeout=3000)
+        if popover.is_visible():
+            page.evaluate(
+                """(sel) => document.querySelectorAll(sel).forEach(el => {
+                    el.style.visibility = 'hidden';
+                    el.style.pointerEvents = 'none';
+                })""",
+                selector,
+            )
+            print("  pinned-note popover still open after close click -- hid it", flush=True)
+        else:
+            print("  closed pinned-note popover covering Print Chart", flush=True)
+    except Exception as exc:
+        print(f"  could not dismiss pinned-note popover: {type(exc).__name__}: {exc}", flush=True)
+
+
 def open_print_chart(page: Page, config: SyncConfig) -> Locator:
     """Click Print Chart and return the visible modal container."""
     # A prior record's native print-preview overlay can still be sitting on
     # top of the page -- see dismiss_stray_print_preview_modal's docstring --
-    # and would otherwise intercept this exact click.
+    # and would otherwise intercept this exact click. Same for the patient's
+    # own pinned-note popover -- see dismiss_pinned_note_popover.
     dismiss_stray_print_preview_modal(page, config)
+    dismiss_pinned_note_popover(page, config)
     button = page.locator(config.print_chart_button_selector).first
     button.wait_for(state="visible", timeout=DEFAULT_TIMEOUT)
     button.click()

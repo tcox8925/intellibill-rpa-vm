@@ -180,6 +180,13 @@ def wait_for_grid_settled(page, timeout_ms=60_000, max_retries=3):
             _wait_for_grid_content_stable(page)
             return
         except Exception:
+            # Log where we actually are -- a grid timeout is usually "not on
+            # the grid at all" (OTP screen, login redirect), not a slow render.
+            try:
+                otp_showing = page.locator("input[aria-label='passcode digit']").count() > 0
+            except Exception:
+                otp_showing = None
+            print(f"[GRID] url={page.url!r} otp_screen={otp_showing}")
             if attempt < max_retries:
                 print(f"[GRID] Timeout on attempt {attempt}/{max_retries}, refreshing page ...")
                 page.reload(wait_until="domcontentloaded")
