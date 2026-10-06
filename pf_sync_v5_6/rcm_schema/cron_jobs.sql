@@ -40,6 +40,8 @@ CREATE TABLE "EDI_Tebra".cron_job_executions (
 	id uuid DEFAULT gen_random_uuid() NOT NULL,
 	cron_job_id uuid NOT NULL,
 	triggered_at timestamptz DEFAULT CURRENT_TIMESTAMP NOT NULL,
+	processing_started_at timestamptz NULL,
+	finished_at timestamptz NULL,
 	status "EDI_Tebra".cron_job_execution_status NOT NULL,
 	error_description text NULL,
 	response jsonb NULL,
