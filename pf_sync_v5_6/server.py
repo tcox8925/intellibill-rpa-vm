@@ -69,16 +69,33 @@ try:
     # standalone (`python -m uvicorn server:app` from inside pf_sync_v5_6/),
     # which has no "EDI_Tebra".cron_jobs row to look up / DB creds configured
     # for anyway in a bare standalone run.
-    from cron_execution_log import start_execution, finish_execution, mark_processing
+    from cron_execution_log import (
+        abandon_stale_executions,
+        describe_exception,
+        finish_execution,
+        new_execution_id,
+        run_tracked,
+        start_execution,
+    )
 except ImportError:
-    def start_execution(job_setting: str, response: dict | None = None) -> str:
+    def start_execution(job_setting: str, response: dict | None = None,
+                        execution_id: str | None = None) -> str:
         return ""
 
-    def finish_execution(execution_id: str, success: bool, error_description: str | None = None, response: dict | None = None) -> None:
-        pass
+    def finish_execution(execution_id: str, success: bool, error_description: str | None = None, response: dict | None = None) -> bool:
+        return False
 
-    def mark_processing(execution_id: str, response: dict | None = None) -> None:
-        pass
+    def run_tracked(execution_id: str, fn, outcome=None, summarize=None, log=print):
+        return fn()
+
+    def abandon_stale_executions(job_settings: list[str], log=print) -> int:
+        return 0
+
+    def new_execution_id() -> str:
+        return str(uuid.uuid4())
+
+    def describe_exception(exc: BaseException) -> str:
+        return repr(exc)
 
 
 def _find_stage_failures(node, path=""):
@@ -140,6 +157,24 @@ CST = ZoneInfo("America/Chicago")
 
 def _slog(message: str) -> None:
     print(f"[PF-SYNC-SERVER] [{datetime.now(CST).strftime('%Y-%m-%d %H:%M:%S %Z')}] {message}", flush=True)
+
+
+def _abandon_stale_pf_executions() -> None:
+    """A run whose process died (VM reboot, crash, redeploy) leaves its row in
+    started/processing forever -- fail those once at startup. Runs at import
+    time on its own thread (not a FastAPI startup hook: this app is mounted
+    as a sub-app, and mounted apps' startup events never fire), so a slow DB
+    can't delay the server coming up."""
+    try:
+        abandon_stale_executions(
+            [_PRACTICE_FUSION_FACESHEET_PULL_JOB_SETTING, _PF_SC_APPOINTMENTS_PULL_JOB_SETTING],
+            log=_slog,
+        )
+    except Exception as exc:
+        _slog(f"abandoned-execution sweep failed: {exc!r}")
+
+
+threading.Thread(target=_abandon_stale_pf_executions, daemon=True).start()
 
 
 def _env_name() -> str:
@@ -307,20 +342,10 @@ def _namespace_with_env_creds(model: BaseModel, **extra) -> argparse.Namespace:
     )
 
 
-def _run_browser_job(lock_key: str, job_name: str, callback, lock_timeout: float | None = None,
-                     on_lock_failure=None):
+def _run_browser_job(lock_key: str, job_name: str, callback, lock_timeout: float | None = None):
     """Run callback() under the global browser lock, releasing it when done.
-    on_lock_failure(exc), if given, is called when the lock couldn't be
-    acquired (callback never ran) before the BrowserBusyError is re-raised."""
-    try:
-        lock = _acquire_key_lock(lock_key, timeout=lock_timeout)
-    except BrowserBusyError as exc:
-        if on_lock_failure is not None:
-            try:
-                on_lock_failure(exc)
-            except Exception as hook_exc:
-                _slog(f"{job_name} on_lock_failure hook failed: {hook_exc!r}")
-        raise
+    Raises BrowserBusyError (callback never ran) if the lock isn't acquired."""
+    lock = _acquire_key_lock(lock_key, timeout=lock_timeout)
     _lock_holders[lock_key] = job_name
     try:
         return callback()
@@ -333,34 +358,44 @@ def _run_browser_job(lock_key: str, job_name: str, callback, lock_timeout: float
 
 
 def _dispatch_browser_job(wait_for_completion: bool, job_name: str, callback,
-                          before_lock=None, on_lock_failure=None):
+                          execution_id: str | None = None):
     """Run a browser job inline (default) or in a background thread.
 
     Mirrors myops/server.py: wait_for_completion=True runs inline and returns the
     result (or raises HTTPException on failure); False starts a background thread
     and returns 202 immediately with a job_id.
 
-    Generic across every endpoint that calls it (facesheet-pull-by-date,
-    full-sync-by-date, process, refresh, sync-schedules-by-date, ...), most of
-    which have no corresponding "EDI_Tebra".cron_jobs row - so cron_job_executions
-    logging is NOT done here. It's done in the callers that do map to a seeded
-    row (sync_schedules_by_date_endpoint, appointments_by_date_endpoint), via
-    the optional hooks: before_lock() runs on the worker thread before the
-    lock wait starts (never on the request thread), on_lock_failure(exc) runs
-    if the lock was never acquired, so a skipped run still leaves a record.
+    execution_id: the "EDI_Tebra".cron_job_executions row already inserted
+    for this run (see _start_logged_execution), for the endpoints that map to
+    a seeded cron_jobs row (sync-schedules-by-date, appointments-by-date) --
+    None for every other endpoint, which isn't logged. When given:
+      - it IS the job_id returned to the caller (202 body, inline result, and
+        an X-Job-Id header on errors), so the caller can look the run up by
+        primary key
+      - callback is expected to record its own outcome (run_tracked); this
+        function only guarantees the row never stays open: if the run ends
+        without the row being finished -- lock never acquired, or anything
+        escaping callback -- it's marked failed here. finish_execution only
+        touches open rows, so this never overwrites a recorded outcome.
 
     Lock behavior: wait_for_completion=True fails immediately with 409 if the
     browser is busy; False waits up to _BACKGROUND_LOCK_WAIT_SECONDS first.
     """
+    job_id = execution_id or str(uuid.uuid4())
+
     def _run():
-        if before_lock is not None:
-            try:
-                before_lock()
-            except Exception as hook_exc:
-                _slog(f"{job_name} before_lock hook failed: {hook_exc!r}")
         lock_timeout = None if wait_for_completion else _BACKGROUND_LOCK_WAIT_SECONDS
-        return _run_browser_job(_BROWSER_LOCK_KEY, job_name, callback,
-                                lock_timeout=lock_timeout, on_lock_failure=on_lock_failure)
+        try:
+            return _run_browser_job(_BROWSER_LOCK_KEY, job_name, callback, lock_timeout=lock_timeout)
+        except BaseException as exc:
+            if execution_id:
+                prefix = "Never started: " if isinstance(exc, BrowserBusyError) else ""
+                try:
+                    finish_execution(execution_id, success=False,
+                                     error_description=prefix + describe_exception(exc))
+                except Exception as log_exc:
+                    _slog(f"{job_name} job_id={job_id} failed to record failure: {log_exc!r}")
+            raise
 
     if wait_for_completion:
         started = time.monotonic()
@@ -391,15 +426,16 @@ def _dispatch_browser_job(wait_for_completion: bool, job_name: str, callback,
 
         if "error" in outcome:
             exc = outcome["error"]
+            headers = {"X-Job-Id": job_id} if execution_id else None
             if isinstance(exc, HTTPException):
+                if headers:
+                    exc.headers = {**(exc.headers or {}), **headers}
                 raise exc
-            _slog(f"{job_name} failed: {type(exc).__name__}: {exc}")
-            raise HTTPException(status_code=500, detail=str(exc))
+            _slog(f"{job_name} job_id={job_id} failed: {type(exc).__name__}: {exc}")
+            raise HTTPException(status_code=500, detail=str(exc), headers=headers)
 
-        _slog(f"{job_name} completed in {time.monotonic() - started:.1f}s")
-        return {"status": "completed", "result": outcome["result"]}
-
-    job_id = str(uuid.uuid4())
+        _slog(f"{job_name} job_id={job_id} completed in {time.monotonic() - started:.1f}s")
+        return {"status": "completed", "job_id": job_id, "result": outcome["result"]}
 
     def _runner():
         _slog(f"{job_name} background job_id={job_id} starting")
@@ -418,6 +454,29 @@ def _dispatch_browser_job(wait_for_completion: bool, job_name: str, callback,
 
     threading.Thread(target=_runner, daemon=True).start()
     return JSONResponse(status_code=202, content={"status": "started", "job_id": job_id})
+
+
+def _start_logged_execution(job_setting: str, job_name: str, request_params: dict) -> str:
+    """Insert this run's cron_job_executions row (status='started') before the
+    endpoint returns, and return its id -- which becomes the job_id handed
+    back to the caller.
+
+    Synchronous on purpose: a job_id the caller gets back always has a row
+    behind it. connect_timeout bounds the wait (see cron_execution_log). If
+    the row can't be written, the run is refused with a 503 instead of
+    running unlogged -- every one of these jobs writes to the same database
+    anyway, so it couldn't have succeeded."""
+    execution_id = new_execution_id()
+    try:
+        return start_execution(job_setting, response={"request": request_params},
+                               execution_id=execution_id) or execution_id
+    except Exception as exc:
+        _slog(f"{job_name} refused: could not record execution start: {exc!r}")
+        raise HTTPException(
+            status_code=503,
+            detail=f"Could not record the {job_setting} execution in EDI_Tebra.cron_job_executions; "
+                   f"job not started: {exc}",
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -1158,63 +1217,30 @@ def sync_schedules_by_date_endpoint(request: SyncSchedulesByDateRequestSlim):
         wait_for_completion=request.wait_for_completion,
     )
     args = _namespace_with_env_creds(full_request)
-    _execution_response = {
-        "report_date": request.report_date,
-        "start_date": request.start_date,
-        "end_date": request.end_date,
-    }
-
-    # execution_id is shared between the hooks and `job` below. All three run
-    # on _dispatch_browser_job's worker thread, never on the thread that has
-    # to return this endpoint's HTTP response -- a Postgres round-trip out
-    # there would put a DB write back in front of that response, reintroducing
-    # the exact open-ended wait wait_for_completion=False was built to remove
-    # (confirmed 2026-09-17 on the equivalent bug in
-    # tebra_patient_sync/app_tebra.py's /tebra/sync: a slow/unreachable DB hung
-    # start_execution() well past the caller's 30s trigger timeout,
-    # indistinguishable from the original blocking-sync timeout bug, and
-    # logged nothing since the INSERT never got a chance to run).
-    execution = {"id": None}
-
-    def start_logging():
-        # Before the browser-lock wait, not after: a run that never gets the
-        # lock still leaves a row (status 'started' while it waits), with
-        # triggered_at reflecting when it was actually triggered.
-        try:
-            execution["id"] = start_execution(_PRACTICE_FUSION_FACESHEET_PULL_JOB_SETTING,
-                                              response=_execution_response)
-        except Exception as e:
-            _slog(f"sync-schedules-by-date failed to start execution logging: {e!r}")
-
-    def log_lock_failure(exc):
-        if execution["id"]:
-            finish_execution(execution["id"], success=False, error_description=str(exc.detail))
+    # The row is written before this returns, and its id is the job_id the
+    # caller gets back -- see _start_logged_execution / _dispatch_browser_job.
+    execution_id = _start_logged_execution(
+        _PRACTICE_FUSION_FACESHEET_PULL_JOB_SETTING, "sync-schedules-by-date",
+        {
+            "report_date": request.report_date,
+            "start_date": request.start_date,
+            "end_date": request.end_date,
+            "lookback_days": request.lookback_days,
+            "pull_failed_sheets": request.pull_failed_sheets,
+            "wait_for_completion": request.wait_for_completion,
+        },
+    )
 
     def job():
-        execution_id = execution["id"]
-        if execution_id:
-            try:
-                mark_processing(execution_id)
-            except Exception as e:
-                _slog(f"sync-schedules-by-date failed to mark execution processing: {e!r}")
-
         # Schedule scrape -> Seen-status filter -> inject synthetic record ->
         # process, entirely independent of the Eligibility Report -- reused via
         # cli.run_sync_schedules_by_date, not reimplemented here.
-        try:
-            result = run_sync_schedules_by_date(args)
-            if execution_id:
-                success, error_description = _stage_outcome(result)
-                finish_execution(execution_id, success=success, error_description=error_description,
-                                  response={"result": result})
-            return result
-        except Exception as e:
-            if execution_id:
-                finish_execution(execution_id, success=False, error_description=repr(e))
-            raise
+        return run_tracked(execution_id, lambda: run_sync_schedules_by_date(args),
+                           outcome=_stage_outcome, summarize=lambda result: {"result": result},
+                           log=_slog)
 
     return _dispatch_browser_job(request.wait_for_completion, "sync-schedules-by-date", job,
-                                 before_lock=start_logging, on_lock_failure=log_lock_failure)
+                                 execution_id=execution_id)
 
 @app.post("/appointments-by-date")
 def appointments_by_date_endpoint(request: AppointmentsByDateRequestSlim):
@@ -1230,51 +1256,23 @@ def appointments_by_date_endpoint(request: AppointmentsByDateRequestSlim):
         appointment_type=request.appointment_type,
     )
     args = _namespace_with_env_creds(full_request)
-    _execution_response = {
-        "report_date": request.report_date,
-        "start_date": request.start_date,
-        "end_date": request.end_date,
-        "insert_into_db": request.insert_into_db,
-        "update_appointments": request.update_appointments,
-        "clean_and_insert": request.clean_and_insert,
-        "appointment_type": request.appointment_type,
-    }
-
-    # Same hook layout as sync_schedules_by_date_endpoint above -- all DB
-    # writes happen on _dispatch_browser_job's worker thread, never on the
-    # request thread, and a run that never gets the browser lock still
-    # leaves a 'failed' row.
-    execution = {"id": None}
-
-    def start_logging():
-        try:
-            execution["id"] = start_execution(_PF_SC_APPOINTMENTS_PULL_JOB_SETTING,
-                                              response=_execution_response)
-        except Exception as e:
-            _slog(f"appointments-by-date failed to start execution logging: {e!r}")
-
-    def log_lock_failure(exc):
-        if execution["id"]:
-            finish_execution(execution["id"], success=False, error_description=str(exc.detail))
+    execution_id = _start_logged_execution(
+        _PF_SC_APPOINTMENTS_PULL_JOB_SETTING, "appointments-by-date",
+        {
+            "report_date": request.report_date,
+            "start_date": request.start_date,
+            "end_date": request.end_date,
+            "insert_into_db": request.insert_into_db,
+            "update_appointments": request.update_appointments,
+            "clean_and_insert": request.clean_and_insert,
+            "appointment_type": request.appointment_type,
+            "wait_for_completion": request.wait_for_completion,
+        },
+    )
 
     def job():
-        execution_id = execution["id"]
-        if execution_id:
-            try:
-                mark_processing(execution_id)
-            except Exception as e:
-                _slog(f"appointments-by-date failed to mark execution processing: {e!r}")
-        try:
-            result = _appointments_job()
-            if execution_id:
-                success, error_description = _appointments_outcome(result)
-                finish_execution(execution_id, success=success, error_description=error_description,
-                                  response=_appointments_execution_summary(result))
-            return result
-        except Exception as e:
-            if execution_id:
-                finish_execution(execution_id, success=False, error_description=repr(e))
-            raise
+        return run_tracked(execution_id, _appointments_job, outcome=_appointments_outcome,
+                           summarize=_appointments_execution_summary, log=_slog)
 
     def _appointments_job():
         # Read-only Schedule scrape across [start_date, end_date] -- no chart,
@@ -1297,18 +1295,32 @@ def appointments_by_date_endpoint(request: AppointmentsByDateRequestSlim):
         return fetch_result
 
     return _dispatch_browser_job(request.wait_for_completion, "appointments-by-date", job,
-                                 before_lock=start_logging, on_lock_failure=log_lock_failure)
+                                 execution_id=execution_id)
 
 
 def _appointments_outcome(result):
     """(success, error_description) for an /appointments-by-date result.
-    sync_appointments_to_edi_tebra records per-row failures in row_errors
-    and still returns normally, so a non-zero count fails the execution
-    rather than being reported as success."""
+
+    Both halves can come back incomplete without raising, so each is checked:
+    - scrape: day_diagnostics has one entry per date. navigated=false means
+      that date was never reached; scraped_count < header_count means PF's
+      own header listed more appointments than were scraped. Either way the
+      day's appointments are missing, so the run is not a success.
+    - sync: sync_appointments_to_edi_tebra counts per-row failures in
+      row_errors and still returns normally."""
+    failures = []
+    for day in result.get("day_diagnostics") or []:
+        if not day.get("navigated"):
+            failures.append(f"{day.get('date')}: could not navigate to this date")
+        elif isinstance(day.get("header_count"), int) and day.get("scraped_count", 0) < day["header_count"]:
+            failures.append(f"{day.get('date')}: scraped {day.get('scraped_count', 0)} of "
+                            f"{day['header_count']} appointments in PF's header")
     sync = result.get("edi_tebra_sync") or {}
     row_errors = sync.get("row_errors") or 0
     if row_errors:
-        return False, f"edi_tebra_sync: row_errors={row_errors} of {sync.get('total_appointments', '?')}"
+        failures.append(f"edi_tebra_sync: row_errors={row_errors} of {sync.get('total_appointments', '?')}")
+    if failures:
+        return False, "; ".join(failures)
     return True, None
 
 
