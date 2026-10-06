@@ -20,7 +20,7 @@ from .browser import BROWSER_LAUNCH_LOCK
 from .selector import WorkSelector
 from .db import get_ehr_connection, log_run_event
 from .session import (
-    login_and_select_practice, discover_practices,
+    login_and_select_practice, discover_practices, PracticeNotFoundError,
     now_cst, cleanup_acc_directory, practice_download_dir, cleanup_practice_download_dir,
     _wait_for_otp_then_resolve,
 )
@@ -200,12 +200,11 @@ def run(sel: WorkSelector, scrape_patients=None, no_upload=False, skip_appointme
 
     _log(f"Resolved practices count={len(practices)} practices={practices}")
 
-    # Populated only if some future path adds an entry without ever
-    # attempting a login (kept for response-shape compatibility) -- a
-    # requested practice not found in Tebra now surfaces as a normal
-    # per-practice failure (see except below) instead of silently landing
-    # here, where server.py's _summary_outcome() never looked at it.
+    # A requested practice not found in Tebra (PracticeNotFoundError) is
+    # recorded here with its reason instead of as a failure; server.py's
+    # _summary_outcome() surfaces skipped_details in error_description.
     skipped = []
+    skipped_details = {}
     completed, failed = [], []
     failed_details = {}
     for requested_practice in practices:
@@ -300,6 +299,12 @@ def run(sel: WorkSelector, scrape_patients=None, no_upload=False, skip_appointme
 
                 completed.append(practice)
                 _log(f"Practice success name={practice} elapsed={time.monotonic() - practice_clock:.1f}s")
+            except PracticeNotFoundError as e:
+                # Practice isn't available to this login -- nothing to
+                # scrape, not a broken run. Skip it with the reason.
+                _log(f"Practice skipped name={practice} reason={e}")
+                skipped.append(practice)
+                skipped_details[practice] = str(e)
             except Exception as e:
                 _log(f"Practice failed name={practice} error={e!r}")
                 failed.append(practice)
@@ -318,7 +323,7 @@ def run(sel: WorkSelector, scrape_patients=None, no_upload=False, skip_appointme
     # above, so this is expected to be a no-op most of the time.
     cleanup_acc_directory()
     _log(
-        f"Run finished completed={completed} failed={failed} "
+        f"Run finished completed={completed} failed={failed} skipped={skipped} "
         f"elapsed={time.monotonic() - run_clock:.1f}s"
     )
     return {
@@ -326,6 +331,7 @@ def run(sel: WorkSelector, scrape_patients=None, no_upload=False, skip_appointme
         "completed": completed,
         "failed": failed,
         "skipped": skipped,
+        "skipped_details": skipped_details,
         "failed_details": failed_details,
     }
 

@@ -31,6 +31,12 @@ except Exception as _e:  # pragma: no cover
     _OTP_IMPORT_ERROR = _e
 
 
+class PracticeNotFoundError(RuntimeError):
+    """The requested practice isn't available to this Tebra login (no
+    matching tile / landed on a different single practice). pipeline.run()
+    records this as *skipped* with the reason, not as a failure."""
+
+
 def now_cst():
     return datetime.now(CST)
 
@@ -70,7 +76,9 @@ def login_and_select_practice(page, practice_name):
     page.fill("#userName", EMAIL)
     page.fill("#password", PASSWORD)
     page.click("#sign-in")
-    _wait_for_otp_then_resolve(page)
+    _wait_for_otp_then_resolve(
+        page, until=f"h3:has-text('Practice select'), {_PRACTICE_LANDED_SELECTOR}"
+    )
 
     target = normalize_text(practice_name)
 
@@ -86,7 +94,7 @@ def login_and_select_practice(page, practice_name):
             print(f"[LOGIN] Single-practice landing '{landed}' matched requested '{practice_name}'")
             _handle_otp(page)
             return landed
-        raise RuntimeError(
+        raise PracticeNotFoundError(
             f"Practice '{practice_name}' not found in Tebra UI. "
             f"Account landed directly on single practice '{landed}' instead."
         )
@@ -102,15 +110,48 @@ def login_and_select_practice(page, practice_name):
         if target and (target in norm or norm in target):
             print(f"[LOGIN] Matched practice tile '{tile_text}' for '{practice_name}'")
             tiles.nth(i).click()
-            _handle_otp(page)
+            _wait_for_practice_landed(page, tile_text)
             return tile_text
 
     # No match: list what Tebra actually showed, to make the mismatch obvious.
     seen = [tiles.nth(i).inner_text().strip() for i in range(n)]
-    raise RuntimeError(
+    raise PracticeNotFoundError(
         f"Practice '{practice_name}' not found in Tebra UI. "
         f"Tiles present: {seen}"
     )
+
+
+_PRACTICE_LANDED_SELECTOR = "[data-testid='navigation-practice-name']"
+
+
+def _wait_for_practice_landed(page, practice_name, timeout_s=60):
+    """After clicking a practice tile, keep handling OTP until the practice's
+    own shell (navigation header) has actually rendered.
+
+    Seen 2026-10-06 (PrePost+Tennessee grid timeout): this used to be a single
+    ~1.2s _handle_otp() check right after the tile click -- the same
+    late-OTP gap the post-sign-in check had (see _wait_for_otp_then_resolve).
+    When the OTP screen (or just a slow practice load) showed up after that
+    window, we returned anyway, pass_appointments' goto_worklist() navigated
+    away from a page that wasn't logged into the practice yet, and
+    wait_for_grid_settled() reloaded that same non-grid screen 3x before
+    failing with a bare '.MuiDataGrid-virtualScroller' 60s timeout."""
+    deadline = time.monotonic() + timeout_s
+    while True:
+        handled = _wait_for_otp_then_resolve(
+            page, poll_window_s=max(1, deadline - time.monotonic()),
+            until=_PRACTICE_LANDED_SELECTOR,
+        )
+        if not handled:
+            break
+        # OTP handled -- loop once more in case the practice is still loading.
+        if time.monotonic() >= deadline:
+            break
+    if page.locator(_PRACTICE_LANDED_SELECTOR).count() == 0:
+        print(
+            f"[LOGIN] WARNING practice '{practice_name}' header not visible "
+            f"{timeout_s}s after tile click; url={page.url!r}"
+        )
 
 
 def _handle_otp(page):
@@ -137,7 +178,7 @@ def _handle_otp(page):
     )
 
 
-def _wait_for_otp_then_resolve(page, poll_window_s=20):
+def _wait_for_otp_then_resolve(page, poll_window_s=20, until=None):
     """Poll for the OTP modal for up to poll_window_s instead of checking
     once. Confirmed live 2026-10-01: a single _handle_otp() check right
     after the sign-in click can miss the modal if Tebra takes longer than
@@ -146,11 +187,17 @@ def _wait_for_otp_then_resolve(page, poll_window_s=20):
     caller sits blindly waiting on 'Practice select'/dashboard until its own
     30s timeout. Returns True if OTP was found and handled at any point in
     the window, False if it never appeared (normal -- OTP doesn't fire on
-    every login)."""
+    every login).
+
+    `until`: optional selector for the screen the caller expects to land on
+    next. Once it's visible (and no OTP is showing) we stop polling early
+    instead of burning the full window on every OTP-free login."""
     deadline = time.monotonic() + poll_window_s
     while True:
         if _handle_otp(page):
             return True
+        if until and page.locator(until).count() > 0:
+            return False
         if time.monotonic() >= deadline:
             return False
         page.wait_for_timeout(1000)
@@ -206,7 +253,7 @@ def resolve_practice_name(practice_name, practices):
         norm = normalize_practice_compare(practice)
         if target and (target in norm or norm in target):
             return practice
-    raise RuntimeError(
+    raise PracticeNotFoundError(
         f"Practice '{practice_name}' not found in Tebra UI. Tiles present: {practices}"
     )
 
