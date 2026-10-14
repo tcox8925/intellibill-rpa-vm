@@ -631,9 +631,9 @@ def _run_job_with_lock(lock_key, run_fn, log_product_name, blocking, raise_on_er
         return
 
     run_start = datetime.now(CST)
-    has_error, err = False, None
+    has_error, err, result = False, None, None
     try:
-        run_fn()
+        result = run_fn()
     except Exception as e:
         has_error, err = True, repr(e)
     finally:
@@ -650,6 +650,7 @@ def _run_job_with_lock(lock_key, run_fn, log_product_name, blocking, raise_on_er
 
     if has_error and raise_on_error:
         raise RuntimeError(f"{log_product_name} failed: {err}")
+    return result
 
 
 def _run_daily_pdf_processor_job(blocking=False, raise_on_error=False):
@@ -661,7 +662,7 @@ def _run_daily_pdf_processor_job(blocking=False, raise_on_error=False):
     synchronously now, since zipbuild.py lives in this same ehr package, no
     HTTP hop needed -- see that call site's docstring for why it must block
     and raise rather than skip/swallow)."""
-    _run_job_with_lock(
+    return _run_job_with_lock(
         "__daily_pdf_processor__",
         lambda: run_daily_pdf_processor(_job_log("PDF-PROCESSOR")),
         "DAILY_PDF_PROCESSOR", blocking, raise_on_error,
@@ -676,7 +677,7 @@ def _run_pf_facesheet_processor_job(blocking=False, raise_on_error=False):
     function via `ehr.pdf_processor`'s sibling module rather than reaching
     into server.py, and only when it's actually running inside this combined
     process (see rcm_upload.py's _trigger_pf_facesheet_processor)."""
-    _run_job_with_lock(
+    return _run_job_with_lock(
         "__daily_pf_facesheet_processor__",
         lambda: run_daily_practice_fusion_pdf_processor(_job_log("PF-FACESHEET-PROCESSOR")),
         "DAILY_PF_FACESHEET_PROCESSOR", blocking, raise_on_error,
