@@ -143,7 +143,9 @@ SHARED_COLUMNS = [
 ]
 
 
-def run_load_patient_header() -> int:
+def run_load_patient_header(audit_source: str | None = None) -> int:
+    """audit_source labels this run's DB connections - see
+    utils/patient_audit_counts.py."""
     if not os.path.exists(PATIENTS_JSON_PATH):
         raise FileNotFoundError(f"File not found: {PATIENTS_JSON_PATH}")
 
@@ -155,7 +157,7 @@ def run_load_patient_header() -> int:
     print(f"📄 Found {len(patients)} patients")
     print("⏳ Looking up group and client information...")
 
-    engine = get_engine()
+    engine = get_engine(audit_source)
     total_processed = 0
     total_skipped = 0
 
