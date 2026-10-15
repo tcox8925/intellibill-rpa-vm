@@ -23,6 +23,7 @@ import base64
 import io
 import json
 import re
+import time
 import zipfile
 from concurrent.futures import ThreadPoolExecutor
 
@@ -60,7 +61,8 @@ def run_daily_pdf_processor(log, restore_mode=False):
         groups = _fetch_practice_groups(log, session)
         container = _get_container(log)
 
-        stats = {"total": 0, "processed": 0, "skipped": 0, "exhausted": 0, "failed": 0}
+        stats = {"total": 0, "processed": 0, "skipped": 0, "exhausted": 0, "failed": 0,
+                 "zips": []}
 
         if restore_mode:
             log("🔄 Running in RESTORE MODE")
@@ -188,6 +190,7 @@ def _process_zip_blob(container, blob_name, session, stats, log):
 
     pdf_names = [n for n in zf.namelist() if n.lower().endswith(".pdf")]
     log(f"📄 Found {len(pdf_names)} PDFs")
+    zip_files = []
 
     for i in range(0, len(pdf_names), BATCH_SIZE):
         batch = pdf_names[i : i + BATCH_SIZE]
@@ -214,6 +217,7 @@ def _process_zip_blob(container, blob_name, session, stats, log):
             )
 
         for result in results:
+            zip_files.append(_file_record(result))
             for bucket in (stats, batch_stats, zip_stats):
                 bucket["total"] += 1
 
@@ -241,12 +245,185 @@ def _process_zip_blob(container, blob_name, session, stats, log):
         f"Exhausted: {zip_stats['exhausted']}, Failed: {zip_stats['failed']}, Total: {zip_stats['total']})"
     )
 
-    if zip_stats["processed"] + zip_stats["exhausted"] + zip_stats["skipped"] == len(pdf_names):
-        log(f"✅ All PDFs in {blob_name} processed or exhausted - moving ZIP to processed folder")
+    # An OK from uploadMedicalFile doesn't prove a claim exists -- the
+    # backend only stages the file and creates the claim in the background
+    # (intellibill medicalExtractionRouter.ts), and the ZIP used to move on
+    # that OK alone. Confirm each PDF's claim from the DB instead
+    # ("EDI_Tebra".attachments.associated_claim_id -> claim_header, the same
+    # link the backend's own duplicate check uses), waiting a bounded time
+    # for background processing to finish, and only move the ZIP once every
+    # PDF has a real claim (or is exhausted).
+    appt_ids = [f["appt_id"] for f in zip_files if f.get("appt_id")]
+    # Only wait when this pass actually uploaded something -- an old ZIP
+    # still sitting in INBOUND (re-scanned on every run) shouldn't cost a
+    # full wait each time if its attachment is stuck 'pending' backend-side.
+    claim_rows, lookup_error = _wait_for_claims(
+        appt_ids, log, wait_seconds=CLAIM_CONFIRM_WAIT_SECONDS if zip_stats["processed"] else 0,
+    )
+
+    unconfirmed = 0
+    for f in zip_files:
+        row = claim_rows.get(str(f.get("appt_id")))
+        if row and row["claim_id"]:
+            f["claim_id"] = row["claim_id"]
+            f["dcn"] = row["dcn"]
+            f["claim_status"] = row["status"]
+            f["attachment_id"] = row["attachment_id"]
+            f["claim_confirmed"] = True
+            f.pop("error", None)
+        else:
+            f["claim_confirmed"] = False
+            if row:
+                f["attachment_id"] = row["attachment_id"]
+            if row and row["failure_reason"]:
+                f["error"] = f"claim not created: {row['failure_reason']}"
+            elif row and row["processing_status"] in ("pending", "processing"):
+                f["error"] = f"claim creation still {row['processing_status']} after waiting"
+            elif f["status"] in ("uploaded", "duplicate") and not f.get("error"):
+                f["error"] = "no claim linked to this facesheet's attachment yet"
+            if f["status"] != "exhausted":
+                unconfirmed += 1
+
+    claims_confirmed = sum(1 for f in zip_files if f["claim_confirmed"])
+    moved, move_note = False, None
+    if lookup_error:
+        move_note = f"kept in INBOUND: {lookup_error}"
+    elif unconfirmed == 0 and len(zip_files) == len(pdf_names):
+        log(f"✅ All PDFs in {blob_name} have confirmed claims (or are exhausted) - moving ZIP to processed folder")
         try:
             _move_zip_to_processed(container, blob_name, buffer, log)
+            moved = True
         except Exception as err:
+            move_note = f"move failed: {err}"
             log(f"❌ Failed to move ZIP to processed folder for {blob_name}: {err}")
+    else:
+        move_note = f"kept in INBOUND: {unconfirmed} PDF(s) without a confirmed claim (rechecked next run)"
+    if move_note:
+        log(f"⏸️ {blob_name} {move_note}")
+
+    stats["zips"].append({
+        "zip": blob_name,
+        "pdfs": len(pdf_names),
+        "claims_confirmed": claims_confirmed,
+        "uploaded_now": zip_stats["processed"],
+        "duplicates": zip_stats["skipped"],
+        "exhausted": zip_stats["exhausted"],
+        "failed": zip_stats["failed"],
+        "unconfirmed": unconfirmed,
+        "moved_to_processed": moved,
+        "note": move_note,
+        "files": zip_files,
+    })
+
+
+def _rcm_connection():
+    """The RCM DB (where "EDI_Tebra".claim_header lives) -- same RCM_DB_*
+    env vars cron_execution_log.py uses for cron_job_executions."""
+    import os
+    import psycopg2
+    return psycopg2.connect(
+        host=os.environ.get("RCM_DB_HOST", "").strip(),
+        dbname=os.environ.get("RCM_DB_NAME", "").strip(),
+        user=os.environ.get("RCM_DB_USER", "").strip(),
+        password=os.environ.get("RCM_DB_PASSWORD", "").strip(),
+        sslmode="require",
+        connect_timeout=10,
+    )
+
+
+# How long to wait for the backend's background claim creation before
+# judging a ZIP -- anything still pending after this keeps the ZIP in
+# INBOUND and is rechecked on the next processor run.
+CLAIM_CONFIRM_WAIT_SECONDS = 600
+CLAIM_CONFIRM_POLL_SECONDS = 15
+
+
+def _wait_for_claims(appt_ids, log, wait_seconds=CLAIM_CONFIRM_WAIT_SECONDS):
+    """Poll _lookup_claims until no appointment's attachment is still
+    pending/processing (or the wait runs out). Returns (rows, lookup_error)."""
+    deadline = time.monotonic() + wait_seconds
+    while True:
+        try:
+            rows = _lookup_claims(appt_ids)
+        except Exception as err:
+            log(f"❌ claim lookup failed: {err}")
+            return {}, f"claim lookup failed: {err}"
+        in_flight = [a for a, r in rows.items()
+                     if not r["claim_id"] and r["processing_status"] in ("pending", "processing")]
+        if not in_flight or time.monotonic() >= deadline:
+            return rows, None
+        log(f"⏳ Waiting on background claim creation for {len(in_flight)} appointment(s)...")
+        time.sleep(CLAIM_CONFIRM_POLL_SECONDS)
+
+
+def _lookup_claims(appt_ids):
+    """{rpa_appointment_id: {attachment_id, processing_status, claim_id, dcn,
+    status, failure_reason}} from the appointment's latest Facesheet
+    attachment (same row/filters as the backend's isDuplicateMedicalFile).
+    The claim is attachments.associated_claim_id; claim_creation_response
+    carries the claimId too, or the reason no claim was created."""
+    appt_ids = sorted({str(a) for a in appt_ids if a})
+    if not appt_ids:
+        return {}
+    conn = _rcm_connection()
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            """
+            SELECT DISTINCT ON (a.rpa_appointment_id)
+                   a.rpa_appointment_id, a.id, a.processing_status,
+                   ch.claim_id, ch.dcn, ch.status, a.claim_creation_response
+            FROM "EDI_Tebra".attachments a
+            LEFT JOIN "EDI_Tebra".claim_header ch ON ch.claim_id = COALESCE(
+                a.associated_claim_id,
+                CASE WHEN a.claim_creation_response->>'claimId'
+                          ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+                     THEN (a.claim_creation_response->>'claimId')::uuid END)
+            WHERE a.attachment_type = 'Facesheet'
+              AND a.rpa_appointment_id = ANY(%s)
+              AND a.status <> 'TR'
+            ORDER BY a.rpa_appointment_id, a.created_at DESC
+            """,
+            (appt_ids,),
+        )
+        out = {}
+        for appt, att_id, proc_status, claim_id, dcn, claim_status, response in cur.fetchall():
+            failure = None
+            if not claim_id and isinstance(response, dict):
+                detail = response.get("reason") or response.get("error")
+                if detail:
+                    failure = f"{response.get('stage')}: {detail}"
+            out[appt] = {
+                "attachment_id": att_id,
+                "processing_status": proc_status,
+                "claim_id": str(claim_id) if claim_id else None,
+                "dcn": dcn,
+                "status": claim_status,
+                "failure_reason": failure,
+            }
+        return out
+    finally:
+        conn.close()
+
+
+def _file_record(result):
+    """One per-PDF line for the cron response: which claim (and DCN) it
+    produced, or why it didn't."""
+    if result.get("success"):
+        status = "uploaded"
+    elif result.get("errorCode") == DUPLICATE_FILE:
+        status = "duplicate"
+    elif result.get("errorCode") == EXHAUSTED:
+        status = "exhausted"
+    else:
+        status = "failed"
+    # claim_id / dcn are filled from claim_header afterwards (_lookup_claims).
+    rec = {"file": result.get("file"), "appt_id": result.get("appt_id"),
+           "appt_date": result.get("appt_date"), "status": status,
+           "claim_id": None, "dcn": None}
+    if status not in ("uploaded", "duplicate"):
+        rec["error"] = result.get("error")
+    return rec
 
 
 def _process_blob_prefix(container, prefix, session, stats, log):
@@ -299,8 +476,9 @@ def _process_pdf(zf, file_name, blob_name, session, log, failed_rpa_appointment_
             log, buffer, file_name, sftp_file_path, session, manifest_entry, zip_metadata, group
         )
 
-        log(f"✅ File processed and claim created: {file_name} → {api_data.get('claimId')}")
-        return {"success": True, "claimId": api_data.get("claimId")}
+        log(f"✅ File uploaded: {file_name} → claimId={api_data.get('claimId')}")
+        return {"success": True, "file": file_name, "appt_id": rpa_appointment_id,
+                "appt_date": (manifest_entry or {}).get("appt_date")}
     except Exception as err:
         code = getattr(err, "code", None)
         log(f"❌ {file_name} ERROR: {err}")
@@ -313,7 +491,14 @@ def _process_pdf(zf, file_name, blob_name, session, log, failed_rpa_appointment_
                 log(f"⚠️ Failed to update retry count for appointment {rpa_appointment_id}: {retry_err}")
 
         failed_rpa_appointment_ids.append(rpa_appointment_id)
-        return {"success": False, "errorCode": code, "error": str(err)}
+        return {
+            "success": False,
+            "file": file_name,
+            "appt_id": rpa_appointment_id,
+            "appt_date": (manifest_entry or {}).get("appt_date"),
+            "errorCode": code,
+            "error": str(err),
+        }
 
 
 class _CodedError(Exception):
@@ -340,8 +525,17 @@ def _check_duplicate(log, file_name, session, manifest_appointment_id):
         params={"input": json.dumps(input_payload)},
         timeout=REQUEST_TIMEOUT,
     )
+    # This used to default isDuplicate to True whenever the call failed or
+    # the field was missing (expired session, 5xx, tRPC error body) -- every
+    # PDF then counted as a "skipped duplicate", which counts toward the
+    # ZIP's move-to-processed check, so the ZIP moved with no claims made.
+    # A failed check is a failure (retried next run), never a duplicate.
+    if res.status_code != 200:
+        raise RuntimeError(f"Duplicate check returned HTTP {res.status_code}: {res.text[:300]}")
     result_data = (res.json().get("result") or {}).get("data") or {}
-    is_duplicate = result_data.get("isDuplicate", True)
+    if "isDuplicate" not in result_data:
+        raise RuntimeError(f"Duplicate check response missing isDuplicate: {res.text[:300]}")
+    is_duplicate = result_data["isDuplicate"]
 
     if is_duplicate:
         raise _CodedError("Duplicate file", DUPLICATE_FILE)
@@ -380,19 +574,28 @@ def _call_medical_api(log, buffer, file_name, sftp_file_path, session, manifest_
         timeout=REQUEST_TIMEOUT,
     )
 
-    if res.status_code == 200:
-        log(f"   ✅ Medical extraction API returned 200 OK for {file_name}")
-    else:
-        log(f"   ⚠️ Medical extraction API returned status {res.status_code}: {res.text}")
+    # A PDF only counts as processed once the API confirms a claim. Before,
+    # a non-200 only logged a warning, and a tRPC error body (no "result")
+    # or a response with no claimId still came back as success -- so the
+    # PDF counted as processed and the ZIP moved without a claim.
+    if res.status_code != 200:
+        raise RuntimeError(f"Medical extraction API returned HTTP {res.status_code}: {res.text[:500]}")
+    log(f"   ✅ Medical extraction API returned 200 OK for {file_name}")
 
     data = res.json()
     if not data:
         raise RuntimeError("Empty medical API response")
+    if data.get("error"):
+        raise RuntimeError(f"Medical extraction API error: {json.dumps(data['error'])[:500]}")
 
     extracted = (data.get("result") or {}).get("data") or data
+    if isinstance(extracted, dict) and "json" in extracted:
+        extracted = extracted["json"]
     if extracted.get("claimError"):
         raise RuntimeError(f"Claim creation failed: {extracted['claimError']}")
 
+    # The claim itself is confirmed from claim_header afterwards (see
+    # _lookup_claims in _process_zip_blob), not from this response.
     return extracted
 
 

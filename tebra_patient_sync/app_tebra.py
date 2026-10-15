@@ -25,6 +25,7 @@ from pydantic import BaseModel
 from tebra.load_patient_coverages import run_load_patient_coverages
 from tebra.load_patient_header import run_load_patient_header
 from tebra.tebra_api import pull_patient_demographics
+from utils.patient_audit_counts import audit_source_label, count_patient_audit_changes
 
 try:
     # Lives at the repo root, two levels up -- only importable when this
@@ -80,20 +81,36 @@ class TebraSyncRequest(BaseModel):
     wait_for_completion: bool = True
 
 
-def _run_sync() -> dict:
+def _run_sync(run_id: str | None = None) -> dict:
     """Pulls demographics, then loads patient_header, then patient_coverages -
-    the full end-to-end Tebra sync."""
+    the full end-to-end Tebra sync.
+
+    run_id (the cron_job_executions id when there is one) tags every DB write
+    of this run, so its patient_audit_history rows carry change_source
+    "rpa:TEBRA_PATIENT_SYNC:<run_id>" and the summary can report how many
+    patients/coverages were actually inserted/updated - counted from those
+    same audit rows."""
+    audit_source = audit_source_label(_TEBRA_PATIENT_SYNC_JOB_SETTING, run_id or str(uuid.uuid4()))
+
     patients = pull_patient_demographics()
     patient_records = patients.get("PatientData") or []
 
-    headers_processed = run_load_patient_header()
-    coverages_processed = run_load_patient_coverages()
+    headers_processed = run_load_patient_header(audit_source)
+    coverages_processed = run_load_patient_coverages(audit_source)
 
-    return {
+    result = {
         "patients_pulled": len(patient_records),
         "headers_processed": headers_processed,
         "coverage_records_processed": coverages_processed,
+        "audit_source": audit_source,
     }
+    # A failed count must never fail a sync whose writes already committed.
+    try:
+        result.update(count_patient_audit_changes(audit_source))
+    except Exception as e:
+        _slog(f"tebra/sync could not count audit changes for {audit_source}: {e!r}")
+        result["audit_counts_error"] = repr(e)
+    return result
 
 
 @app.post("/tebra/sync")
@@ -126,7 +143,7 @@ def trigger_sync(request: TebraSyncRequest = TebraSyncRequest()):
         except Exception as e:
             _slog(f"tebra/sync failed to start execution logging: {e!r}")
         try:
-            result = _run_sync()
+            result = _run_sync(execution_id)
             if execution_id:
                 finish_execution(execution_id, success=True, response=result)
             _slog(f"tebra/sync done: {result}")
@@ -163,7 +180,7 @@ def trigger_sync(request: TebraSyncRequest = TebraSyncRequest()):
 
         _slog(f"tebra/sync background req_id={req_id} starting")
         try:
-            result = _run_sync()
+            result = _run_sync(execution_id or req_id)
             if execution_id:
                 finish_execution(execution_id, success=True, response={**result, "request_id": req_id})
             _slog(f"tebra/sync background req_id={req_id} done: {result}")

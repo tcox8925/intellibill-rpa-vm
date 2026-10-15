@@ -132,23 +132,29 @@ def describe_exception(exc: BaseException) -> str:
 
 
 def start_execution(job_setting: str, response: dict | None = None,
-                    execution_id: str | None = None) -> str:
+                    execution_id: str | None = None, trigger_type: str = "automated",
+                    triggered_by_user_id: str | None = None) -> str:
     """Insert a new cron_job_executions row (status='started') and return its id.
 
     execution_id, if given, becomes the row's primary key (see
     new_execution_id); otherwise the DB generates one. The owning process
-    (host/pid) is recorded under response["worker"]."""
+    (host/pid) is recorded under response["worker"].
+
+    trigger_type is 'automated' for a scheduled run or 'manual' for one a
+    user started (triggered_by_user_id = that user's users.id)."""
     cron_job_id = _get_cron_job_id(job_setting)
     conn = _get_connection()
     try:
         cur = conn.cursor()
         cur.execute(
             """
-            INSERT INTO "EDI_Tebra".cron_job_executions (id, cron_job_id, status, response)
-            VALUES (COALESCE(%s::uuid, gen_random_uuid()), %s, 'started', %s)
+            INSERT INTO "EDI_Tebra".cron_job_executions
+                (id, cron_job_id, status, response, trigger_type, triggered_by_user_id)
+            VALUES (COALESCE(%s::uuid, gen_random_uuid()), %s, 'started', %s, %s, %s::uuid)
             RETURNING id
             """,
-            (execution_id, cron_job_id, _json_or_none({**(response or {}), "worker": _WORKER})),
+            (execution_id, cron_job_id, _json_or_none({**(response or {}), "worker": _WORKER}),
+             trigger_type, triggered_by_user_id or None),
         )
         new_id = cur.fetchone()[0]
         conn.commit()

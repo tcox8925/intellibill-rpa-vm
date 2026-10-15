@@ -34,7 +34,7 @@ import time
 import uuid
 from dataclasses import asdict
 from datetime import datetime
-from typing import Optional
+from typing import Literal, Optional
 from zoneinfo import ZoneInfo
 
 from fastapi import FastAPI, HTTPException
@@ -79,7 +79,8 @@ try:
     )
 except ImportError:
     def start_execution(job_setting: str, response: dict | None = None,
-                        execution_id: str | None = None) -> str:
+                        execution_id: str | None = None, trigger_type: str = "automated",
+                        triggered_by_user_id: str | None = None) -> str:
         return ""
 
     def finish_execution(execution_id: str, success: bool, error_description: str | None = None, response: dict | None = None) -> bool:
@@ -456,7 +457,9 @@ def _dispatch_browser_job(wait_for_completion: bool, job_name: str, callback,
     return JSONResponse(status_code=202, content={"status": "started", "job_id": job_id})
 
 
-def _start_logged_execution(job_setting: str, job_name: str, request_params: dict) -> str:
+def _start_logged_execution(job_setting: str, job_name: str, request_params: dict,
+                            trigger_type: str = "automated",
+                            triggered_by_user_id: str | None = None) -> str:
     """Insert this run's cron_job_executions row (status='started') before the
     endpoint returns, and return its id -- which becomes the job_id handed
     back to the caller.
@@ -469,7 +472,8 @@ def _start_logged_execution(job_setting: str, job_name: str, request_params: dic
     execution_id = new_execution_id()
     try:
         return start_execution(job_setting, response={"request": request_params},
-                               execution_id=execution_id) or execution_id
+                               execution_id=execution_id, trigger_type=trigger_type,
+                               triggered_by_user_id=triggered_by_user_id) or execution_id
     except Exception as exc:
         _slog(f"{job_name} refused: could not record execution start: {exc!r}")
         raise HTTPException(
@@ -858,7 +862,12 @@ class AppointmentsByDateRequestSlim(BaseModel):
     "walk-in") applied to each row's appointment_type after the full
     date-range scrape -- PF's Schedule view has no server-side type filter,
     so this only trims what's returned/synced, not what's scraped. Blank
-    (default) returns every type."""
+    (default) returns every type.
+
+    trigger_type / triggered_by_user_id: written to the run's
+    cron_job_executions row -- "automated" (default) for the scheduled pull,
+    "manual" plus the user's users.id when a user started it (Smart Charge's
+    refresh)."""
 
     report_date: str = ""
     start_date: str = ""
@@ -868,6 +877,8 @@ class AppointmentsByDateRequestSlim(BaseModel):
     update_appointments: bool = False
     clean_and_insert: bool = False
     appointment_type: str = ""
+    trigger_type: Literal["automated", "manual"] = "automated"
+    triggered_by_user_id: Optional[str] = None
 
 
 # ---------------------------------------------------------------------------
@@ -1236,7 +1247,8 @@ def sync_schedules_by_date_endpoint(request: SyncSchedulesByDateRequestSlim):
         # process, entirely independent of the Eligibility Report -- reused via
         # cli.run_sync_schedules_by_date, not reimplemented here.
         return run_tracked(execution_id, lambda: run_sync_schedules_by_date(args),
-                           outcome=_stage_outcome, summarize=lambda result: {"result": result},
+                           outcome=_stage_outcome,
+                           summarize=lambda result: {"report": _facesheet_pull_report(result), "result": result},
                            log=_slog)
 
     return _dispatch_browser_job(request.wait_for_completion, "sync-schedules-by-date", job,
@@ -1268,6 +1280,8 @@ def appointments_by_date_endpoint(request: AppointmentsByDateRequestSlim):
             "appointment_type": request.appointment_type,
             "wait_for_completion": request.wait_for_completion,
         },
+        trigger_type=request.trigger_type,
+        triggered_by_user_id=request.triggered_by_user_id,
     )
 
     def job():
@@ -1324,11 +1338,88 @@ def _appointments_outcome(result):
     return True, None
 
 
+def _facesheet_pull_report(result):
+    """Headline numbers for the PRACTICE_FUSION_FACESHEET_PULL execution row:
+    appointments pulled -> facesheets pulled -> uploaded -> processed, with
+    the per-file reason for anything not processed. Read-only view over the
+    stages dict; the run's success/failure is still judged by _stage_outcome."""
+    result = result if isinstance(result, dict) else {}
+
+    def _stage(name):
+        value = result.get(name)
+        return value if isinstance(value, dict) else {}
+
+    discover, inject = _stage("discover"), _stage("inject_discovered")
+    process, retry = _stage("process"), _stage("process_retry")
+    upload, orphan = _stage("rcm_upload"), _stage("rcm_upload_retry")
+    processing = _stage("pf_facesheet_processing")
+    zips = processing.get("zips") or []
+
+    def _sum(key):
+        return sum(z.get(key, 0) for z in zips)
+
+    # The window actually scraped (resolved by the job -- the request's own
+    # dates are often blank, meaning the rolling default window).
+    start, _, end = str(discover.get("date_range") or "").partition("_to_")
+    visit_dates = sorted({str(f.get("appt_date")) for z in zips for f in z.get("files") or []
+                          if f.get("appt_date")})
+
+    return {
+        "date_range": {"from": start or None, "to": end or None},
+        "visit_dates": visit_dates,
+        "appointments_pulled": discover.get("rows_scraped"),
+        "new_seen_visits_queued": inject.get("synthetic_records_created"),
+        "not_seen_skipped": len(inject.get("not_seen_skipped") or []),
+        "facesheets_pulled": (process.get("processed") or 0) + (retry.get("processed") or 0),
+        "facesheet_pull_not_done": {
+            "failed": retry.get("failed", process.get("failed")),
+            "review": retry.get("review", process.get("review")),
+        },
+        "zip": {
+            "zip_name": upload.get("zip_name"),
+            "pdf_count": upload.get("pdf_count"),
+            "missing_pdfs": len(upload.get("missing_pdfs") or []),
+            "uploaded": upload.get("uploaded"),
+            "note": upload.get("reason") or upload.get("error"),
+        },
+        "orphaned_zips_reuploaded": orphan.get("uploaded"),
+        # processed = data stored in patient_visits (attachments completed +
+        # visit row found), confirmed from the DB -- see pf_facesheet_processor.
+        "facesheets_processed": _sum("processed"),
+        "facesheets_already_processed": _sum("already_processed"),
+        "facesheets_no_manifest_entry": _sum("no_manifest_entry"),
+        "facesheets_not_processed": _sum("not_processed"),
+        "processing_note": processing.get("error") or (
+            None if zips or not processing else "processor ran but this run's ZIP wasn't found in INBOUND"
+        ),
+        "zips": [
+            {
+                "zip": z.get("zip"),
+                "moved_to_processed": z.get("moved_to_processed"),
+                "note": z.get("note"),
+                "processed": [
+                    {k: f.get(k) for k in ("file", "appt_date", "attachment_id", "patient_visit_id",
+                                           "diagnosis_count", "status")}
+                    for f in z.get("files") or [] if f.get("stored")
+                ],
+                "not_processed": [f for f in z.get("files") or [] if not f.get("stored")],
+            }
+            for z in zips
+        ],
+    }
+
+
 def _appointments_execution_summary(result):
     """The jsonb response for the execution row -- counts and per-day
     diagnostics only, not the full appointments list (PHI, and it can be
     hundreds of rows for a wide date range)."""
+    sync = result.get("edi_tebra_sync") or {}
     return {
+        "appointments_pulled": result.get("count"),
+        "appointments_saved": {
+            k: sync.get(k) for k in ("total_appointments", "visits_inserted", "visits_updated",
+                                     "visits_skipped_existing", "row_errors") if k in sync
+        } or None,
         "start_date": result.get("start_date"),
         "end_date": result.get("end_date"),
         "count": result.get("count"),

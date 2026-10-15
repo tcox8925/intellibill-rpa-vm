@@ -152,6 +152,9 @@ def _connect():
         host=host, dbname=dbname, user=user, password=password, sslmode="require",
         connect_timeout=10,
         options="-c statement_timeout=30000 -c idle_in_transaction_session_timeout=30000",
+        # Recorded as patient_audit_history.change_source for the patients
+        # this sync creates, instead of a blank source.
+        application_name="rpa:PF_SC_appointments_pull",
     )
 
 

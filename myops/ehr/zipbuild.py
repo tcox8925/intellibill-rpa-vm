@@ -62,7 +62,16 @@ def _trigger_daily_pdf_processor():
     # ZIP's own claims never get created at all. raise_on_error=True: a
     # failure here must surface as this practice's own failure, not vanish
     # into a print() nobody's watching.
-    server_module._run_daily_pdf_processor_job(blocking=True, raise_on_error=True)
+    return server_module._run_daily_pdf_processor_job(blocking=True, raise_on_error=True)
+
+
+def _claims_for_zip(processor_stats, zip_name):
+    """The processor sweeps every INBOUND folder, not just this ZIP -- pull
+    out only this practice's ZIP entry for its own cron response."""
+    for z in (processor_stats or {}).get("zips") or []:
+        if z.get("zip", "").rsplit("/", 1)[-1] == zip_name:
+            return z
+    return None
 
 
 def get_practice_abbr(practice_name):
@@ -305,6 +314,7 @@ def pass_zip(sel, practice_name, no_upload=False, download_dir=None):
         uploaded_count = 0
         failed_count = 0
         upload_error = None
+        claims = None
         try:
             zip_blob_path = upload_zip_to_rcm_sftp(
                 zip_path,
@@ -312,7 +322,7 @@ def pass_zip(sel, practice_name, no_upload=False, download_dir=None):
                 sel.folder_structure,
             )
             uploaded_count = 1
-            _trigger_daily_pdf_processor()
+            claims = _claims_for_zip(_trigger_daily_pdf_processor(), zip_name)
         except Exception as e:
             failed_count = 1
             upload_error = str(e)
@@ -362,6 +372,9 @@ def pass_zip(sel, practice_name, no_upload=False, download_dir=None):
             "blob_path": zip_blob_path,
             "zip_name": zip_name,
             "upload_error": upload_error,
+            "facesheets_zipped": len(unique_pdfs),
+            "missing_pdfs": len(missing_pdf_files),
+            "claims": claims,
         }
     finally:
         cur.close()

@@ -713,7 +713,9 @@ def process_coverage(
     )
 
 
-def run_load_patient_coverages() -> int:
+def run_load_patient_coverages(audit_source: str | None = None) -> int:
+    """audit_source labels this run's DB connections - see
+    utils/patient_audit_counts.py."""
     if not os.path.exists(PATIENTS_JSON_PATH):
         raise FileNotFoundError(f"File not found: {PATIENTS_JSON_PATH}")
 
@@ -725,7 +727,7 @@ def run_load_patient_coverages() -> int:
     print(f"📄 Found {len(patients)} patients")
     print("⏳ Processing coverage records...")
 
-    engine = get_engine()
+    engine = get_engine(audit_source)
     processed = 0
     skipped_unresolved = 0
 
