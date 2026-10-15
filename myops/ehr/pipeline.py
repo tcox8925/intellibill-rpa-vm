@@ -207,6 +207,8 @@ def run(sel: WorkSelector, scrape_patients=None, no_upload=False, skip_appointme
     skipped_details = {}
     completed, failed = [], []
     failed_details = {}
+    # Per practice: facesheets pulled/zipped, claims created, DCNs.
+    practice_results = {}
     for requested_practice in practices:
         _log(f"Practice start name={requested_practice}")
         practice_clock = time.monotonic()
@@ -280,6 +282,10 @@ def run(sel: WorkSelector, scrape_patients=None, no_upload=False, skip_appointme
                 phase_clock = time.monotonic()
                 zip_result = pass_zip(psel, practice, no_upload=no_upload, download_dir=practice_dir)  # one ZIP incl. charge_data
                 zip_result = zip_result or {}
+                practice_results[practice] = {
+                    "date_range": {"from": str(from_date), "to": str(to_date)},
+                    **_facesheet_claim_report(zip_result),
+                }
                 _log(
                     f"Practice={practice} zip/upload pass done elapsed={time.monotonic() - phase_clock:.1f}s "
                     f"attempted={zip_result.get('attempted_count', 0)} "
@@ -327,13 +333,59 @@ def run(sel: WorkSelector, scrape_patients=None, no_upload=False, skip_appointme
         f"elapsed={time.monotonic() - run_clock:.1f}s"
     )
     return {
+        # The dates actually pulled (daily = lookback window through today),
+        # not just whatever the request sent.
+        "date_range": {"mode": sel.mode, "from": str(_window(sel)[0]), "to": str(_window(sel)[1])},
         "practices": practices,
         "completed": completed,
         "failed": failed,
         "skipped": skipped,
         "skipped_details": skipped_details,
         "failed_details": failed_details,
+        "practice_results": practice_results,
     }
+
+
+def _facesheet_claim_report(zip_result):
+    """Facesheets pulled -> processed -> claims (with DCNs) for one practice,
+    shaped for the cron_job_executions response."""
+    claims = zip_result.get("claims")
+    report = {
+        "facesheets_pulled": zip_result.get("facesheets_zipped", 0),
+        "missing_pdfs": zip_result.get("missing_pdfs", 0),
+        "zip_name": zip_result.get("zip_name"),
+        "zip_uploaded": bool(zip_result.get("uploaded_count")),
+    }
+    if not claims:
+        report["claims_note"] = (
+            "No facesheets to process" if not zip_result.get("zip_name")
+            else "Processor result for this ZIP not found (already handled by another run, or processor failed)"
+        )
+        return report
+    files = claims.get("files") or []
+    report.update({
+        "processed": claims.get("uploaded_now", 0) + claims.get("duplicates", 0),
+        "duplicates": claims.get("duplicates", 0),
+        "claims_created": claims.get("claims_confirmed", 0),
+        "claims_not_created": claims.get("unconfirmed", 0),
+        "exhausted": claims.get("exhausted", 0),
+        "zip_moved_to_processed": claims.get("moved_to_processed"),
+        "zip_note": claims.get("note"),
+        # claim_id / dcn straight from "EDI_Tebra".claim_header
+        "claims": [
+            {"appt_id": f["appt_id"], "appt_date": f.get("appt_date"), "file": f["file"],
+             "claim_id": f["claim_id"], "dcn": f["dcn"], "claim_status": f.get("claim_status"),
+             "duplicate": f["status"] == "duplicate"}
+            for f in files if f.get("claim_confirmed")
+        ],
+        "not_created": [
+            {"appt_id": f["appt_id"], "appt_date": f.get("appt_date"), "file": f["file"],
+             "status": f["status"], "error": f.get("error")}
+            for f in files if not f.get("claim_confirmed")
+        ],
+        "visit_dates": sorted({str(f["appt_date"]) for f in files if f.get("appt_date")}),
+    })
+    return report
 
 
 def _log_run(sel, run_start):

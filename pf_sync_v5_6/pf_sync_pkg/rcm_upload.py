@@ -76,7 +76,7 @@ def _trigger_pf_facesheet_processor():
             "facesheet processor (expected when pf_sync_v5_6 is run standalone, "
             "outside the combined server.py)"
         )
-    server_module._run_pf_facesheet_processor_job(blocking=True, raise_on_error=True)
+    return server_module._run_pf_facesheet_processor_job(blocking=True, raise_on_error=True)
 
 
 # Confirmed live 2026-09-17: calling _trigger_pf_facesheet_processor() directly
@@ -100,11 +100,16 @@ def _trigger_pf_facesheet_processor():
 # standalone zip-upload command call run_pending_pf_facesheet_trigger() once
 # Chrome has fully closed.
 _pending_pf_facesheet_trigger = False
+# ZIPs uploaded this run, so the processor's per-ZIP results (it sweeps the
+# whole INBOUND folder) can be narrowed to just this run's own ZIPs.
+_pending_pf_zip_names: list = []
 
 
-def _mark_pf_facesheet_trigger_pending() -> None:
+def _mark_pf_facesheet_trigger_pending(zip_name: str | None = None) -> None:
     global _pending_pf_facesheet_trigger
     _pending_pf_facesheet_trigger = True
+    if zip_name:
+        _pending_pf_zip_names.append(zip_name)
 
 
 def run_pending_pf_facesheet_trigger() -> dict | None:
@@ -119,9 +124,15 @@ def run_pending_pf_facesheet_trigger() -> dict | None:
     if not _pending_pf_facesheet_trigger:
         return None
     _pending_pf_facesheet_trigger = False
+    zip_names = set(_pending_pf_zip_names)
+    _pending_pf_zip_names.clear()
     try:
-        _trigger_pf_facesheet_processor()
-        return {"triggered": True}
+        stats = _trigger_pf_facesheet_processor() or {}
+        return {
+            "triggered": True,
+            "zips": [z for z in stats.get("zips") or []
+                     if z.get("zip", "").rsplit("/", 1)[-1] in zip_names],
+        }
     except Exception as exc:
         error = f"{type(exc).__name__}: {exc}"
         print(f"[RCM-UPLOAD] PF facesheet processing FAILED (deferred trigger): {error}", flush=True)
@@ -296,7 +307,7 @@ def retry_orphaned_zips(
         details.append(detail)
         # Deferred, not called directly -- see run_pending_pf_facesheet_trigger's
         # docstring for why this must wait until Chrome has fully closed.
-        _mark_pf_facesheet_trigger_pending()
+        _mark_pf_facesheet_trigger_pending(zip_name)
         local_paths = [str(directory / name) for name in pdf_names] + [str(zip_path)]
         cleanup = _delete_local_files(local_paths)
         if cleanup["errors"]:
@@ -494,7 +505,7 @@ def build_and_upload_zip(
 
     # Deferred, not called directly -- see run_pending_pf_facesheet_trigger's
     # docstring for why this must wait until Chrome has fully closed.
-    _mark_pf_facesheet_trigger_pending()
+    _mark_pf_facesheet_trigger_pending(zip_name)
 
     if delete_local_after_upload:
         # manifest_path (the appointments_*.json this function reads its

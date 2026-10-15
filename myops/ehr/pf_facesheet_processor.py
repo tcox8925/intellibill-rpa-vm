@@ -24,6 +24,7 @@ import io
 import json
 import zipfile
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime
 
 import requests
 from azure.storage.blob import BlobPrefix, BlobServiceClient
@@ -61,7 +62,7 @@ def run_daily_practice_fusion_pdf_processor(log, restore_mode=False):
         container = _get_container(log)
         inbound_prefix = _build_pf_inbound_prefix()
 
-        stats = {"total": 0, "processed": 0, "skipped": 0, "failed": 0}
+        stats = {"total": 0, "processed": 0, "skipped": 0, "failed": 0, "zips": []}
 
         if restore_mode:
             log("🔄 Running in RESTORE MODE")
@@ -148,6 +149,7 @@ def _process_zip_blob(container, blob_name, session, stats, log):
 
     pdf_names = [n for n in zf.namelist() if n.lower().endswith(".pdf")]
     log(f"📄 Found {len(pdf_names)} PDFs")
+    zip_files = []
 
     for i in range(0, len(pdf_names), BATCH_SIZE):
         batch = pdf_names[i : i + BATCH_SIZE]
@@ -160,7 +162,8 @@ def _process_zip_blob(container, blob_name, session, stats, log):
                 pool.map(lambda name: _process_pdf(zf, name, session, log, pdf_metadata_map.get(name)), batch)
             )
 
-        for result in results:
+        for name, result in zip(batch, results):
+            zip_files.append(_file_record(name, result, pdf_metadata_map.get(name)))
             for bucket in (stats, batch_stats, zip_stats):
                 bucket["total"] += 1
 
@@ -184,12 +187,165 @@ def _process_zip_blob(container, blob_name, session, stats, log):
         f"Failed: {zip_stats['failed']}, Total: {zip_stats['total']})"
     )
 
-    if zip_stats["processed"] + zip_stats["skipped"] == len(pdf_names):
-        log(f"✅ All PDFs in {blob_name} processed or skipped - moving ZIP to processed folder")
+    # "Processed" = the extracted data is actually stored: the facesheet's
+    # attachments row is completed AND its patient_visits row exists
+    # (intellibill's processPfFacesheet writes both in one transaction).
+    # An OK from processFacesheet alone isn't proof, so confirm from the DB
+    # and only move the ZIP once every PDF is stored. A PDF with no manifest
+    # entry is never sent to the backend, so it can't hold the ZIP back.
+    lookup_error = None
+    try:
+        stored = _lookup_stored_facesheets([f["attachment_id"] for f in zip_files if f.get("attachment_id")])
+    except Exception as err:
+        stored, lookup_error = {}, f"attachments/patient_visits lookup failed: {err}"
+        log(f"❌ {blob_name} {lookup_error}")
+
+    not_stored = 0
+    for f in zip_files:
+        row = stored.get(f.get("attachment_id"))
+        if row and row["completed"] and row["patient_visit_id"]:
+            f["stored"] = True
+            f["patient_visit_id"] = row["patient_visit_id"]
+            f["diagnosis_count"] = row["diagnosis_count"]
+            f.pop("reason", None)
+            continue
+        f["stored"] = False
+        if row and row["failure"]:
+            f["reason"] = row["failure"]
+        elif row and row["completed"]:
+            f["reason"] = "attachment completed but no patient_visits row for this patient/appt_date"
+        elif row:
+            f["reason"] = f"attachment processing_status={row['processing_status']}"
+        elif f["status"] == "no_manifest_entry":
+            f["reason"] = "no manifest entry / appt_date in ZIP metadata (never sent to backend)"
+        elif not f.get("reason"):
+            f["reason"] = "no attachments row for this facesheet"
+        if f["status"] != "no_manifest_entry":
+            not_stored += 1
+
+    moved, move_note = False, None
+    if lookup_error:
+        move_note = f"kept in INBOUND: {lookup_error}"
+    elif not_stored == 0 and len(zip_files) == len(pdf_names):
+        log(f"✅ All PDFs in {blob_name} stored in patient_visits - moving ZIP to processed folder")
         try:
             _move_zip_to_processed(container, blob_name, buffer, log)
+            moved = True
         except Exception as err:
+            move_note = f"move failed: {err}"
             log(f"❌ Failed to move ZIP to processed folder for {blob_name}: {err}")
+    else:
+        move_note = f"kept in INBOUND: {not_stored} PDF(s) not stored in patient_visits (rechecked next run)"
+    if move_note:
+        log(f"⏸️ {blob_name} {move_note}")
+
+    # Per-ZIP breakdown for the PRACTICE_FUSION_FACESHEET_PULL cron response.
+    # Keys deliberately avoid "failed"/"error" so pf_sync_v5_6/server.py's
+    # _find_stage_failures keeps judging the run exactly as before.
+    stats["zips"].append({
+        "zip": blob_name,
+        "pdfs": len(pdf_names),
+        "processed": sum(1 for f in zip_files if f["stored"]),
+        "already_processed": sum(1 for f in zip_files if f["status"] == "already_processed" and f["stored"]),
+        "no_manifest_entry": sum(1 for f in zip_files if f["status"] == "no_manifest_entry"),
+        "not_processed": not_stored,
+        "moved_to_processed": moved,
+        "note": move_note,
+        "files": zip_files,
+    })
+
+
+def _parse_appt_date(value):
+    text = str(value or "").strip()
+    for fmt in ("%Y-%m-%d", "%m/%d/%Y", "%m-%d-%Y"):
+        try:
+            return datetime.strptime(text[:10], fmt).date()
+        except ValueError:
+            continue
+    return None
+
+
+def _lookup_stored_facesheets(attachment_ids):
+    """{attachment_id: {completed, processing_status, failure, patient_visit_id,
+    diagnosis_count}} from "EDI_Tebra".attachments + patient_visits, matched the
+    same way intellibill does (backfillMissingPfFacesheetPatientVisits.ts):
+    patient_visits.patient_header_id = attachments.associated_patient_header_id
+    AND patient_visits.appt_date = the manifest's appt_date."""
+    from .pdf_processor import _rcm_connection
+
+    ids = sorted({int(a) for a in attachment_ids if a})
+    if not ids:
+        return {}
+    conn = _rcm_connection()
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            """
+            SELECT id, processing_status, processed, associated_patient_header_id,
+                   json_manifest_entry->>'appt_date', claim_creation_response
+            FROM "EDI_Tebra".attachments
+            WHERE id = ANY(%s)
+              AND attachment_type = 'Facesheet' AND upload_source = 'practice_fusion'
+            """,
+            (ids,),
+        )
+        attachments = cur.fetchall()
+        header_ids = sorted({str(r[3]) for r in attachments if r[3]})
+        visits = {}
+        if header_ids:
+            cur.execute(
+                """
+                SELECT patient_header_id, appt_date, id, COALESCE(jsonb_array_length(visit_diagnosis), 0)
+                FROM "EDI_Tebra".patient_visits
+                WHERE patient_header_id = ANY(%s::uuid[])
+                ORDER BY created_at DESC NULLS LAST
+                """,
+                (header_ids,),
+            )
+            for header_id, appt_date, visit_id, dx_count in cur.fetchall():
+                visits.setdefault((str(header_id), appt_date), (str(visit_id), dx_count))
+    finally:
+        conn.close()
+
+    out = {}
+    for att_id, status, processed, header_id, appt_date, response in attachments:
+        visit = visits.get((str(header_id), _parse_appt_date(appt_date))) if header_id else None
+        failure = None
+        if status == "failed" and isinstance(response, dict):
+            failure = f"{response.get('stage')}: {response.get('error')}"
+        out[att_id] = {
+            "completed": status == "completed" or processed is True,
+            "processing_status": status,
+            "failure": failure,
+            "patient_visit_id": visit[0] if visit else None,
+            "diagnosis_count": visit[1] if visit else None,
+        }
+    return out
+
+
+def _file_record(file_name, result, manifest_entry):
+    code = result.get("errorCode")
+    if result.get("success"):
+        status = "processed"
+    elif code == ALREADY_PROCESSED:
+        status = "already_processed"
+    elif code == NO_MANIFEST_ENTRY:
+        status = "no_manifest_entry"
+    elif code == SKIPPED:
+        status = "skipped_by_backend"
+    else:
+        status = "not_processed"
+    rec = {
+        "file": file_name,
+        "patient_name": (manifest_entry or {}).get("patient_name"),
+        "appt_date": (manifest_entry or {}).get("appt_date"),
+        "status": status,
+        "attachment_id": result.get("attachmentId"),
+    }
+    reason = result.get("reason") or result.get("error")
+    if reason:
+        rec["reason"] = reason
+    return rec
 
 
 def _process_blob_prefix(container, prefix, session, stats, log):
@@ -237,15 +393,19 @@ def _process_pdf(zf, file_name, session, log, manifest_entry):
         result = _call_facesheet_processing_api(log, buffer, file_name, session, manifest_entry)
 
         status = result.get("status")
+        # attachmentId: the "EDI_Tebra".attachments row the backend staged for
+        # this facesheet -- used afterwards to confirm the data was stored.
+        attachment_id = result.get("attachmentId")
         if status == "applied":
             log(f"✅ File applied: {file_name} (patient_id: {manifest_entry.get('patient_id')})")
-            return {"success": True}
+            return {"success": True, "attachmentId": attachment_id}
         if status == "already_processed":
             log(f"⏭️ Already processed: {file_name}")
-            return {"success": False, "errorCode": ALREADY_PROCESSED}
+            return {"success": False, "errorCode": ALREADY_PROCESSED, "attachmentId": attachment_id}
         if status == "skipped":
             log(f"⏭️ Skipped by backend: {file_name} (reason: {result.get('reason')})")
-            return {"success": False, "errorCode": SKIPPED, "reason": result.get("reason")}
+            return {"success": False, "errorCode": SKIPPED, "reason": result.get("reason"),
+                    "attachmentId": attachment_id}
 
         raise RuntimeError(f"Unexpected facesheet processing API response: {result}")
     except Exception as err:

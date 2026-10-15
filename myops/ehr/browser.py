@@ -192,7 +192,31 @@ def wait_for_grid_settled(page, timeout_ms=60_000, max_retries=3):
                 page.reload(wait_until="domcontentloaded")
                 page.wait_for_timeout(2000)
             else:
+                _save_grid_timeout_evidence(page)
                 raise
+
+
+def _save_grid_timeout_evidence(page):
+    """Grid timeouts only reproduce on the VM (headless, scheduled, different
+    network), never locally -- so keep a screenshot + visible text of what
+    the page actually showed, under EHR_DOWNLOAD_DIR/grid_timeouts/. Never
+    raises; the original timeout is what the caller re-raises."""
+    try:
+        import os
+        from datetime import datetime
+        from .config import DOWNLOAD_DIR
+
+        folder = os.path.join(DOWNLOAD_DIR or ".", "grid_timeouts")
+        os.makedirs(folder, exist_ok=True)
+        stem = os.path.join(folder, datetime.now().strftime("%Y%m%d_%H%M%S"))
+        page.screenshot(path=f"{stem}.png", full_page=True)
+        viewport = page.viewport_size or page.evaluate("() => ({width: innerWidth, height: innerHeight})")
+        body_text = page.evaluate("() => document.body ? document.body.innerText.slice(0, 4000) : ''")
+        with open(f"{stem}.txt", "w", encoding="utf-8") as fh:
+            fh.write(f"url: {page.url}\nviewport: {viewport}\n\n{body_text}")
+        print(f"[GRID] Saved timeout evidence: {stem}.png / .txt (viewport={viewport})")
+    except Exception as e:
+        print(f"[GRID] Could not save timeout evidence: {e!r}")
 
 
 def apply_date_filter(page, from_date, to_date):
