@@ -77,7 +77,12 @@ try:
         run_tracked,
         start_execution,
     )
+    # A real cron_job_executions row backs every execution id -- only then
+    # can a run's id go on attachments rows (it's a foreign key).
+    _EXECUTIONS_LOGGED = True
 except ImportError:
+    _EXECUTIONS_LOGGED = False
+
     def start_execution(job_setting: str, response: dict | None = None,
                         execution_id: str | None = None, trigger_type: str = "automated",
                         triggered_by_user_id: str | None = None) -> str:
@@ -1241,6 +1246,9 @@ def sync_schedules_by_date_endpoint(request: SyncSchedulesByDateRequestSlim):
             "wait_for_completion": request.wait_for_completion,
         },
     )
+    # Into this run's ZIP metadata (build_and_upload_zip), and from there onto
+    # every facesheet's attachments row.
+    args.cron_job_execution_id = execution_id if _EXECUTIONS_LOGGED else None
 
     def job():
         # Schedule scrape -> Seen-status filter -> inject synthetic record ->

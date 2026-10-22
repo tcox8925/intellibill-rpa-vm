@@ -44,6 +44,12 @@ RESTRICTED_FOLDERS = {"archived", "processed", "deleted"}
 EXCLUDED_FOLDER_STRUCTURES = ["1553326257-1553326257001"]
 MAX_RETRIES = 3
 BATCH_SIZE = 3
+# A PDF whose upload or claim creation failed is re-uploaded this many more
+# times before the next batch starts; still failing after that, it's recorded
+# as failed (retry_count + 1) and picked up again by the next run.
+IN_RUN_RETRIES = 3
+# How long one batch waits on the backend's background claim creation.
+BATCH_CLAIM_WAIT_SECONDS = 300
 
 DUPLICATE_FILE = "DUPLICATE_FILE"
 EXHAUSTED = "EXHAUSTED"
@@ -104,14 +110,26 @@ def _login(log):
 def _fetch_practice_groups(log, session):
     url = f"{BACKEND_API_URL}/api/trpc/affiliation.getGroupsAsPracticesForPullingFaceSheets"
     res = session.get(url, timeout=REQUEST_TIMEOUT)
-    groups = _extract_trpc_data(res.json())
+    # {practices, failed, counts} - one entry per active Tebra Facesheet Pull
+    # cron job (Performance > Processes); `failed` are active jobs whose
+    # client / group can't be pulled (e.g. client disabled), with the reason.
+    data = _extract_trpc_data(res.json())
+    groups = data.get("practices") if isinstance(data, dict) else None
+    failed = data.get("failed") if isinstance(data, dict) else None
 
-    if not isinstance(groups, list):
+    if not isinstance(groups, list) or not isinstance(failed, list):
         raise RuntimeError("Groups API returned an unexpected response shape")
+
+    for f in failed:
+        log(
+            f"⚠️ Not processing {f.get('jobName')} "
+            f"({f.get('clientName') or f.get('clientId')} / {f.get('groupName') or f.get('groupId')}): {f.get('reason')}"
+        )
 
     normalized = []
     for g in groups:
         entry = {
+            "cronJobId": str(g.get("cronJobId") or "").strip(),
             "groupName": str(g.get("groupName") or "").strip(),
             "entity": str(g.get("entity") or "").strip(),
             "subEntity": str(g.get("subEntity") or "").strip(),
@@ -175,7 +193,6 @@ def _get_container(log):
 
 def _process_zip_blob(container, blob_name, session, stats, log):
     zip_stats = {"total": 0, "processed": 0, "skipped": 0, "exhausted": 0, "failed": 0}
-    failed_rpa_appointment_ids = []
     log(f"\n📁 Processing ZIP: {blob_name}")
 
     buffer = container.download_blob(blob_name).readall()
@@ -198,23 +215,22 @@ def _process_zip_blob(container, blob_name, session, stats, log):
         batch_stats = {"total": 0, "processed": 0, "skipped": 0, "exhausted": 0, "failed": 0}
         log(f"📦 Starting batch {start}-{end}")
 
-        with ThreadPoolExecutor(max_workers=BATCH_SIZE) as pool:
-            results = list(
-                pool.map(
-                    lambda name: _process_pdf(
-                        zf,
-                        name,
-                        blob_name,
-                        session,
-                        log,
-                        failed_rpa_appointment_ids,
-                        pdf_metadata_map.get(name),
-                        zip_metadata,
-                        (zip_metadata or {}).get("practice"),
-                    ),
-                    batch,
-                )
-            )
+        results = _run_batch(
+            batch,
+            lambda name: _process_pdf(
+                zf,
+                name,
+                blob_name,
+                session,
+                log,
+                pdf_metadata_map.get(name),
+                zip_metadata,
+                (zip_metadata or {}).get("practice"),
+            ),
+            session,
+            log,
+            f"{start}-{end}",
+        )
 
         for result in results:
             zip_files.append(_file_record(result))
@@ -250,16 +266,11 @@ def _process_zip_blob(container, blob_name, session, stats, log):
     # (intellibill medicalExtractionRouter.ts), and the ZIP used to move on
     # that OK alone. Confirm each PDF's claim from the DB instead
     # ("EDI_Tebra".attachments.associated_claim_id -> claim_header, the same
-    # link the backend's own duplicate check uses), waiting a bounded time
-    # for background processing to finish, and only move the ZIP once every
-    # PDF has a real claim (or is exhausted).
+    # link the backend's own duplicate check uses), and only move the ZIP
+    # once every PDF has a real claim (or is exhausted). No wait here: every
+    # batch already waited on its own claims (_run_batch).
     appt_ids = [f["appt_id"] for f in zip_files if f.get("appt_id")]
-    # Only wait when this pass actually uploaded something -- an old ZIP
-    # still sitting in INBOUND (re-scanned on every run) shouldn't cost a
-    # full wait each time if its attachment is stuck 'pending' backend-side.
-    claim_rows, lookup_error = _wait_for_claims(
-        appt_ids, log, wait_seconds=CLAIM_CONFIRM_WAIT_SECONDS if zip_stats["processed"] else 0,
-    )
+    claim_rows, lookup_error = _wait_for_claims(appt_ids, log, wait_seconds=0)
 
     unconfirmed = 0
     for f in zip_files:
@@ -338,6 +349,61 @@ CLAIM_CONFIRM_WAIT_SECONDS = 600
 CLAIM_CONFIRM_POLL_SECONDS = 15
 
 
+def _run_batch(batch, process_pdf, session, log, label):
+    """Upload one batch of PDFs, wait for their claims, and re-upload the
+    ones that failed -- up to IN_RUN_RETRIES more times -- before returning,
+    so the next batch only starts once this one is settled. Returns one
+    result per PDF, in batch order.
+
+    Settled: a confirmed claim, a duplicate (the appointment already has a
+    claim), exhausted, or still processing backend-side after the wait --
+    never re-uploaded, since a second upload would race the claim creation
+    already running for that row. Everything else -- an upload error, or
+    claim creation that finished without a claim -- is retried. A PDF still
+    failing after the last retry gets retry_count + 1 (once per run) and is
+    left for the next run."""
+    results = {}
+    pending = list(batch)
+    for attempt in range(IN_RUN_RETRIES + 1):
+        if attempt:
+            log(f"🔁 Batch {label}: retry {attempt}/{IN_RUN_RETRIES} for {len(pending)} PDF(s)")
+        with ThreadPoolExecutor(max_workers=BATCH_SIZE) as pool:
+            attempt_results = dict(zip(pending, pool.map(process_pdf, pending)))
+        results.update(attempt_results)
+
+        uploaded_appt_ids = [r["appt_id"] for r in attempt_results.values() if r.get("success") and r.get("appt_id")]
+        claim_rows, lookup_error = (
+            _wait_for_claims(uploaded_appt_ids, log, wait_seconds=BATCH_CLAIM_WAIT_SECONDS)
+            if uploaded_appt_ids else ({}, None)
+        )
+        if lookup_error:
+            # Can't tell which uploads got a claim -- re-uploading blind could
+            # double them up. The ZIP's own claim check settles it.
+            break
+
+        pending = []
+        for name, result in attempt_results.items():
+            if result.get("errorCode") in (DUPLICATE_FILE, EXHAUSTED):
+                continue
+            if result.get("success"):
+                row = claim_rows.get(str(result.get("appt_id")))
+                if row and (row["claim_id"] or row["processing_status"] in ("pending", "processing")):
+                    continue
+            pending.append(name)
+        if not pending:
+            break
+    else:
+        for name in pending:
+            result = results[name]
+            log(f"❌ {name} still failing after {IN_RUN_RETRIES} retries - recorded as failed, picked up next run")
+            if result.get("retry_count") is not None and result.get("appt_id"):
+                try:
+                    _update_retry_count(log, result["appt_id"], result["retry_count"], session)
+                except Exception as retry_err:
+                    log(f"⚠️ Failed to update retry count for appointment {result['appt_id']}: {retry_err}")
+    return [results[name] for name in batch]
+
+
 def _wait_for_claims(appt_ids, log, wait_seconds=CLAIM_CONFIRM_WAIT_SECONDS):
     """Poll _lookup_claims until no appointment's attachment is still
     pending/processing (or the wait runs out). Returns (rows, lookup_error)."""
@@ -358,8 +424,9 @@ def _wait_for_claims(appt_ids, log, wait_seconds=CLAIM_CONFIRM_WAIT_SECONDS):
 
 def _lookup_claims(appt_ids):
     """{rpa_appointment_id: {attachment_id, processing_status, claim_id, dcn,
-    status, failure_reason}} from the appointment's latest Facesheet
-    attachment (same row/filters as the backend's isDuplicateMedicalFile).
+    status, failure_reason}} from the appointment's main Facesheet
+    attachment - its earliest; later rows are split claims' copies (same
+    row/filters as the backend's isDuplicateMedicalFile).
     The claim is attachments.associated_claim_id; claim_creation_response
     carries the claimId too, or the reason no claim was created."""
     appt_ids = sorted({str(a) for a in appt_ids if a})
@@ -382,7 +449,7 @@ def _lookup_claims(appt_ids):
             WHERE a.attachment_type = 'Facesheet'
               AND a.rpa_appointment_id = ANY(%s)
               AND a.status <> 'TR'
-            ORDER BY a.rpa_appointment_id, a.created_at DESC
+            ORDER BY a.rpa_appointment_id, a.created_at, a.id
             """,
             (appt_ids,),
         )
@@ -402,6 +469,31 @@ def _lookup_claims(appt_ids):
                 "failure_reason": failure,
             }
         return out
+    finally:
+        conn.close()
+
+
+def count_execution_main_claims(execution_id):
+    """How many appointments got a main claim from facesheets this cron job
+    run pulled: attachments.cron_job_execution_id is stamped by the backend
+    on the main claim's facesheet row and copied onto its split claims'
+    rows - counted once per appointment either way."""
+    conn = _rcm_connection()
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            """
+            SELECT COUNT(DISTINCT rpa_appointment_id)
+            FROM "EDI_Tebra".attachments
+            WHERE cron_job_execution_id = %s
+              AND attachment_type = 'Facesheet'
+              AND associated_claim_id IS NOT NULL
+            """,
+            (execution_id,),
+        )
+        count = cur.fetchone()[0]
+        cur.close()
+        return count
     finally:
         conn.close()
 
@@ -457,7 +549,7 @@ def _process_group_inbound_prefixes(container, groups, session, stats, log):
 # ------------------------------------------------------------------------- #
 
 
-def _process_pdf(zf, file_name, blob_name, session, log, failed_rpa_appointment_ids, manifest_entry, zip_metadata, group):
+def _process_pdf(zf, file_name, blob_name, session, log, manifest_entry, zip_metadata, group):
     sftp_file_path = blob_name
     match = re.match(r"^([0-9]+)_", file_name.strip())
     rpa_appointment_id = (manifest_entry or {}).get("appt_id") or (match.group(1) if match else None)
@@ -478,19 +570,13 @@ def _process_pdf(zf, file_name, blob_name, session, log, failed_rpa_appointment_
 
         log(f"✅ File uploaded: {file_name} → claimId={api_data.get('claimId')}")
         return {"success": True, "file": file_name, "appt_id": rpa_appointment_id,
-                "appt_date": (manifest_entry or {}).get("appt_date")}
+                "appt_date": (manifest_entry or {}).get("appt_date"),
+                "retry_count": retry_status["retry_count"]}
     except Exception as err:
         code = getattr(err, "code", None)
         log(f"❌ {file_name} ERROR: {err}")
-
-        if retry_status is not None and code != DUPLICATE_FILE:
-            try:
-                _update_retry_count(log, rpa_appointment_id, retry_status["retry_count"], session)
-                log(f"✅ Retry count for appointment {rpa_appointment_id} updated successfully")
-            except Exception as retry_err:
-                log(f"⚠️ Failed to update retry count for appointment {rpa_appointment_id}: {retry_err}")
-
-        failed_rpa_appointment_ids.append(rpa_appointment_id)
+        # retry_count is bumped once, by _run_batch, only if this PDF is
+        # still failing after its in-run retries.
         return {
             "success": False,
             "file": file_name,
@@ -498,6 +584,7 @@ def _process_pdf(zf, file_name, blob_name, session, log, failed_rpa_appointment_
             "appt_date": (manifest_entry or {}).get("appt_date"),
             "errorCode": code,
             "error": str(err),
+            "retry_count": retry_status["retry_count"] if retry_status is not None else None,
         }
 
 
@@ -560,9 +647,11 @@ def _call_medical_api(log, buffer, file_name, sftp_file_path, session, manifest_
     }
     if manifest_entry:
         payload["manifestEntry"] = _sanitize_nullish(manifest_entry)
-    zip_meta_fields = _sanitize_nullish(
-        {"entityId": (zip_metadata or {}).get("entity"), "subEntityId": (zip_metadata or {}).get("subEntity")}
-    )
+    zip_meta_fields = _sanitize_nullish({
+        "entityId": (zip_metadata or {}).get("entity"),
+        "subEntityId": (zip_metadata or {}).get("subEntity"),
+        "cronJobExecutionId": (zip_metadata or {}).get("cronJobExecutionId"),
+    })
     if zip_meta_fields:
         payload.update(zip_meta_fields)
     if group:
@@ -731,6 +820,7 @@ def _extract_zip_metadata(zf, blob_name, log):
             "subEntity": parsed.get("sub_entity"),
             "ehrName": parsed.get("ehr_name"),
             "practice": parsed.get("practice"),
+            "cronJobExecutionId": parsed.get("cron_job_execution_id"),
             "appointments": parsed.get("appointments") or [],
             "raw": parsed,
         }

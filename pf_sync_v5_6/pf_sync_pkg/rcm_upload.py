@@ -395,6 +395,7 @@ def build_and_upload_zip(
     folder_structure: str = PF_RCM_FOLDER_STRUCTURE,
     no_upload: bool = False,
     delete_local_after_upload: bool = True,
+    cron_job_execution_id: str | None = None,
 ) -> Dict[str, object]:
     """Reads a PF appointments manifest (written by
     pdf_pipeline.write_appointments_metadata_json), zips it together with every
@@ -430,6 +431,13 @@ def build_and_upload_zip(
     records = manifest.get("appointments") or []
     if not records:
         return {"skipped": True, "reason": "manifest has no appointments"}
+
+    # The PRACTICE_FUSION_FACESHEET_PULL run building this ZIP -- carried to
+    # pf_facesheet_processor, which sends it with every PDF so the backend
+    # stamps it on each facesheet's attachments row. None for an orphaned
+    # manifest swept up outside its own run.
+    if cron_job_execution_id:
+        manifest["cron_job_execution_id"] = cron_job_execution_id
 
     unique_pdfs = sorted({r.get("pdf_file", "") for r in records if r.get("pdf_file")})
     missing = [name for name in unique_pdfs if not os.path.exists(os.path.join(downloads_dir, name))]

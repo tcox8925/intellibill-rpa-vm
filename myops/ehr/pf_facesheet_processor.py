@@ -43,6 +43,13 @@ INBOUND_PATH_SUFFIX = "Exchange/Medical Extraction/INBOUND"
 PRACTICE_FUSION_FOLDER_STRUCTURE = "1553326257-1553326257001"
 RESTRICTED_FOLDERS = {"archived", "processed", "deleted"}
 BATCH_SIZE = 3
+# A PDF that failed is re-sent this many more times before the next batch
+# starts; still failing after that, its attachments row stays 'failed' and the
+# ZIP stays in INBOUND, so the next run picks it up again.
+IN_RUN_RETRIES = 3
+# Skip reasons decided purely by the manifest entry itself -- re-sending the
+# same entry can only give the same answer, so these are never retried.
+NON_RETRYABLE_SKIP_REASONS = {"missing_patient_id_or_appt_date", "unparseable_appt_date"}
 
 ALREADY_PROCESSED = "ALREADY_PROCESSED"
 SKIPPED = "SKIPPED"
@@ -157,10 +164,13 @@ def _process_zip_blob(container, blob_name, session, stats, log):
         batch_stats = {"total": 0, "processed": 0, "skipped": 0, "failed": 0}
         log(f"📦 Starting batch {start}-{end}")
 
-        with ThreadPoolExecutor(max_workers=BATCH_SIZE) as pool:
-            results = list(
-                pool.map(lambda name: _process_pdf(zf, name, session, log, pdf_metadata_map.get(name)), batch)
-            )
+        results = _run_batch(
+            batch,
+            lambda name: _process_pdf(zf, name, session, log, pdf_metadata_map.get(name),
+                                      (zip_metadata or {}).get("cronJobExecutionId")),
+            log,
+            f"{start}-{end}",
+        )
 
         for name, result in zip(batch, results):
             zip_files.append(_file_record(name, result, pdf_metadata_map.get(name)))
@@ -255,6 +265,48 @@ def _process_zip_blob(container, blob_name, session, stats, log):
     })
 
 
+def _run_batch(batch, process_pdf, log, label):
+    """Send one batch of PDFs and re-send the ones that failed -- up to
+    IN_RUN_RETRIES more times -- before returning, so the next batch only
+    starts once this one is settled. processFacesheet is synchronous (the
+    visit is stored, or not, by the time it answers), so there's nothing to
+    wait on between attempts. Returns one result per PDF, in batch order.
+
+    Settled: applied, already processed, no manifest entry, or a skip the
+    manifest entry itself decides (NON_RETRYABLE_SKIP_REASONS). Everything
+    else -- an API error, OCR/extraction failure, facility/patient not
+    resolved -- is retried."""
+    results = {}
+    pending = list(batch)
+    for attempt in range(IN_RUN_RETRIES + 1):
+        if attempt:
+            log(f"🔁 Batch {label}: retry {attempt}/{IN_RUN_RETRIES} for {len(pending)} PDF(s)")
+        with ThreadPoolExecutor(max_workers=BATCH_SIZE) as pool:
+            attempt_results = dict(zip(pending, pool.map(process_pdf, pending)))
+        for name, result in attempt_results.items():
+            result["attempts"] = attempt + 1
+        results.update(attempt_results)
+
+        pending = [name for name, result in attempt_results.items() if _should_retry(result)]
+        if not pending:
+            break
+    else:
+        for name in pending:
+            log(f"❌ {name} still not processed after {IN_RUN_RETRIES} retries - left for the next run")
+    return [results[name] for name in batch]
+
+
+def _should_retry(result):
+    if result.get("success"):
+        return False
+    code = result.get("errorCode")
+    if code in (ALREADY_PROCESSED, NO_MANIFEST_ENTRY):
+        return False
+    if code == SKIPPED and result.get("reason") in NON_RETRYABLE_SKIP_REASONS:
+        return False
+    return True
+
+
 def _parse_appt_date(value):
     text = str(value or "").strip()
     for fmt in ("%Y-%m-%d", "%m/%d/%Y", "%m-%d-%Y"):
@@ -341,6 +393,7 @@ def _file_record(file_name, result, manifest_entry):
         "appt_date": (manifest_entry or {}).get("appt_date"),
         "status": status,
         "attachment_id": result.get("attachmentId"),
+        "attempts": result.get("attempts", 1),
     }
     reason = result.get("reason") or result.get("error")
     if reason:
@@ -373,7 +426,7 @@ def _process_blob_prefix(container, prefix, session, stats, log):
 # ------------------------------------------------------------------------- #
 
 
-def _process_pdf(zf, file_name, session, log, manifest_entry):
+def _process_pdf(zf, file_name, session, log, manifest_entry, cron_job_execution_id=None):
     try:
         buffer = zf.read(file_name)
         if not buffer:
@@ -390,7 +443,9 @@ def _process_pdf(zf, file_name, session, log, manifest_entry):
             log(f"⏭️ {file_name} SKIPPED: manifest entry missing appt_date")
             return {"success": False, "errorCode": NO_MANIFEST_ENTRY}
 
-        result = _call_facesheet_processing_api(log, buffer, file_name, session, manifest_entry)
+        result = _call_facesheet_processing_api(
+            log, buffer, file_name, session, manifest_entry, cron_job_execution_id=cron_job_execution_id,
+        )
 
         status = result.get("status")
         # attachmentId: the "EDI_Tebra".attachments row the backend staged for
@@ -419,7 +474,8 @@ def _process_pdf(zf, file_name, session, log, manifest_entry):
 
 
 def _call_facesheet_processing_api(
-    log, buffer, file_name, session, manifest_entry, special_historical_diagnosis_run=False
+    log, buffer, file_name, session, manifest_entry, special_historical_diagnosis_run=False,
+    cron_job_execution_id=None,
 ):
     # Build the manifestEntry explicitly rather than passing the raw parsed
     # object through -- the backend's pfFacesheetManifestEntrySchema declares
@@ -447,6 +503,10 @@ def _call_facesheet_processing_api(
         # existing caller in this file, so normal delivery is unaffected.
         "specialHistoricalDiagnosisRun": special_historical_diagnosis_run,
     }
+    # The PRACTICE_FUSION_FACESHEET_PULL run the ZIP came from -- the backend
+    # stores it on this facesheet's attachments row.
+    if cron_job_execution_id:
+        payload["cronJobExecutionId"] = cron_job_execution_id
 
     res = session.post(
         f"{BACKEND_API_URL}/api/trpc/pfFacesheetProcessing.processFacesheet",
@@ -566,6 +626,7 @@ def _extract_zip_metadata(zf, blob_name, log):
         parsed = json.loads(zf.read(json_entries[0]).decode("utf-8")) or {}
         return {
             "generatedOn": parsed.get("generated_on"),
+            "cronJobExecutionId": parsed.get("cron_job_execution_id"),
             # PF manifest entries: {pdf_file, appt_date, appt_time,
             # patient_name, dob, provider_name, service_location, patient_id}
             # -- no appt_id/facesheet_id/entity/sub_entity/ehr_name, unlike

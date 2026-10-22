@@ -129,7 +129,7 @@ def upload_zip_to_rcm_sftp(local_zip_path, zip_name, folder_structure):
     return blob_path
 
 
-def pass_zip(sel, practice_name, no_upload=False, download_dir=None):
+def pass_zip(sel, practice_name, no_upload=False, download_dir=None, execution_id=None):
     """
     Build ONE ZIP for the selection's processed signed-note appointments and
     deliver it to the mapped client folder inside the configured container. ZIP name uses the
@@ -285,6 +285,10 @@ def pass_zip(sel, practice_name, no_upload=False, download_dir=None):
             "sub_entity": sel.sub_entity,
             "ehr_name": sel.ehr_name,
             "practice": practice_name,
+            # The cron_job_executions run that pulled these facesheets - the
+            # PDF processor sends it with each PDF so the attachment rows
+            # (and their claims) can be counted per run.
+            "cron_job_execution_id": execution_id,
             "appointments": records,
         }
         with open(json_path, "w") as f:
