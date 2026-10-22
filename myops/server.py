@@ -53,7 +53,7 @@ try:
     # anyway in a bare standalone run.
     from cron_execution_log import start_execution, finish_execution, mark_processing
 except ImportError:
-    def start_execution(job_setting: str, response: dict | None = None) -> str:
+    def start_execution(job_setting: str, response: dict | None = None, cron_job_id: str | None = None) -> str:
         return ""
 
     def finish_execution(execution_id: str, success: bool, error_description: str | None = None, response: dict | None = None) -> None:
@@ -75,14 +75,55 @@ def _summary_outcome(summary: dict) -> tuple[bool, str | None]:
     yourself. Returns (success, error_description)."""
     summary = summary or {}
     failed = summary.get("failed") or []
-    # Skipped practices (requested practice not found in Tebra) don't fail
-    # the run, but their reason still goes into error_description so it's
-    # visible without opening the JSON response.
+    # A skipped practice (e.g. the requested practice not found in Tebra)
+    # means nothing was pulled for that client + group - that's a failed
+    # run, not a successful one, with the reason in error_description.
     skipped_details = summary.get("skipped_details") or {}
     skipped_note = "; ".join(
         f"Skipped {practice}: {skipped_details.get(practice, 'no reason recorded')}"
         for practice in (summary.get("skipped") or [])
     ) or None
+    # Per practice: scraped -> pulled -> main claims (pipeline._reconcile).
+    # Any appointment that fell short fails the run, listed with its reason.
+    shortfall_notes, count_notes = [], []
+    for practice, result in (summary.get("practice_results") or {}).items():
+        if not isinstance(result, dict):
+            continue
+        rec = result.get("reconciliation")
+        if not rec:
+            # A summary without a reconciliation (an older run, or the
+            # practice failed before its ZIP) - Dashboard misses only.
+            if result.get("not_found_in_dashboard"):
+                shortfall_notes.append(
+                    f"{practice}: not found on the Dashboard Finished tab, facesheet not pulled: "
+                    + ", ".join(f"{a['appt_id']} {a['patient_name']}" for a in result["not_found_in_dashboard"])
+                )
+            continue
+        claims = "unknown (claims lookup failed)" if rec.get("main_claims") is None else rec["main_claims"]
+        counts = f"{practice}: Scraped {rec['scraped']} · Pulled {rec['pulled']} · Main claims {claims} of {rec['pulled']}"
+        if rec.get("pull_retries"):
+            counts += f" (after {rec['pull_retries']} pull retr{'y' if rec['pull_retries'] == 1 else 'ies'})"
+        parts = []
+        if rec.get("not_pulled"):
+            parts.append(
+                f"Not pulled ({len(rec['not_pulled'])}): "
+                + "; ".join(f"{a['appt_id']} {a['patient_name']} - {a['reason']}" for a in rec["not_pulled"])
+            )
+        if rec.get("no_main_claim"):
+            parts.append(
+                f"Main claim not created ({len(rec['no_main_claim'])}): "
+                + "; ".join(f"{a['appt_id']} {a['patient_name']} - {a['reason']}" for a in rec["no_main_claim"])
+                + ". Will catch up on next run"
+            )
+        if rec.get("claims_lookup_error"):
+            parts.append(f"Claims lookup failed: {rec['claims_lookup_error']}")
+        if parts:
+            shortfall_notes.append(f"{counts}. " + ". ".join(parts))
+        else:
+            count_notes.append(counts)
+    shortfall_note = " | ".join(shortfall_notes) or None
+    if shortfall_note:
+        skipped_note = f"{skipped_note}; {shortfall_note}" if skipped_note else shortfall_note
     if failed:
         # run() already records *why* each practice failed in
         # failed_details ({practice: repr(exception)}) -- surface that
@@ -97,7 +138,10 @@ def _summary_outcome(summary: dict) -> tuple[bool, str | None]:
         if skipped_note:
             reasons = f"{reasons}; {skipped_note}"
         return False, reasons
-    return True, skipped_note
+    if skipped_note:
+        return False, skipped_note
+    # A clean run still records its counts.
+    return True, " | ".join(count_notes) or None
 
 # job_setting value for this job's row in "EDI_Tebra".cron_jobs (already
 # seeded manually) -- every /run-tebra call, across every practice, logs its
@@ -183,6 +227,9 @@ class TebraRequest(BaseModel):
     folder_structure: str | None = None
     wait_for_completion: bool = True
     ehr_name: str | None = None
+    # The cron_jobs row (client + group) this run is for - its execution is
+    # logged under exactly this id. Sent by the Azure DailyPdfLoaderJob.
+    cron_job_id: str | None = None
 
 
 class DailyRequest(BaseModel):
@@ -250,9 +297,10 @@ def run_tebra(request: TebraRequest):
         "sub_entity": sub_entity,
         "start_date": request.start_date,
         "end_date": request.end_date,
+        "cron_job_id": request.cron_job_id,
     }
 
-    def _execute_run():
+    def _execute_run(execution_id=None):
         _slog(f"run-tebra executing req_id={req_id}")
         sel = WorkSelector.backfill(
             start_date=start_dt.date(), end_date=end_dt.date(),
@@ -260,7 +308,9 @@ def run_tebra(request: TebraRequest):
             practice=practice_name,
             folder_structure=request.folder_structure,
         )
-        summary = run(sel, scrape_patients=False)
+        # execution_id travels in the ZIP metadata to every facesheet's
+        # attachment row, so this run's claims can be counted from it.
+        summary = run(sel, scrape_patients=False, execution_id=execution_id)
         _slog(f"run-tebra done req_id={req_id} summary={summary}")
         return summary
 
@@ -278,14 +328,15 @@ def run_tebra(request: TebraRequest):
         # nothing since the INSERT never got a chance to run).
         execution_id = None
         try:
-            execution_id = start_execution(_TEBRA_FACESHEET_PULL_JOB_SETTING, response=_execution_response)
+            execution_id = start_execution(_TEBRA_FACESHEET_PULL_JOB_SETTING, response=_execution_response,
+                                           cron_job_id=request.cron_job_id)
             if execution_id:
                 mark_processing(execution_id)
         except Exception as e:
             _slog(f"run-tebra req_id={req_id} failed to start execution logging: {e!r}")
 
         try:
-            summary = _execute_run()
+            summary = _execute_run(execution_id)
             if execution_id:
                 success, error_description = _summary_outcome(summary)
                 finish_execution(execution_id, success=success, error_description=error_description,
@@ -311,13 +362,14 @@ def run_tebra(request: TebraRequest):
         # hiccup can't take the actual scrape down with it.
         execution_id = None
         try:
-            execution_id = start_execution(_TEBRA_FACESHEET_PULL_JOB_SETTING, response=_execution_response)
+            execution_id = start_execution(_TEBRA_FACESHEET_PULL_JOB_SETTING, response=_execution_response,
+                                           cron_job_id=request.cron_job_id)
             if execution_id:
                 mark_processing(execution_id)
         except Exception as e:
             _slog(f"run-tebra req_id={req_id} failed to start execution logging: {e!r}")
         try:
-            summary = _execute_run()
+            summary = _execute_run(execution_id)
             if execution_id:
                 success, error_description = _summary_outcome(summary)
                 finish_execution(execution_id, success=success, error_description=error_description,

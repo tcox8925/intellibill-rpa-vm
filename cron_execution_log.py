@@ -133,8 +133,15 @@ def describe_exception(exc: BaseException) -> str:
 
 def start_execution(job_setting: str, response: dict | None = None,
                     execution_id: str | None = None, trigger_type: str = "automated",
-                    triggered_by_user_id: str | None = None) -> str:
+                    triggered_by_user_id: str | None = None,
+                    cron_job_id: str | None = None) -> str:
     """Insert a new cron_job_executions row (status='started') and return its id.
+
+    cron_job_id, when the caller was triggered for a specific cron_jobs row
+    (one client + group, e.g. /run-tebra's payload), is the row the run is
+    logged under - as-is, no lookup. Without it the row is resolved from
+    job_setting (the first active row for that setting, cached per process),
+    which is only right while a setting has a single active row.
 
     execution_id, if given, becomes the row's primary key (see
     new_execution_id); otherwise the DB generates one. The owning process
@@ -142,7 +149,7 @@ def start_execution(job_setting: str, response: dict | None = None,
 
     trigger_type is 'automated' for a scheduled run or 'manual' for one a
     user started (triggered_by_user_id = that user's users.id)."""
-    cron_job_id = _get_cron_job_id(job_setting)
+    cron_job_id = cron_job_id or _get_cron_job_id(job_setting)
     conn = _get_connection()
     try:
         cur = conn.cursor()

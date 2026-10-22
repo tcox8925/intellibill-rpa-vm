@@ -8,6 +8,7 @@ WorkSelector differs.
 import os
 import threading
 import time
+from dataclasses import replace
 from datetime import date, timedelta
 
 from playwright.sync_api import sync_playwright
@@ -143,7 +144,8 @@ def _window(sel):
 # lifetime itself (not the whole practice's DB/upload work), so at most one
 # Chromium instance runs at a time process-wide while still keeping the
 # per-practice download-dir isolation above.
-def run(sel: WorkSelector, scrape_patients=None, no_upload=False, skip_appointment_scrape=False):
+def run(sel: WorkSelector, scrape_patients=None, no_upload=False, skip_appointment_scrape=False,
+        execution_id=None):
     if not DOWNLOAD_DIR:
         raise RuntimeError(
             "EHR_DOWNLOAD_DIR is empty. Set EHR_DOWNLOAD_DIR in environment or .env "
@@ -217,6 +219,10 @@ def run(sel: WorkSelector, scrape_patients=None, no_upload=False, skip_appointme
         # for logging/error-reporting if login itself fails.
         practice = requested_practice
         practice_dir = None
+        # Seconds per phase, saved on the run's summary (practice_results) so
+        # a slow run shows where its time went without the VM console log.
+        timings = {}
+        notes_not_found = []
 
         # Fresh browser + context PER PRACTICE. Tebra keeps a session logged in
         # to one practice; reusing the browser means the next practice's login
@@ -243,7 +249,8 @@ def run(sel: WorkSelector, scrape_patients=None, no_upload=False, skip_appointme
                 # writes/folder naming stay consistent regardless of how the
                 # caller spelled it.
                 practice = login_and_select_practice(page, requested_practice)
-                _log(f"Practice={practice} login/select done elapsed={time.monotonic() - phase_clock:.1f}s")
+                timings["login"] = round(time.monotonic() - phase_clock, 1)
+                _log(f"Practice={practice} login/select done elapsed={timings['login']}s")
 
                 psel = WorkSelector(
                     mode=sel.mode, practice=practice,
@@ -265,29 +272,49 @@ def run(sel: WorkSelector, scrape_patients=None, no_upload=False, skip_appointme
                 if psel.mode in ("daily", "backfill") and not skip_appointment_scrape:
                     phase_clock = time.monotonic()
                     pass_appointments(page, psel, practice, from_date, to_date)
-                    _log(f"Practice={practice} appointments pass done elapsed={time.monotonic() - phase_clock:.1f}s")
+                    timings["appointments"] = round(time.monotonic() - phase_clock, 1)
+                    _log(f"Practice={practice} appointments pass done elapsed={timings['appointments']}s")
 
                 phase_clock = time.monotonic()
-                pass_notes(page, psel)          # marks signed + records charge_status
-                _log(f"Practice={practice} notes pass done elapsed={time.monotonic() - phase_clock:.1f}s")
+                # marks signed + records charge_status; returns the Checked Out
+                # appointments whose Finished-tab card wasn't found
+                notes_not_found = pass_notes(page, psel) or []
+                timings["notes"] = round(time.monotonic() - phase_clock, 1)
+                _log(f"Practice={practice} notes pass done elapsed={timings['notes']}s "
+                     f"not_found={len(notes_not_found)}")
 
                 phase_clock = time.monotonic()
                 pass_facesheets(page, context, psel, download_dir=practice_dir)   # normal + missed-charges re-download
-                _log(f"Practice={practice} facesheets pass done elapsed={time.monotonic() - phase_clock:.1f}s")
+                timings["facesheets"] = round(time.monotonic() - phase_clock, 1)
+                _log(f"Practice={practice} facesheets pass done elapsed={timings['facesheets']}s")
+
+                phase_clock = time.monotonic()
+                notes_not_found, pull_retries = _retry_unpulled(
+                    page, context, psel, practice, practice_dir, notes_not_found,
+                )
+                if pull_retries:
+                    timings["pull_retries"] = round(time.monotonic() - phase_clock, 1)
 
                 phase_clock = time.monotonic()
                 pass_charges(page, psel)        # VIEW CHARGE -> charge_data
-                _log(f"Practice={practice} charges pass done elapsed={time.monotonic() - phase_clock:.1f}s")
+                timings["charges"] = round(time.monotonic() - phase_clock, 1)
+                _log(f"Practice={practice} charges pass done elapsed={timings['charges']}s")
 
                 phase_clock = time.monotonic()
-                zip_result = pass_zip(psel, practice, no_upload=no_upload, download_dir=practice_dir)  # one ZIP incl. charge_data
+                zip_result = pass_zip(psel, practice, no_upload=no_upload, download_dir=practice_dir,
+                                      execution_id=execution_id)  # one ZIP incl. charge_data
                 zip_result = zip_result or {}
+                # ZIP + upload + the PDF processor's claim creation / wait.
+                timings["zip_upload_and_claims"] = round(time.monotonic() - phase_clock, 1)
                 practice_results[practice] = {
                     "date_range": {"from": str(from_date), "to": str(to_date)},
                     **_facesheet_claim_report(zip_result),
+                    "not_found_in_dashboard": notes_not_found,
+                    "reconciliation": _reconcile(psel, notes_not_found, pull_retries, execution_id),
+                    "timings_seconds": timings,
                 }
                 _log(
-                    f"Practice={practice} zip/upload pass done elapsed={time.monotonic() - phase_clock:.1f}s "
+                    f"Practice={practice} zip/upload pass done elapsed={timings['zip_upload_and_claims']}s "
                     f"attempted={zip_result.get('attempted_count', 0)} "
                     f"uploaded={zip_result.get('uploaded_count', 0)} "
                     f"failed={zip_result.get('failed_count', 0)} "
@@ -301,10 +328,12 @@ def run(sel: WorkSelector, scrape_patients=None, no_upload=False, skip_appointme
 
                 phase_clock = time.monotonic()
                 pass_patient_match(psel, practice, from_date, to_date)
-                _log(f"Practice={practice} patient-match pass done elapsed={time.monotonic() - phase_clock:.1f}s")
+                timings["patient_match"] = round(time.monotonic() - phase_clock, 1)
+                _log(f"Practice={practice} patient-match pass done elapsed={timings['patient_match']}s")
 
                 completed.append(practice)
-                _log(f"Practice success name={practice} elapsed={time.monotonic() - practice_clock:.1f}s")
+                timings["total"] = round(time.monotonic() - practice_clock, 1)
+                _log(f"Practice success name={practice} elapsed={timings['total']}s")
             except PracticeNotFoundError as e:
                 # Practice isn't available to this login -- nothing to
                 # scrape, not a broken run. Skip it with the reason.
@@ -315,6 +344,12 @@ def run(sel: WorkSelector, scrape_patients=None, no_upload=False, skip_appointme
                 _log(f"Practice failed name={practice} error={e!r}")
                 failed.append(practice)
                 failed_details[practice] = repr(e)
+                # Keep how far it got and how long each finished phase took.
+                timings["total"] = round(time.monotonic() - practice_clock, 1)
+                practice_results.setdefault(practice, {}).update({
+                    "not_found_in_dashboard": notes_not_found,
+                    "timings_seconds": timings,
+                })
             finally:
                 try:
                     browser.close()
@@ -344,6 +379,137 @@ def run(sel: WorkSelector, scrape_patients=None, no_upload=False, skip_appointme
         "failed_details": failed_details,
         "practice_results": practice_results,
     }
+
+
+# Extra scrape/pull rounds for signed appointments the first pass didn't
+# pull. Each round only touches those appointments (normal "not yet
+# Processed" gate, never a re-download of pulled ones) and re-reads the
+# Dashboard only when cards were missing, so a clean run costs nothing.
+PULL_RETRY_ROUNDS = 2
+
+
+def _signed_appointments(sel):
+    """Every signed, visit-happened appointment in scope (the facesheets
+    pass's own eligibility, minus the process_status gate), with its pull
+    state: (appt_id, patient_name, appt_date, pulled, reason)."""
+    from .query import scope_clause, _NOT_NO_VISIT
+    where, params = scope_clause(sel)
+    where += ["appt_note IS NOT NULL", _NOT_NO_VISIT]
+    conn = get_ehr_connection()
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            f"""
+            SELECT appt_id, patient_name, appt_date, process_status,
+                   tebra_facesheet_id, process_error_stage, process_error_message
+            FROM {TABLE_NAME}
+            WHERE {' AND '.join(where)}
+            ORDER BY appt_date, appt_id
+            """,
+            params,
+        )
+        rows = cur.fetchall()
+        cur.close()
+    finally:
+        conn.close()
+
+    out = []
+    for appt_id, patient_name, appt_date, status, facesheet_id, stage, message in rows:
+        pulled = status == "Processed" and facesheet_id is not None
+        if pulled:
+            reason = None
+        elif status == "Error":
+            reason = f"{stage or 'pull'}: {message or 'error, no message recorded'}"
+        else:
+            reason = "facesheet not downloaded"
+        out.append((str(appt_id), patient_name, str(appt_date), pulled, reason))
+    return out
+
+
+def _retry_unpulled(page, context, sel, practice, download_dir, notes_not_found):
+    """Up to PULL_RETRY_ROUNDS more notes/facesheets rounds for whatever is
+    still unpulled; stops early once a round recovers nothing. Returns
+    (notes_not_found, rounds_run). Bounded runs only (backfill / target):
+    daily mode has no date bound, so this would retry the whole backlog."""
+    if sel.mode == "daily":
+        return notes_not_found, 0
+    retry_sel = replace(sel, ungated_repull=False)
+    rounds = 0
+    while rounds < PULL_RETRY_ROUNDS:
+        unpulled = [a for a in _signed_appointments(sel) if not a[3]]
+        missing_before = len(unpulled) + len(notes_not_found)
+        if not missing_before:
+            break
+        rounds += 1
+        _log(f"Practice={practice} retry {rounds}/{PULL_RETRY_ROUNDS}: "
+             f"{len(unpulled)} signed not pulled, {len(notes_not_found)} not found on Dashboard")
+        if notes_not_found:
+            notes_not_found = pass_notes(page, retry_sel) or []
+        pass_facesheets(page, context, retry_sel, download_dir=download_dir)
+        missing_after = len([a for a in _signed_appointments(sel) if not a[3]]) + len(notes_not_found)
+        _log(f"Practice={practice} retry {rounds} done: missing {missing_before} -> {missing_after}")
+        if missing_after >= missing_before:
+            break
+    return notes_not_found, rounds
+
+
+def _reconcile(sel, notes_not_found, pull_retries, execution_id):
+    """Scraped -> pulled -> main claims for this run, with the reason for
+    every appointment that fell short. Scraped = signed appointments plus
+    Checked Out ones whose Dashboard card was never found (so never signed
+    here). Claims are main claims only: an appointment counts once it has
+    one, whichever run created it (a re-pull's duplicates included).
+    None for daily mode, whose unbounded scope isn't one run's work."""
+    if sel.mode == "daily":
+        return None
+    signed = _signed_appointments(sel)
+    pulled = [a for a in signed if a[3]]
+    not_pulled = [
+        {"appt_id": a[0], "patient_name": a[1], "appt_date": a[2], "reason": a[4]}
+        for a in signed if not a[3]
+    ] + [
+        {"appt_id": str(a["appt_id"]), "patient_name": a["patient_name"], "appt_date": a["appt_date"],
+         "reason": "not found on the Dashboard Finished tab"}
+        for a in notes_not_found
+    ]
+
+    result = {
+        "scraped": len(signed) + len(notes_not_found),
+        "pulled": len(pulled),
+        "main_claims": None,
+        "main_claims_created_this_run": None,
+        "not_pulled": not_pulled,
+        "no_main_claim": [],
+        "pull_retries": pull_retries,
+    }
+    if not pulled:
+        result["main_claims"] = 0
+        return result
+
+    try:
+        from .pdf_processor import _lookup_claims, count_execution_main_claims
+        claims = _lookup_claims([a[0] for a in pulled])
+        result["main_claims"] = sum(1 for a in pulled if (claims.get(a[0]) or {}).get("claim_id"))
+        for appt_id, patient_name, appt_date, _pulled, _reason in pulled:
+            row = claims.get(appt_id)
+            if row and row["claim_id"]:
+                continue
+            if row and row["failure_reason"]:
+                reason = row["failure_reason"]
+            elif row and row["processing_status"] in ("pending", "processing"):
+                reason = f"claim creation still {row['processing_status']}"
+            elif row:
+                reason = "no claim linked to this facesheet yet"
+            else:
+                reason = "facesheet not uploaded for claim creation"
+            result["no_main_claim"].append(
+                {"appt_id": appt_id, "patient_name": patient_name, "appt_date": appt_date, "reason": reason}
+            )
+        if execution_id:
+            result["main_claims_created_this_run"] = count_execution_main_claims(execution_id)
+    except Exception as e:
+        result["claims_lookup_error"] = repr(e)
+    return result
 
 
 def _facesheet_claim_report(zip_result):

@@ -26,10 +26,50 @@ from .browser import (
 )
 import os
 import re
+import time
 
 CARD_SEL = "[data-testid^='appointment-list-item']"
-MAX_SCROLL_PASSES = 80
+MAX_SCROLL_PASSES = 200  # safety cap only - the read stops on BOTTOM_IDLE_SECONDS
 SIGNED_SENTINEL = "[SIGNED - no note text in drawer]"
+# Wait after each scroll for Tebra to render / load the next cards. The VM is
+# much slower than a laptop here, so this can't be tight.
+SCROLL_SETTLE_MS = 600
+# How long the list must sit at the very bottom with no new card and no
+# growth before it counts as fully read - long enough for a slow VM load of
+# the next batch of cards.
+BOTTOM_IDLE_SECONDS = 8
+
+# Scrolls the Finished list's own scroll container (the nearest ancestor of
+# the cards that actually scrolls, else the page) down by most of one screen
+# - one screen at a time, not straight to the bottom, so a virtualized list
+# renders every card on the way down - and reports whether it is at the
+# bottom. Confirmed live 2026-10-20: the old
+# scroll_into_view_if_needed() on the last loaded card is a no-op whenever
+# that card is already on screen -- always the case at the VM's headless
+# 1920x1080 viewport -- so the list never moved, the lower cards never
+# loaded, and their signed appointments silently weren't pulled that run
+# (4 of 8 for 2026-10-13 on the VM; all 8 later from a laptop).
+_SCROLL_LIST_JS = """
+([sel, toTop]) => {
+  const cards = document.querySelectorAll(sel);
+  if (!cards.length) return null;
+  let el = cards[cards.length - 1].parentElement;
+  while (el && el !== document.body && el !== document.documentElement) {
+    const style = getComputedStyle(el);
+    if (/(auto|scroll|overlay)/.test(style.overflowY) && el.scrollHeight > el.clientHeight + 1) break;
+    el = el.parentElement;
+  }
+  if (!el || el === document.body || el === document.documentElement) {
+    el = document.scrollingElement || document.documentElement;
+  }
+  el.scrollTop = toTop ? 0 : el.scrollTop + Math.max(Math.floor(el.clientHeight * 0.8), 100);
+  return {
+    atBottom: el.scrollTop + el.clientHeight >= el.scrollHeight - 2,
+    scrollHeight: el.scrollHeight,
+    cardCount: cards.length,
+  };
+}
+"""
 
 
 def pass_notes(page, sel):
@@ -41,14 +81,18 @@ def pass_notes(page, sel):
         appointment, whether or not its note is signed
 
     `page` is assumed already logged in and on the target practice.
+
+    Returns the Checked Out appointments whose card wasn't found on the
+    Finished tab (so their facesheets aren't pulled this run).
     """
+    not_found = []
     conn = get_ehr_connection()
     cur = conn.cursor()
     try:
         rows = select_appointments(cur, sel, "notes")
         if not rows:
             print("[NOTES] No appointments need notes. Skipping.")
-            return
+            return not_found
         print(f"[NOTES] {len(rows)} appointments need notes")
 
         # rows columns: id, appt_id, patient_name, dob, appt_status,
@@ -77,6 +121,17 @@ def pass_notes(page, sel):
 
             unsigned = _mark_from_cards(cur, conn, collected, needed)
 
+            # Checked-out appointments with no card at all most likely sit
+            # further down the list than this read reached - re-open the tab
+            # and read the whole list once more before giving up on them.
+            if any(k not in unsigned and v[3] == "Checked Out" for k, v in needed.items()):
+                print(f"[NOTES] {date_str}: checked-out appointment(s) not found - re-reading the Finished tab once")
+                if _open_finished_tab(page, date_str):
+                    unsigned |= _mark_from_cards(cur, conn, _collect_cards(page, date_str), needed)
+                    # A card read unsigned the first time may be signed now
+                    # (marked and dropped from `needed`).
+                    unsigned = {k for k in unsigned if k in needed}
+
             if needed:
                 # `needed` now = matched-but-unsigned + genuinely-absent.
                 absent = {k: v for k, v in needed.items() if k not in unsigned}
@@ -89,8 +144,17 @@ def pass_notes(page, sel):
                 if absent:
                     print(f"[NOTES] {len(absent)} not found in Finished tab for {date_str} "
                           f"(no card — cancelled/no-show/name mismatch):")
-                    for k, (db_id, appt_id, pname, _) in absent.items():
-                        print(f"  - {appt_id} {pname}")
+                    for k, (db_id, appt_id, pname, appt_status) in absent.items():
+                        print(f"  - {appt_id} {pname} ({appt_status})")
+                        # A Checked Out visit belongs on the Finished tab, so
+                        # not finding it means its facesheet isn't pulled this
+                        # run - reported, and fails the run (server.py).
+                        if appt_status == "Checked Out":
+                            not_found.append({
+                                "appt_id": appt_id, "patient_name": pname,
+                                "appt_date": date_str, "appt_status": appt_status,
+                            })
+        return not_found
     finally:
         cur.close()
         conn.close()
@@ -185,9 +249,15 @@ def _collect_cards(page, date_str):
     drawer and resets scroll, stranding lower cards). Collect each card's
     signed flag and charge badge. Returns {name_key: {"signed": bool,
     "charge": str|None}}.
+
+    Reads until the list's scroll container is at the bottom and nothing new
+    has appeared for BOTTOM_IDLE_SECONDS - never on "nothing new" alone,
+    which stopped early while Tebra was still loading lower cards.
     """
     collected = {}
-    stable = 0
+    idle_since = None
+    last_height = None
+    reached_bottom = False
     for _ in range(MAX_SCROLL_PASSES):
         cards = page.locator(CARD_SEL)
         n = cards.count()
@@ -215,18 +285,26 @@ def _collect_cards(page, date_str):
             except Exception as e:
                 print(f"[NOTES ERROR] collect card: {e}")
 
-        stable = stable + 1 if new_this_pass == 0 else 0
-        if stable >= 3:
-            break
-
         try:
-            cards = page.locator(CARD_SEL)
-            cnt = cards.count()
-            if cnt:
-                cards.nth(cnt - 1).scroll_into_view_if_needed(timeout=3_000)
-        except Exception:
-            pass
-        page.wait_for_timeout(300)
+            position = page.evaluate(_SCROLL_LIST_JS, [CARD_SEL, False])
+        except Exception as e:
+            print(f"[NOTES ERROR] scroll list: {e}")
+            position = None
+        at_bottom = bool(position and position["atBottom"])
+        height = position["scrollHeight"] if position else None
+        reached_bottom = reached_bottom or at_bottom
+
+        if new_this_pass == 0 and at_bottom and height == last_height:
+            idle_since = idle_since or time.monotonic()
+        else:
+            idle_since = None
+        last_height = height
+        if idle_since and time.monotonic() - idle_since >= BOTTOM_IDLE_SECONDS:
+            break
+        page.wait_for_timeout(SCROLL_SETTLE_MS)
+    else:
+        print(f"[NOTES] {date_str}: stopped after {MAX_SCROLL_PASSES} scroll passes "
+              f"(bottom reached={reached_bottom})")
 
     print(f"[NOTES] {date_str}: read {len(collected)} finished cards")
     return collected

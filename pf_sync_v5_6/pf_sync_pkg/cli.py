@@ -922,6 +922,7 @@ def run_full_sync_by_date(
             try:
                 stages["rcm_upload"] = build_and_upload_zip(
                     manifest_path, args.downloads_dir, args.practice,
+                    cron_job_execution_id=getattr(args, "cron_job_execution_id", None),
                 )
             except Exception as exc:
                 stages["rcm_upload"] = {"error": f"{type(exc).__name__}: {exc}"}
@@ -1233,6 +1234,7 @@ def run_sync_schedules_by_date(
             try:
                 stages["rcm_upload"] = build_and_upload_zip(
                     manifest_path, args.downloads_dir, args.practice,
+                    cron_job_execution_id=getattr(args, "cron_job_execution_id", None),
                 )
             except Exception as exc:
                 stages["rcm_upload"] = {"error": f"{type(exc).__name__}: {exc}"}
