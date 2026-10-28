@@ -135,14 +135,13 @@ def terminate_end_date(new_start: date, existing_start: date | None = None) -> d
     """End-of-prior-month date an old coverage gets set to when it's
     terminated in favor of a new coverage starting in new_start's month.
 
-    Never earlier than the row's own effective_start_date - both the old
-    and new coverage default to Jan 1 of the current year when their
-    source date is missing/unparseable, so "the day before new_start's
-    month" can land before the old row's own start (e.g. old row starts
-    2026-01-01, this would set its end to 2025-12-31 - an inverted range
+    Never earlier than the row's own effective_start_date - a Tebra
+    coverage with no source start date starts on the 1st of the month it
+    was first seen in, so if it's replaced in that same month, "the day
+    before new_start's month" lands before its own start (an inverted range
     where the row ends before it began). When that would happen, the old
     row is terminated at its own start date instead: it was active for
-    zero days before being replaced, not active in the prior year."""
+    zero days before being replaced."""
     end = first_day_of_month(new_start) - timedelta(days=1)
     if existing_start is not None and end < existing_start:
         return existing_start

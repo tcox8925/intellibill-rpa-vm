@@ -90,9 +90,13 @@ def carrier_type_from_payer_types(payer_type: list | None) -> str:
 
 
 def default_effective_start() -> date:
-    """A missing/unparseable effective_start_date defaults to Jan 1 of the
-    current year, not today's date."""
-    return date(date.today().year, 1, 1)
+    """A missing/unparseable effective_start_date (Patients.json usually has
+    none) defaults to the 1st of the month this sync runs in - when the
+    coverage was first seen. Jan 1 of the year backdated every new or
+    replacement coverage over the whole year, moving claims already billed
+    under the coverage it replaced onto it (terminate_end_date ends that
+    replaced row on the last day of the previous month)."""
+    return date.today().replace(day=1)
 
 
 def fetch_active_payers(session: Session) -> list[tuple]:
